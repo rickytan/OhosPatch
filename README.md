@@ -35,8 +35,9 @@ HarmonyOS 中，`OH_JSVM_CreateVM` 创建的独立 JSVM 与 ArkTS 主 VM 不共�
 4. Native 使用 `napi_load_module_with_info` 从 ArkTS 主 VM 加载目标模块。
 5. 实例方法替换 `constructor.prototype[methodName]`，静态方法替换 `constructor[methodName]`。
 6. 原函数保存为 `napi_ref`，新函数使用 Native trampoline 转入 JSVM。
-7. JS 中调用 `origin.apply(...)` 时，通过保存的 `napi_ref` 回调原 ArkTS 方法。
-8. `clear()` 恢复原型上的原函数并释放引用。
+7. 每次调用建立临时 ArkTS 对象句柄表，JSVM 中的 `this` 是 `Proxy`；属性读取、写入和方法调用同步转发到原 ArkTS 实例。
+8. JS 中调用 `origin.apply(...)` 时，通过保存的 `napi_ref` 回调原 ArkTS 方法，并保留对象返回值的身份。
+9. `clear()` 恢复原型上的原函数并释放引用。
 
 普通 public 方法调用会经过对象属性和原型查找，因此已创建的业务实例也会在替换后进入 patch。
 
@@ -63,6 +64,8 @@ HarmonyOS 中，`OH_JSVM_CreateVM` 创建的独立 JSVM 与 ArkTS 主 VM 不共�
 - `queueMicrotask(callback)`：将回调加入 JSVM microtask 队列。
 
 独立 JSVM 与 ArkTS 主 VM 不共享对象，因此 `require()` 返回的是类描述符，不是 ArkTS Constructor。安装 Hook 时，Native 根据描述符调用 `napi_load_module_with_info`，在主 ArkTS VM 中加载目标模块并取得导出的类。
+
+实例方法和静态方法的 handler 可以使用普通点语法访问原对象，包括多层属性、赋值和方法调用，例如 `this.profile.badge.text`、`this.profile.badge.text = 'fixed'` 和 `this.profile.badge.advance(1)`。嵌套对象不会被复制成 JSON 快照；Native 为其分配本次调用内的句柄，JSVM 返回对应 Proxy。Proxy 只能在当前同步 handler 或 `origin` 调用期间使用，不能保存到 timer、Promise 或全局变量后异步访问。普通参数仍按 JSON 值传入；Proxy 参数和 Proxy 返回值使用句柄 wire 格式保留原 ArkTS 对象身份。
 
 Timer callback 和参数保存在 JSVM 内，Native 仅通过宿主 N-API 的 libuv event loop 调度 timer ID。`clear()`、下一次 `executeScript` 替换 patch 或 JSVM 重置时都会取消旧 timer，避免旧 patch 的异步任务继续执行。
 
@@ -114,7 +117,9 @@ var fix = Fixit.fix({
 
 var origin = fix.instanceMethod('locationOf', function (locations, index, fallback) {
   if (index < 0 || index >= locations.length) {
-    this.buttonTitle = 'out of bounds';
+    this.profile.badge.text = 'out of bounds';
+    this.profile.badge.advance(10);
+    this.buttonTitle = this.profile.summary();
     return fallback;
   }
   return origin.apply(this, arguments);
@@ -230,7 +235,7 @@ hdc rport tcp:8080 tcp:8080
 ## 当前边界
 
 - prototype hook 不覆盖构造函数、实例字段形式的箭头函数、私有实现或不经过属性查找的调用点。
-- ArkTS 与 JSVM 当前使用 JSON 数据桥，不能保留任意对象身份、循环引用、函数或 Native 对象。
+- Patch handler 的 `this` 通过同步 Proxy 桥接，可保留原实例、嵌套对象、方法和循环对象身份；普通方法参数及新建 JS 对象仍受 JSON wire 类型限制，Proxy 不可跨越当前同步调用生命周期。
 - 声明式组件 DSL 首版只支持 API 20 状态管理 V1、业务模块导出的自定义组件、`type + occurrence` 节点选择器、JSON 属性参数和同步事件替换。
 - 非导出的 `@Entry` 页面、状态管理 V2、层级/ID 选择器、资源与控制器类型、已挂载组件的主动刷新，以及 `before/after/around/origin` 事件模式尚未支持。
 - 单个 runtime 最多同时存在 256 个 timer；`setInterval(..., 0)` 会按 1 ms 调度。

@@ -39,7 +39,21 @@ test('JSVM calls own handle scopes and native callbacks have stable storage', as
   assert.match(source, /OH_JSVM_OpenHandleScope\(env_, &scope\).*method patch/s);
   assert.match(source, /OH_JSVM_OpenHandleScope\(env_, &scope\).*clear registry/s);
   assert.match(source, /static JSVM_CallbackStruct originCallback/);
+  assert.match(source, /static JSVM_CallbackStruct proxyGetCallback/);
+  assert.match(source, /static JSVM_CallbackStruct proxySetCallback/);
+  assert.match(source, /static JSVM_CallbackStruct proxyCallCallback/);
   assert.match(source, /static JSVM_CallbackStruct scheduleTimerCallback/);
+});
+
+test('native proxy bridge resolves live ArkTS values without target snapshot writeback', async () => {
+  const source = await readFile(cppUrl, 'utf8');
+
+  assert.match(source, /__ohospatch_proxyGet/);
+  assert.match(source, /__ohospatch_proxySet/);
+  assert.match(source, /__ohospatch_proxyCall/);
+  assert.match(source, /ResolveProxyWireValue/);
+  assert.match(source, /proxyValues\[0\] = receiver/);
+  assert.doesNotMatch(source, /targetJson/);
 });
 
 test('native component adapter covers values, node builders, attributes, and events', async () => {

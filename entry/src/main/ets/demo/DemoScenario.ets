@@ -20,14 +20,14 @@ export class DemoScenario {
 
     try {
       const safePoint = vm.locationOf(points, 2, fallback);
-      rows.push(`Invalid index -> ${Point.textOf(safePoint)}, title=${vm.buttonTitle}`);
+      rows.push(`Invalid index -> ${Point.textOf(safePoint)}, title=${vm.buttonTitle}, proxy=${vm.profile.summary()}`);
     } catch (err) {
       rows.push(`Invalid index -> ${(err as Error).message}`);
     }
 
     try {
       const realPoint = vm.locationOf(points, 0, fallback);
-      rows.push(`Valid index -> ${Point.textOf(realPoint)}, title=${vm.buttonTitle}`);
+      rows.push(`Valid index -> ${Point.textOf(realPoint)}, title=${vm.buttonTitle}, proxy=${vm.profile.summary()}`);
     } catch (err) {
       rows.push(`Valid index -> ${(err as Error).message}`);
     }

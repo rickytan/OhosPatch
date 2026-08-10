@@ -52,8 +52,9 @@ Primary implementation: `ohospatch/src/main/cpp/ohospatch.cpp`.
 - Embedded `fixit.js` is generated into `fixit_runtime.h` by CMake.
 - Patch method registrations are returned from JSVM as JSON specs.
 - Native loads target classes in the ArkTS VM and installs N-API trampolines.
-- Arguments and return values currently cross between ArkTS and JSVM through JSON.
-- Object identity, functions, circular objects, and arbitrary native objects do not cross the VM boundary.
+- Handler arguments still enter JSVM as JSON values. The handler `this`, nested properties, method calls, Proxy arguments, original-method results, and Proxy returns use invocation-scoped Native handles.
+- Runtime `1.4.0` creates a JS `Proxy` for the ArkTS receiver. `get`, `set`, and `apply` synchronously bridge to the original ArkTS object, preserving nested object identity and prototype method dispatch.
+- Proxy handles are valid only during the current synchronous patch invocation and must not escape to timers, promises, or globals. A call can retain at most 256 handles.
 - Hook failures fall back to the original ArkTS method.
 - Installation failure restores hooks that were already installed.
 - `clear()` restores original methods and clears the JS registry and timers.
@@ -113,7 +114,7 @@ Proposed public concepts:
 
 ### Implemented status (2026-08-10)
 
-- Runtime version `1.3.0` implements `Fixit.component`.
+- Runtime version `1.4.0` implements `Fixit.component` and the invocation-scoped ArkTS object Proxy bridge.
 - API 20 state-management V1 exported custom components are supported.
 - `param().transform/replace` and `state().transform/replace` are implemented.
 - Node selection by `{ type, occurrence }` is implemented with zero-based per-type counting.

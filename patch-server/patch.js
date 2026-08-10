@@ -33,12 +33,16 @@
 
   var originLocation = fix.instanceMethod('locationOf', function (locations, index, point) {
     if (index < 0 || index >= locations.length) {
-      this.buttonTitle = 'out of bounds';
+      this.profile.badge.text = 'out of bounds';
+      this.profile.badge.advance(10);
+      this.buttonTitle = this.profile.summary();
       this.backgroundColor = '#FDE2E2';
       return point;
     }
 
-    this.buttonTitle = 'in bounds';
+    this.profile.badge.text = 'in bounds';
+    this.profile.badge.advance(1);
+    this.buttonTitle = this.profile.summary();
     this.backgroundColor = '#E7F7EE';
     return originLocation.apply(this, arguments);
   });

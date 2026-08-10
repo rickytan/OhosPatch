@@ -182,11 +182,15 @@ struct HookRecord {
     bool classMethod = false;
 };
 
+constexpr size_t kMaxProxyHandles = 256;
+
 struct ActiveInvocation {
     napi_env env = nullptr;
     HookRecord *hook = nullptr;
     napi_value receiver = nullptr;
     bool originalExceptionPending = false;
+    std::array<napi_value, kMaxProxyHandles> proxyValues{};
+    size_t proxyValueCount = 0;
 };
 
 enum class UiRuleKind {
@@ -398,10 +402,8 @@ class JsvmRuntime
             }
         }
 
-        std::string targetJson = "{}";
         std::string argsJson;
-        if ((!hook->classMethod && !NapiJsonStringify(napiEnv, receiver, "{}", &targetJson)) ||
-            !NapiJsonStringify(napiEnv, argsArray, "[]", &argsJson)) {
+        if (!NapiJsonStringify(napiEnv, argsArray, "[]", &argsJson)) {
             return callOriginal();
         }
 
@@ -416,27 +418,37 @@ class JsvmRuntime
         JSVM_Value targetKeyValue = nullptr;
         JSVM_Value methodNameValue = nullptr;
         JSVM_Value classMethodValue = nullptr;
-        JSVM_Value targetValue = nullptr;
+        JSVM_Value targetHandleValue = nullptr;
         JSVM_Value argsValue = nullptr;
         if (!String(hook->targetKey, &targetKeyValue) || !String(hook->methodName, &methodNameValue) ||
-            !Bool(hook->classMethod, &classMethodValue) || !ParseJson(targetJson, &targetValue) ||
+            !Bool(hook->classMethod, &classMethodValue) ||
+            !JsvmOk(OH_JSVM_CreateUint32(env_, 0, &targetHandleValue), "OH_JSVM_CreateUint32(proxy root)", env_) ||
             !ParseJson(argsJson, &argsValue)) {
             closeScope();
             return callOriginal();
         }
 
-        JSVM_Value patchArgs[] = {targetKeyValue, methodNameValue, classMethodValue, targetValue, argsValue};
+        JSVM_Value patchArgs[] = {targetKeyValue, methodNameValue, classMethodValue, targetHandleValue, argsValue};
         ActiveInvocation previous = activeInvocation_;
-        activeInvocation_ = {napiEnv, hook, receiver, false};
+        activeInvocation_ = {};
+        activeInvocation_.env = napiEnv;
+        activeInvocation_.hook = hook;
+        activeInvocation_.receiver = receiver;
+        activeInvocation_.proxyValues[0] = receiver;
+        activeInvocation_.proxyValueCount = 1;
+        auto restoreInvocation = [&]() {
+            activeInvocation_ = previous;
+        };
         JSVM_Value patchResult = nullptr;
         bool called = CallGlobal("__ohospatch_callPatch", patchArgs, std::size(patchArgs), &patchResult);
         bool originalExceptionPending = activeInvocation_.originalExceptionPending;
-        activeInvocation_ = previous;
         if (originalExceptionPending) {
+            restoreInvocation();
             closeScope();
             return nullptr;
         }
         if (!called) {
+            restoreInvocation();
             closeScope();
             return callOriginal();
         }
@@ -445,10 +457,12 @@ class JsvmRuntime
         bool stringified = StringifyJson(patchResult, &resultJson);
         bool scopeClosed = closeScope();
         if (!stringified || !scopeClosed) {
+            restoreInvocation();
             return callOriginal();
         }
         napi_value envelope = nullptr;
         if (!NapiJsonParse(napiEnv, resultJson, &envelope)) {
+            restoreInvocation();
             return callOriginal();
         }
 
@@ -457,39 +471,64 @@ class JsvmRuntime
         if (!NapiOk(napiEnv, napi_get_named_property(napiEnv, envelope, "handled", &handledValue),
                     "napi_get_named_property(handled)") ||
             !NapiOk(napiEnv, napi_get_value_bool(napiEnv, handledValue, &handled), "napi_get_value_bool(handled)")) {
+            restoreInvocation();
             return callOriginal();
         }
         if (!handled) {
+            restoreInvocation();
             return callOriginal();
-        }
-
-        if (!hook->classMethod) {
-            bool hasTarget = false;
-            if (NapiOk(napiEnv, napi_has_named_property(napiEnv, envelope, "target", &hasTarget),
-                       "napi_has_named_property(target)") &&
-                hasTarget) {
-                napi_value targetPatch = nullptr;
-                if (NapiOk(napiEnv, napi_get_named_property(napiEnv, envelope, "target", &targetPatch),
-                           "napi_get_named_property(target)")) {
-                    ApplyTargetPatch(napiEnv, receiver, targetPatch);
-                }
-            }
         }
 
         bool hasResult = false;
         if (!NapiOk(napiEnv, napi_has_named_property(napiEnv, envelope, "result", &hasResult),
                     "napi_has_named_property(result)")) {
+            restoreInvocation();
             return callOriginal();
         }
         if (!hasResult) {
+            restoreInvocation();
             return NapiUndefined(napiEnv);
         }
 
-        napi_value result = nullptr;
-        if (!NapiOk(napiEnv, napi_get_named_property(napiEnv, envelope, "result", &result),
-                    "napi_get_named_property(result)")) {
+        napi_value resultWire = nullptr;
+        std::string resultKind;
+        if (!NapiOk(napiEnv, napi_get_named_property(napiEnv, envelope, "result", &resultWire),
+                    "napi_get_named_property(result wire)") ||
+            !NapiNamedString(napiEnv, resultWire, "kind", &resultKind)) {
+            restoreInvocation();
             return callOriginal();
         }
+        if (resultKind == "undefined") {
+            restoreInvocation();
+            return NapiUndefined(napiEnv);
+        }
+        if (resultKind == "remote") {
+            uint32_t handle = 0;
+            if (!NapiNamedUint32(napiEnv, resultWire, "handle", &handle) ||
+                handle >= activeInvocation_.proxyValueCount) {
+                LogError("OhosPatch patch returned an invalid proxy handle");
+                restoreInvocation();
+                return callOriginal();
+            }
+            napi_value result = activeInvocation_.proxyValues[handle];
+            restoreInvocation();
+            return result;
+        }
+        if (resultKind != "wire") {
+            LogError("OhosPatch patch returned an unknown result kind");
+            restoreInvocation();
+            return callOriginal();
+        }
+
+        napi_value encodedResult = nullptr;
+        napi_value result = nullptr;
+        if (!NapiOk(napiEnv, napi_get_named_property(napiEnv, resultWire, "value", &encodedResult),
+                    "napi_get_named_property(result value)") ||
+            !ResolveProxyWireValue(activeInvocation_, encodedResult, 0, &result)) {
+            restoreInvocation();
+            return callOriginal();
+        }
+        restoreInvocation();
         return result;
     }
 
@@ -1025,6 +1064,283 @@ class JsvmRuntime
         return result;
     }
 
+    JSVM_Value ProxyResponse(const char *kind, JSVM_Value payload)
+    {
+        JSVM_Value response = nullptr;
+        JSVM_Value kindValue = nullptr;
+        if (!JsvmOk(OH_JSVM_CreateArrayWithLength(env_, 2, &response), "OH_JSVM_CreateArrayWithLength(proxy response)",
+                    env_) ||
+            !String(kind, &kindValue) ||
+            !JsvmOk(OH_JSVM_SetElement(env_, response, 0, kindValue), "OH_JSVM_SetElement(proxy response kind)",
+                    env_)) {
+            return Undefined(env_);
+        }
+        JSVM_Value responsePayload = payload ? payload : Undefined(env_);
+        if (!responsePayload ||
+            !JsvmOk(OH_JSVM_SetElement(env_, response, 1, responsePayload),
+                    "OH_JSVM_SetElement(proxy response payload)", env_)) {
+            return Undefined(env_);
+        }
+        return response;
+    }
+
+    JSVM_Value ProxyError(const char *message)
+    {
+        LogError(message);
+        JSVM_Value payload = nullptr;
+        if (!String(message, &payload)) {
+            return Undefined(env_);
+        }
+        return ProxyResponse("error", payload);
+    }
+
+    bool FindOrAddProxyValue(ActiveInvocation &active, napi_value value, uint32_t *handle)
+    {
+        if (!value || !handle) {
+            LogError("FindOrAddProxyValue received an invalid argument");
+            return false;
+        }
+        for (size_t index = 0; index < active.proxyValueCount; ++index) {
+            bool equal = false;
+            if (!NapiOk(active.env, napi_strict_equals(active.env, active.proxyValues[index], value, &equal),
+                        "napi_strict_equals(proxy value)")) {
+                return false;
+            }
+            if (equal) {
+                *handle = static_cast<uint32_t>(index);
+                return true;
+            }
+        }
+        if (active.proxyValueCount >= kMaxProxyHandles) {
+            LogError("OhosPatch proxy handle limit exceeded");
+            return false;
+        }
+        *handle = static_cast<uint32_t>(active.proxyValueCount);
+        active.proxyValues[active.proxyValueCount++] = value;
+        return true;
+    }
+
+    JSVM_Value ProxyNapiValue(ActiveInvocation &active, napi_value value)
+    {
+        napi_valuetype type = napi_undefined;
+        if (!NapiOk(active.env, napi_typeof(active.env, value, &type), "napi_typeof(proxy value)")) {
+            return ProxyError("OhosPatch could not inspect a proxied property");
+        }
+        if (type == napi_undefined) {
+            return ProxyResponse("undefined", nullptr);
+        }
+        if (type == napi_object || type == napi_function) {
+            uint32_t handle = 0;
+            if (!FindOrAddProxyValue(active, value, &handle)) {
+                return ProxyError("OhosPatch could not retain a proxied property");
+            }
+            JSVM_Value handleValue = nullptr;
+            if (!JsvmOk(OH_JSVM_CreateUint32(env_, handle, &handleValue), "OH_JSVM_CreateUint32(proxy handle)", env_)) {
+                return ProxyError("OhosPatch could not create a proxy handle");
+            }
+            return ProxyResponse(type == napi_function ? "function" : "object", handleValue);
+        }
+        if (type == napi_symbol || type == napi_external || type == napi_bigint) {
+            return ProxyError("OhosPatch does not support this proxied value type");
+        }
+
+        std::string json;
+        JSVM_Value payload = nullptr;
+        if (!NapiJsonStringify(active.env, value, "null", &json) || !ParseJson(json, &payload)) {
+            return ProxyError("OhosPatch could not serialize a proxied value");
+        }
+        return ProxyResponse("value", payload);
+    }
+
+    static bool ResolveProxyWireValue(ActiveInvocation &active, napi_value encoded, size_t depth, napi_value *output)
+    {
+        if (!output || !encoded || depth > 32) {
+            LogError("OhosPatch proxy wire value exceeds the supported depth");
+            return false;
+        }
+        napi_valuetype type = napi_undefined;
+        if (!NapiOk(active.env, napi_typeof(active.env, encoded, &type), "napi_typeof(proxy wire value)")) {
+            return false;
+        }
+        if (type != napi_object) {
+            *output = encoded;
+            return true;
+        }
+
+        bool hasRemoteHandle = false;
+        if (!NapiOk(active.env,
+                    napi_has_named_property(active.env, encoded, "__ohospatch_proxy_handle__", &hasRemoteHandle),
+                    "napi_has_named_property(proxy handle)")) {
+            return false;
+        }
+        if (hasRemoteHandle) {
+            uint32_t handle = 0;
+            if (!NapiNamedUint32(active.env, encoded, "__ohospatch_proxy_handle__", &handle) ||
+                handle >= active.proxyValueCount) {
+                LogError("OhosPatch received an invalid proxy handle");
+                return false;
+            }
+            *output = active.proxyValues[handle];
+            return true;
+        }
+
+        bool hasUndefinedMarker = false;
+        if (!NapiOk(active.env,
+                    napi_has_named_property(active.env, encoded, "__ohospatch_proxy_undefined__", &hasUndefinedMarker),
+                    "napi_has_named_property(proxy undefined)")) {
+            return false;
+        }
+        if (hasUndefinedMarker) {
+            *output = NapiUndefined(active.env);
+            return *output != nullptr;
+        }
+
+        napi_value keys = nullptr;
+        uint32_t length = 0;
+        if (!NapiOk(active.env, napi_get_property_names(active.env, encoded, &keys),
+                    "napi_get_property_names(proxy wire value)") ||
+            !NapiOk(active.env, napi_get_array_length(active.env, keys, &length),
+                    "napi_get_array_length(proxy wire keys)")) {
+            return false;
+        }
+        if (length > 1024) {
+            LogError("OhosPatch proxy wire object has too many properties");
+            return false;
+        }
+        for (uint32_t index = 0; index < length; ++index) {
+            napi_value key = nullptr;
+            napi_value child = nullptr;
+            napi_value resolved = nullptr;
+            if (!NapiOk(active.env, napi_get_element(active.env, keys, index, &key),
+                        "napi_get_element(proxy wire key)") ||
+                !NapiOk(active.env, napi_get_property(active.env, encoded, key, &child),
+                        "napi_get_property(proxy wire child)") ||
+                !ResolveProxyWireValue(active, child, depth + 1, &resolved) ||
+                !NapiOk(active.env, napi_set_property(active.env, encoded, key, resolved),
+                        "napi_set_property(proxy wire child)")) {
+                return false;
+            }
+        }
+        *output = encoded;
+        return true;
+    }
+
+    static JSVM_Value ProxyGetCallback(JSVM_Env env, JSVM_CallbackInfo info)
+    {
+        JsvmRuntime *runtime = Current(env);
+        if (!runtime || !runtime->activeInvocation_.env) {
+            return runtime ? runtime->ProxyError("OhosPatch proxy read occurred outside an active invocation")
+                           : Undefined(env);
+        }
+        size_t argc = 2;
+        JSVM_Value argv[2] = {nullptr, nullptr};
+        uint32_t handle = 0;
+        std::string property;
+        if (!JsvmOk(OH_JSVM_GetCbInfo(env, info, &argc, argv, nullptr, nullptr), "OH_JSVM_GetCbInfo(proxy get)", env) ||
+            argc < 2 ||
+            !JsvmOk(OH_JSVM_GetValueUint32(env, argv[0], &handle), "OH_JSVM_GetValueUint32(proxy get handle)", env) ||
+            !runtime->JsvmString(argv[1], &property) || handle >= runtime->activeInvocation_.proxyValueCount) {
+            return runtime->ProxyError("OhosPatch proxy read received invalid arguments");
+        }
+        ActiveInvocation &active = runtime->activeInvocation_;
+        napi_value key = nullptr;
+        napi_value value = nullptr;
+        if (!NapiOk(active.env, napi_create_string_utf8(active.env, property.c_str(), property.size(), &key),
+                    "napi_create_string_utf8(proxy property)") ||
+            !NapiOk(active.env, napi_get_property(active.env, active.proxyValues[handle], key, &value),
+                    "napi_get_property(proxy value)")) {
+            return runtime->ProxyError("OhosPatch could not read a proxied property");
+        }
+        return runtime->ProxyNapiValue(active, value);
+    }
+
+    static JSVM_Value ProxySetCallback(JSVM_Env env, JSVM_CallbackInfo info)
+    {
+        JsvmRuntime *runtime = Current(env);
+        if (!runtime || !runtime->activeInvocation_.env) {
+            return runtime ? runtime->ProxyError("OhosPatch proxy write occurred outside an active invocation")
+                           : Undefined(env);
+        }
+        size_t argc = 3;
+        JSVM_Value argv[3] = {nullptr, nullptr, nullptr};
+        uint32_t handle = 0;
+        std::string property;
+        std::string wire;
+        if (!JsvmOk(OH_JSVM_GetCbInfo(env, info, &argc, argv, nullptr, nullptr), "OH_JSVM_GetCbInfo(proxy set)", env) ||
+            argc < 3 ||
+            !JsvmOk(OH_JSVM_GetValueUint32(env, argv[0], &handle), "OH_JSVM_GetValueUint32(proxy set handle)", env) ||
+            !runtime->JsvmString(argv[1], &property) || !runtime->JsvmString(argv[2], &wire) ||
+            handle >= runtime->activeInvocation_.proxyValueCount) {
+            return runtime->ProxyError("OhosPatch proxy write received invalid arguments");
+        }
+        ActiveInvocation &active = runtime->activeInvocation_;
+        napi_value encoded = nullptr;
+        napi_value value = nullptr;
+        napi_value key = nullptr;
+        if (!NapiJsonParse(active.env, wire, &encoded) || !ResolveProxyWireValue(active, encoded, 0, &value) ||
+            !NapiOk(active.env, napi_create_string_utf8(active.env, property.c_str(), property.size(), &key),
+                    "napi_create_string_utf8(proxy set property)") ||
+            !NapiOk(active.env, napi_set_property(active.env, active.proxyValues[handle], key, value),
+                    "napi_set_property(proxy value)")) {
+            return runtime->ProxyError("OhosPatch could not write a proxied property");
+        }
+        return runtime->ProxyResponse("ok", nullptr);
+    }
+
+    static JSVM_Value ProxyCallCallback(JSVM_Env env, JSVM_CallbackInfo info)
+    {
+        JsvmRuntime *runtime = Current(env);
+        if (!runtime || !runtime->activeInvocation_.env) {
+            return runtime ? runtime->ProxyError("OhosPatch proxy call occurred outside an active invocation")
+                           : Undefined(env);
+        }
+        size_t argc = 3;
+        JSVM_Value argv[3] = {nullptr, nullptr, nullptr};
+        uint32_t functionHandle = 0;
+        uint32_t receiverHandle = 0;
+        std::string wire;
+        if (!JsvmOk(OH_JSVM_GetCbInfo(env, info, &argc, argv, nullptr, nullptr), "OH_JSVM_GetCbInfo(proxy call)", env) ||
+            argc < 3 ||
+            !JsvmOk(OH_JSVM_GetValueUint32(env, argv[0], &functionHandle),
+                    "OH_JSVM_GetValueUint32(proxy function handle)", env) ||
+            !JsvmOk(OH_JSVM_GetValueUint32(env, argv[1], &receiverHandle),
+                    "OH_JSVM_GetValueUint32(proxy receiver handle)", env) ||
+            !runtime->JsvmString(argv[2], &wire) ||
+            functionHandle >= runtime->activeInvocation_.proxyValueCount ||
+            receiverHandle >= runtime->activeInvocation_.proxyValueCount) {
+            return runtime->ProxyError("OhosPatch proxy call received invalid arguments");
+        }
+
+        ActiveInvocation &active = runtime->activeInvocation_;
+        napi_value encodedArgs = nullptr;
+        napi_value resolvedArgs = nullptr;
+        uint32_t argumentCount = 0;
+        if (!NapiJsonParse(active.env, wire, &encodedArgs) ||
+            !ResolveProxyWireValue(active, encodedArgs, 0, &resolvedArgs) ||
+            !NapiOk(active.env, napi_get_array_length(active.env, resolvedArgs, &argumentCount),
+                    "napi_get_array_length(proxy call args)")) {
+            return runtime->ProxyError("OhosPatch could not decode proxied method arguments");
+        }
+        if (argumentCount > kMaxArguments) {
+            return runtime->ProxyError("OhosPatch proxied method argument count exceeds the limit");
+        }
+        std::array<napi_value, kMaxArguments> napiArgv{};
+        for (uint32_t index = 0; index < argumentCount; ++index) {
+            if (!NapiOk(active.env, napi_get_element(active.env, resolvedArgs, index, &napiArgv[index]),
+                        "napi_get_element(proxy call arg)")) {
+                return runtime->ProxyError("OhosPatch could not read a proxied method argument");
+            }
+        }
+        napi_value result = nullptr;
+        if (!NapiOk(active.env,
+                    napi_call_function(active.env, active.proxyValues[receiverHandle],
+                                       active.proxyValues[functionHandle], argumentCount, napiArgv.data(), &result),
+                    "napi_call_function(proxy method)")) {
+            return runtime->ProxyError("OhosPatch proxied method call failed");
+        }
+        return runtime->ProxyNapiValue(active, result);
+    }
+
     static JSVM_Value OriginCallback(JSVM_Env env, JSVM_CallbackInfo info)
     {
         JsvmRuntime *runtime = Current(env);
@@ -1033,37 +1349,20 @@ class JsvmRuntime
             return Undefined(env);
         }
 
-        size_t argc = kMaxArguments;
-        std::array<JSVM_Value, kMaxArguments> argv{};
-        if (!JsvmOk(OH_JSVM_GetCbInfo(env, info, &argc, argv.data(), nullptr, nullptr), "OH_JSVM_GetCbInfo(origin)",
-                    env)) {
-            return Undefined(env);
-        }
-        if (argc > kMaxArguments) {
-            LogError("Original method arguments were truncated to the OhosPatch limit");
-            argc = kMaxArguments;
-        }
-
-        JSVM_Value argsArray = nullptr;
-        if (!JsvmOk(OH_JSVM_CreateArrayWithLength(env, argc, &argsArray), "OH_JSVM_CreateArrayWithLength", env)) {
-            return Undefined(env);
-        }
-        for (size_t index = 0; index < argc; ++index) {
-            if (!JsvmOk(OH_JSVM_SetElement(env, argsArray, static_cast<uint32_t>(index), argv[index]),
-                        "OH_JSVM_SetElement(origin argument)", env)) {
-                return Undefined(env);
-            }
-        }
-
+        size_t argc = 1;
+        JSVM_Value argument = nullptr;
         std::string argsJson;
-        if (!runtime->StringifyJson(argsArray, &argsJson)) {
-            return Undefined(env);
+        if (!JsvmOk(OH_JSVM_GetCbInfo(env, info, &argc, &argument, nullptr, nullptr), "OH_JSVM_GetCbInfo(origin)", env) ||
+            argc < 1 || !runtime->JsvmString(argument, &argsJson)) {
+            return runtime->ProxyError("Original method requires encoded arguments");
         }
 
         ActiveInvocation &active = runtime->activeInvocation_;
+        napi_value encodedArgs = nullptr;
         napi_value napiArgsArray = nullptr;
-        if (!NapiJsonParse(active.env, argsJson, &napiArgsArray)) {
-            return Undefined(env);
+        if (!NapiJsonParse(active.env, argsJson, &encodedArgs) ||
+            !ResolveProxyWireValue(active, encodedArgs, 0, &napiArgsArray)) {
+            return runtime->ProxyError("Original method arguments could not be decoded");
         }
         uint32_t napiArgc = 0;
         if (!NapiOk(active.env, napi_get_array_length(active.env, napiArgsArray, &napiArgc),
@@ -1088,24 +1387,9 @@ class JsvmRuntime
         if (!CallOriginal(active.env, active.hook, active.receiver, napiArgc, napiArgv.data(), &result,
                           &exceptionPending)) {
             active.originalExceptionPending = exceptionPending;
-            return Undefined(env);
+            return runtime->ProxyError("Original ArkTS method call failed");
         }
-
-        napi_valuetype type = napi_undefined;
-        if (!NapiOk(active.env, napi_typeof(active.env, result, &type), "napi_typeof(origin result)")) {
-            return Undefined(env);
-        }
-        if (type == napi_undefined) {
-            return Undefined(env);
-        }
-
-        std::string resultJson;
-        JSVM_Value jsvmResult = nullptr;
-        if (!NapiJsonStringify(active.env, result, "null", &resultJson) ||
-            !runtime->ParseJson(resultJson, &jsvmResult)) {
-            return Undefined(env);
-        }
-        return jsvmResult;
+        return runtime->ProxyNapiValue(active, result);
     }
 
     static JSVM_Value HiLogCallback(JSVM_Env env, JSVM_CallbackInfo info)
@@ -2092,6 +2376,30 @@ class JsvmRuntime
                 "OH_JSVM_CreateFunction(origin)", env_) ||
             !JsvmOk(OH_JSVM_SetNamedProperty(env_, global, "__ohospatch_origin", originFunction),
                     "OH_JSVM_SetNamedProperty(origin)", env_)) {
+            return false;
+        }
+
+        static JSVM_CallbackStruct proxyGetCallback{ProxyGetCallback, nullptr};
+        static JSVM_CallbackStruct proxySetCallback{ProxySetCallback, nullptr};
+        static JSVM_CallbackStruct proxyCallCallback{ProxyCallCallback, nullptr};
+        JSVM_Value proxyGetFunction = nullptr;
+        JSVM_Value proxySetFunction = nullptr;
+        JSVM_Value proxyCallFunction = nullptr;
+        if (!JsvmOk(OH_JSVM_CreateFunction(env_, "__ohospatch_proxyGet", JSVM_AUTO_LENGTH, &proxyGetCallback,
+                                           &proxyGetFunction),
+                    "OH_JSVM_CreateFunction(proxy get)", env_) ||
+            !JsvmOk(OH_JSVM_SetNamedProperty(env_, global, "__ohospatch_proxyGet", proxyGetFunction),
+                    "OH_JSVM_SetNamedProperty(proxy get)", env_) ||
+            !JsvmOk(OH_JSVM_CreateFunction(env_, "__ohospatch_proxySet", JSVM_AUTO_LENGTH, &proxySetCallback,
+                                           &proxySetFunction),
+                    "OH_JSVM_CreateFunction(proxy set)", env_) ||
+            !JsvmOk(OH_JSVM_SetNamedProperty(env_, global, "__ohospatch_proxySet", proxySetFunction),
+                    "OH_JSVM_SetNamedProperty(proxy set)", env_) ||
+            !JsvmOk(OH_JSVM_CreateFunction(env_, "__ohospatch_proxyCall", JSVM_AUTO_LENGTH, &proxyCallCallback,
+                                           &proxyCallFunction),
+                    "OH_JSVM_CreateFunction(proxy call)", env_) ||
+            !JsvmOk(OH_JSVM_SetNamedProperty(env_, global, "__ohospatch_proxyCall", proxyCallFunction),
+                    "OH_JSVM_SetNamedProperty(proxy call)", env_)) {
             return false;
         }
 

@@ -14,6 +14,11 @@
   var targets = Object.create(null);
   var timers = Object.create(null);
   var nextTimerId = 1;
+  var nativeProxyMetadata = new WeakMap();
+  var nativeProxyCache = Object.create(null);
+
+  var REMOTE_HANDLE_KEY = '__ohospatch_proxy_handle__';
+  var UNDEFINED_VALUE_KEY = '__ohospatch_proxy_undefined__';
 
   function own(object, property) {
     return Object.prototype.hasOwnProperty.call(object, property);
@@ -25,6 +30,157 @@
 
   function bucket(isClassMethod) {
     return isClassMethod ? registry.klass : registry.instance;
+  }
+
+  function encodeNativeWireValue(value, ancestors) {
+    if ((typeof value === 'object' && value !== null) || typeof value === 'function') {
+      var metadata = nativeProxyMetadata.get(value);
+      if (metadata) {
+        var reference = {};
+        reference[REMOTE_HANDLE_KEY] = metadata.handle;
+        return reference;
+      }
+    }
+    if (value === undefined) {
+      var undefinedValue = {};
+      undefinedValue[UNDEFINED_VALUE_KEY] = true;
+      return undefinedValue;
+    }
+    if (value === null || typeof value === 'string' || typeof value === 'boolean') {
+      return value;
+    }
+    if (typeof value === 'number') {
+      return Number.isFinite(value) ? value : null;
+    }
+    if (typeof value !== 'object') {
+      throw new TypeError('OhosPatch wire value contains an unsupported type');
+    }
+    if (ancestors.indexOf(value) !== -1) {
+      throw new TypeError('OhosPatch wire value contains a circular reference');
+    }
+
+    ancestors.push(value);
+    var encoded;
+    if (Array.isArray(value)) {
+      encoded = value.map(function (item) {
+        return encodeNativeWireValue(item, ancestors);
+      });
+    } else {
+      encoded = {};
+      Object.keys(value).forEach(function (property) {
+        encoded[property] = encodeNativeWireValue(value[property], ancestors);
+      });
+    }
+    ancestors.pop();
+    return encoded;
+  }
+
+  function encodeNativeWire(value) {
+    return JSON.stringify(encodeNativeWireValue(value, []));
+  }
+
+  function decodeNativeResponse(response, receiverHandle) {
+    if (!Array.isArray(response) || typeof response[0] !== 'string') {
+      throw new Error('Invalid OhosPatch native proxy response');
+    }
+    if (response[0] === 'value') {
+      return response[1];
+    }
+    if (response[0] === 'undefined') {
+      return undefined;
+    }
+    if (response[0] === 'object') {
+      return makeNativeProxy(response[1], false, response[1]);
+    }
+    if (response[0] === 'function') {
+      return makeNativeProxy(response[1], true, receiverHandle);
+    }
+    if (response[0] === 'ok') {
+      return true;
+    }
+    throw new Error(response[1] || 'OhosPatch native proxy operation failed');
+  }
+
+  function makeNativeProxy(handle, callable, receiverHandle) {
+    var cacheKey = callable ? 'f:' + handle + ':' + receiverHandle : 'o:' + handle;
+    if (own(nativeProxyCache, cacheKey)) {
+      return nativeProxyCache[cacheKey];
+    }
+
+    var target = callable ? function () {} : {};
+    var proxy = new Proxy(target, {
+      get: function (localTarget, property) {
+        if (typeof property === 'symbol') {
+          if (property === Symbol.toStringTag) {
+            return 'OhosPatchProxy';
+          }
+          if (property === Symbol.iterator) {
+            return function () {
+              var index = 0;
+              return {
+                next: function () {
+                  var length = proxy.length;
+                  return index < length ? { value: proxy[index++], done: false } : { done: true };
+                }
+              };
+            };
+          }
+          return undefined;
+        }
+        var descriptor = Object.getOwnPropertyDescriptor(localTarget, property);
+        if (descriptor && descriptor.configurable === false) {
+          return localTarget[property];
+        }
+        return decodeNativeResponse(global.__ohospatch_proxyGet(handle, String(property)), handle);
+      },
+      set: function (_localTarget, property, value) {
+        if (typeof property === 'symbol') {
+          throw new TypeError('OhosPatch cannot assign a symbol property');
+        }
+        var wire;
+        try {
+          wire = encodeNativeWire(value);
+        } catch (_) {
+          throw new TypeError('OhosPatch proxy assignment must be bridge-serializable');
+        }
+        return decodeNativeResponse(global.__ohospatch_proxySet(handle, String(property), wire), handle);
+      },
+      apply: function () {
+        var args = Array.prototype.slice.call(arguments[2]);
+        var wire;
+        try {
+          wire = encodeNativeWire(args);
+        } catch (_) {
+          throw new TypeError('OhosPatch proxy method arguments must be bridge-serializable');
+        }
+        return decodeNativeResponse(
+          global.__ohospatch_proxyCall(handle, receiverHandle, wire),
+          receiverHandle
+        );
+      }
+    });
+    nativeProxyMetadata.set(proxy, { handle: handle, receiverHandle: receiverHandle, callable: callable });
+    nativeProxyCache[cacheKey] = proxy;
+    return proxy;
+  }
+
+  function encodePatchResult(value) {
+    var metadata = ((typeof value === 'object' && value !== null) || typeof value === 'function')
+      ? nativeProxyMetadata.get(value)
+      : null;
+    if (metadata) {
+      return { kind: 'remote', handle: metadata.handle };
+    }
+    if (value === undefined) {
+      return { kind: 'undefined' };
+    }
+    var wire;
+    try {
+      wire = encodeNativeWire(value);
+    } catch (_) {
+      throw new TypeError('OhosPatch return value must be bridge-serializable');
+    }
+    return { kind: 'wire', value: JSON.parse(wire) };
   }
 
   function copyTarget(target) {
@@ -158,7 +314,10 @@
     });
 
     return function () {
-      return global.__ohospatch_origin.apply(this, arguments);
+      return decodeNativeResponse(
+        global.__ohospatch_origin(encodeNativeWire(Array.prototype.slice.call(arguments))),
+        0
+      );
     };
   }
 
@@ -380,7 +539,7 @@
   };
 
   Object.defineProperty(Fixit, 'runtimeVersion', {
-    value: '1.3.0',
+    value: '1.4.0',
     enumerable: true
   });
 
@@ -527,16 +686,21 @@
     timer.callback.apply(global, timer.args);
   };
 
-  global.__ohospatch_callPatch = function (identity, methodName, isClassMethod, target, args) {
+  global.__ohospatch_callPatch = function (identity, methodName, isClassMethod, targetHandle, args) {
     var handler = bucket(isClassMethod)[key(identity, methodName)];
     if (!handler) {
       return { handled: false };
     }
-    return {
-      handled: true,
-      result: handler.apply(target, args),
-      target: target
-    };
+    nativeProxyCache = Object.create(null);
+    try {
+      var target = makeNativeProxy(targetHandle, false, targetHandle);
+      return {
+        handled: true,
+        result: encodePatchResult(handler.apply(target, args))
+      };
+    } finally {
+      nativeProxyCache = Object.create(null);
+    }
   };
 
   global.__ohospatch_callUiValue = function (ruleId, value) {
