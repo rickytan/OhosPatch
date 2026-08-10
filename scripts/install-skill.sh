@@ -5,7 +5,6 @@ set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 SKILL_SOURCE="$PROJECT_ROOT/skills/ohospatch"
-DECLARATION_SOURCE="$PROJECT_ROOT/fixit.d.js"
 
 install_codex=false
 install_claude=false
@@ -17,6 +16,8 @@ usage() {
 Usage: ./scripts/install-skill.sh [--codex | --claude | --all] [--force]
 
 Install the OhosPatch authoring Skill for Codex, Claude Code, or both.
+The Skill ships `references/fixit.d.js` alongside `SKILL.md`; both are copied
+together into the target tool's skill directory.
 
 Options:
   --codex   Install only for Codex.
@@ -68,7 +69,7 @@ if [ "$selection_given" = false ]; then
   install_claude=true
 fi
 
-if [ ! -f "$SKILL_SOURCE/SKILL.md" ] || [ ! -f "$DECLARATION_SOURCE" ]; then
+if [ ! -f "$SKILL_SOURCE/SKILL.md" ] || [ ! -f "$SKILL_SOURCE/references/fixit.d.js" ]; then
   printf 'OhosPatch Skill sources are incomplete under %s\n' "$PROJECT_ROOT" >&2
   exit 1
 fi
@@ -94,9 +95,7 @@ install_to() {
 
   mkdir -p "$parent"
   rm -rf "$temporary"
-  mkdir -p "$temporary/references"
   cp -R "$SKILL_SOURCE"/. "$temporary/"
-  cp "$DECLARATION_SOURCE" "$temporary/references/fixit.d.js"
 
   if [ -e "$destination" ]; then
     rm -rf "$destination"

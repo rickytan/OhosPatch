@@ -31,7 +31,7 @@
 
 The embedded runtime is `ohospatch/src/main/cpp/runtime/fixit.js`.
 
-- `fixit.d.js` is the editor-only JSDoc declaration for every public Patch context API. Keep its `@version`, signatures, constraints, and globals synchronized with the embedded runtime.
+- `skills/ohospatch/references/fixit.d.js` is the editor-only JSDoc declaration for every public Patch context API. Keep its `@version`, signatures, constraints, and globals synchronized with the embedded runtime.
 - `skills/ohospatch/` is the portable Codex/Claude authoring Skill source. Keep it and `scripts/install-skill.sh` aligned with `fixit.d.js`, README limitations, and demonstrated Runtime behavior.
 
 - `Fixit.fix(fullPath)` and `Fixit.component(fullPath)` parse complete OHM paths internally; do not use `require()` to create target descriptors.

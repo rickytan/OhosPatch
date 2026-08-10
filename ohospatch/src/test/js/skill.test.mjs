@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 const projectRoot = fileURLToPath(new URL('../../../../', import.meta.url));
 const installer = join(projectRoot, 'scripts/install-skill.sh');
 const sourceSkill = join(projectRoot, 'skills/ohospatch/SKILL.md');
-const sourceDeclaration = join(projectRoot, 'fixit.d.js');
+const sourceDeclaration = join(projectRoot, 'skills/ohospatch/references/fixit.d.js');
 
 function runInstaller(home, args = []) {
   return spawnSync(installer, args, {

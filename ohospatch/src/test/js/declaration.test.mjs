@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import vm from 'node:vm';
 
-const declarationUrl = new URL('../../../../fixit.d.js', import.meta.url);
+const declarationUrl = new URL('../../../../skills/ohospatch/references/fixit.d.js', import.meta.url);
 const runtimeUrl = new URL('../../main/cpp/runtime/fixit.js', import.meta.url);
 
 test('Patch context declaration is valid JavaScript and covers the public API', async () => {

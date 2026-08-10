@@ -6,8 +6,8 @@ OhosPatch 是 [FIXiT](https://github.com/rickytan/FIXiT) 在 HarmonyOS/OpenHarmo
 
 ```text
 OhosPatch/
-├── fixit.d.js                 # Patch JS Context 的 JSDoc/IDE 声明
 ├── skills/ohospatch/          # Codex/Claude Patch 编写 Skill 源码
+│   └── references/fixit.d.js  # Patch JS Context 的 JSDoc/IDE 声明
 ├── scripts/install-skill.sh   # 用户级 Skill 安装脚本
 ├── ohospatch/                 # 可复用 HAR 模块
 │   ├── Index.ets              # HAR 对外 API
@@ -69,7 +69,7 @@ HarmonyOS 中，`OH_JSVM_CreateVM` 创建的独立 JSVM 与 ArkTS 主 VM 不共�
 
 ### 编辑器补全
 
-仓库根目录的 `fixit.d.js` 声明 Patch JS Context 中的 `Fixit`、动态导入类代理、目标描述符、原方法代理、Component DSL、事件上下文、`require`、nil helpers、timer、microtask 和 HiLog console API。Patch 文件首行按相对路径引用声明后，VS Code、WebStorm 等支持 JavaScript/JSDoc 的编辑器即可提供类型提示和自动补全：
+`skills/ohospatch/references/fixit.d.js` 声明 Patch JS Context 中的 `Fixit`、动态导入类代理、目标描述符、原方法代理、Component DSL、事件上下文、`require`、nil helpers、timer、microtask 和 HiLog console API。Patch 文件首行按相对路径引用声明后，VS Code、WebStorm 等支持 JavaScript/JSDoc 的编辑器即可提供类型提示和自动补全：
 
 ```js
 /// <reference path="./fixit.d.js" />

@@ -9,11 +9,11 @@ Create a standalone JavaScript patch that matches the installed OhosPatch Runtim
 
 ## Gather Context
 
-1. Read the target project's `fixit.d.js` completely for the public Patch context API. If it is unavailable, use the installed Skill's `references/fixit.d.js` snapshot.
-2. Read the affected ArkTS class or component and every directly used type. Confirm method names, static/instance ownership, argument order, return shape, and nested property names.
-3. Resolve the exact `bundleName`, HarmonyOS `moduleName`, OH package name, source path, and export name. Pass the full OHM path directly to `Fixit.fix()` or `Fixit.component()`.
-4. Read the OhosPatch `README.md` when the task involves module resolution, Component DSL support, Proxy lifetime, deployment, or current limitations.
-5. Inspect `ohospatch/src/main/cpp/runtime/fixit.js` in the OhosPatch source tree only when behavior is ambiguous or the declaration and Runtime version differ.
+1. Read the installed Skill's `references/fixit.d.js` completely for the public Patch context API.
+2. Determine what to patch from the current change set. By default, inspect the working-tree changes and the diff between the current branch and `main` (`git diff main --stat`, `git diff main`, `git status`) and infer the patch target and intent from those edits. Only skip this when the user explicitly names a class, component, bug, or desired behavior change.
+3. Read the affected ArkTS class or component and every directly used type. Confirm method names, static/instance ownership, argument order, return shape, and nested property names.
+4. Resolve the exact `bundleName`, HarmonyOS `moduleName`, OH package name, source path, and export name per the OHM path format in the Runtime Reference below. Pass the full OHM path directly to `Fixit.fix()` or `Fixit.component()`.
+5. When behavior is ambiguous or the declaration and Runtime version differ, inspect `ohospatch/src/main/cpp/runtime/fixit.js` in the OhosPatch source tree if it is available; otherwise rely on `references/fixit.d.js`.
 
 Do not invent business APIs or infer generated ArkUI method names from source syntax alone. Inspect generated ArkTS output when changing Component behavior beyond an established pattern.
 
@@ -83,10 +83,36 @@ var originClick = panel.node({ type: 'Button', occurrence: 0 })
 - `node.event(...)` returns the original ArkUI event callback proxy; call it with `origin.apply(this, arguments)` when the patch should preserve original event behavior.
 - Do not generate `before`, `after`, `around`, route interception, V2 state, resource/controller values, ID/hierarchy selectors, or forced refresh logic.
 
+## Runtime Reference
+
+The Skill is self-contained: the API declaration lives at `references/fixit.d.js` and the rules below replace any need for the OhosPatch `README.md`, which is not installed alongside the Skill.
+
+### OHM target path
+
+Pass the full OHM source path directly to `Fixit.fix()` or `Fixit.component()`:
+
+```text
+bundleName/moduleName/[packageName/]src/main/ets/File#ExportName
+```
+
+- `@bundle:` prefix and `.ets`/`.ts` suffix are accepted.
+- `ExportName` defaults to the file name when omitted.
+- When `useNormalizedOHMUrl` is enabled and the oh-package `name` differs from `moduleName`, the `packageName` segment is required; omit it when they match.
+- Example: `com.example.app/entry/src/main/ets/model/DemoViewModel#DemoViewModel` resolves to `modulePath = entry/src/main/ets/model/DemoViewModel`, `moduleInfo = com.example.app/entry`, `exportName = DemoViewModel`.
+
+### Current limitations
+
+- Prototype hooks do not cover constructors, instance-field arrow functions, private members, or call sites that bypass property lookup.
+- The handler `this` Proxy is valid only for the current synchronous invocation or `origin` call; it must not escape to timers, promises, or globals. `Fixit.import()` Proxies persist until `OhosPatch.clear()` or patch replacement.
+- Component DSL supports only API 20 state-management V1 exported custom components, `type + occurrence` node selection, JSON-serializable attributes, and synchronous `replace` events. Not supported: `before`/`after`/`around` events, non-exported `@Entry` route pages, state-management V2, ID/hierarchy selectors, resource/controller values, and forced refresh of mounted components.
+- At most 256 active timers per runtime; `setInterval(..., 0)` schedules at 1 ms.
+- At most 512 deduped dynamic-import class, instance, method, or nested-object handles per patch.
+- Download, signature verification, version matching, rollout, caching, rollback, timeout, and circuit breaking are host responsibilities; the HAR owns none of them.
+
 ## Validate
 
 1. Run `node --check <patch-file>`.
-2. When TypeScript is available, run `tsc --allowJs --checkJs --noEmit --skipLibCheck fixit.d.js <patch-file>` from the repository root.
+2. When TypeScript is available, run `tsc --allowJs --checkJs --noEmit --skipLibCheck <fixit.d.js> <patch-file>`, pointing at the Skill's `references/fixit.d.js`.
 3. Check that every target path names a real exported class or component and that no duplicate hook or Component rule exists.
 4. Exercise both the repaired path and the original path. Verify original method exceptions and return types where relevant.
 5. For Component rules, build the HAP and verify visible state and callbacks on an emulator.
@@ -95,6 +121,6 @@ var originClick = panel.node({ type: 'Button', occurrence: 0 })
 ## Deliver
 
 - Produce a complete dynamically deliverable JavaScript file, not a fragment.
-- Preserve the declaration reference as the first line for editor completion; it is a comment and does not affect Runtime execution.
+- Preserve the declaration reference as the first line for editor completion; it is a comment and does not affect Runtime execution. The declaration ships at `references/fixit.d.js` in the installed Skill—copy it next to the patch file or point the reference at that path.
 - State any unresolved target path, type, or Runtime capability explicitly instead of fabricating an implementation.
 - Do not modify business classes to opt into patch dispatch unless the user separately requests a Demo fixture.

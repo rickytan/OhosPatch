@@ -79,7 +79,7 @@ prototype[methodName] = native trampoline ──▶ calls into JSVM handler
 - `ohospatch/` — the **entire** patch implementation, built as a reusable HAR. `Index.ets` → `src/main/ets/OhosPatch.ets` (ArkTS facade) → `src/main/cpp/ohospatch.cpp` (3k-line native core) + `src/main/cpp/runtime/fixit.js` (embedded JS runtime).
 - `entry/` — Demo APP only. Consumes the HAR via `file:../ohospatch`. Contains **no** native or patch implementation source. Business demo classes (`DemoViewModel`, `PatchablePanel`, `Point`) do not reference OhosPatch.
 - `patch-server/` — dev-only HTTP server (`server.mjs` + `patch.js`). **Never** bundled into HAR/HAP.
-- `fixit.d.js` — editor-only JSDoc declaration; not delivered to device, not executed.
+- `skills/ohospatch/references/fixit.d.js` - editor-only JSDoc declaration; not delivered to device, not executed. Installed alongside the skill.
 
 Do **not** move download, signature, URL, cache, or startup policy into `ohospatch` — those are host responsibilities.
 
@@ -99,8 +99,8 @@ Do **not** move download, signature, URL, cache, or startup policy into `ohospat
 
 Several files must stay mutually consistent; a change in one usually requires the others:
 
-- `fixit.d.js` `@version` **must equal** `Fixit.runtimeVersion` in `ohospatch/src/main/cpp/runtime/fixit.js` (currently `1.6.0`). Signatures, constraints, and globals in the declaration must match the runtime.
-- `skills/ohospatch/SKILL.md` + `scripts/install-skill.sh` must track `fixit.d.js`, README limitations, and demonstrated runtime behavior.
+- `skills/ohospatch/references/fixit.d.js` `@version` **must equal** `Fixit.runtimeVersion` in `ohospatch/src/main/cpp/runtime/fixit.js` (currently `1.6.0`). Signatures, constraints, and globals in the declaration must match the runtime.
+- `skills/ohospatch/SKILL.md` + `scripts/install-skill.sh` must track `references/fixit.d.js`, README limitations, and demonstrated runtime behavior.
 - `README.md` "当前边界" (current limitations) must reflect actual runtime capability.
 - `native-safety.test.mjs` pins specific symbol/handle-scope/callback-storage patterns — update it when those patterns legitimately change.
 
