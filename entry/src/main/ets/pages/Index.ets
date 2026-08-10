@@ -1,5 +1,5 @@
 import { http } from '@kit.NetworkKit';
-import { OhosPatch } from 'ohospatch';
+import { OhosPatch } from '@rickytan/ohospatch';
 import { DemoResult, DemoScenario } from '../demo/DemoScenario';
 import { PatchablePanel } from '../demo/PatchablePanel';
 

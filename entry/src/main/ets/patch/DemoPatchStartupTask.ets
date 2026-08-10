@@ -1,6 +1,6 @@
 import { common, StartupTask } from '@kit.AbilityKit';
 import { http } from '@kit.NetworkKit';
-import { OhosPatch } from 'ohospatch';
+import { OhosPatch } from '@rickytan/ohospatch';
 
 @Sendable
 export default class DemoPatchStartupTask extends StartupTask {

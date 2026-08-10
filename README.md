@@ -124,7 +124,7 @@ Demo APP 的模块依赖：
 ```json5
 {
   "dependencies": {
-    "ohospatch": "file:../ohospatch"
+    "@rickytan/ohospatch": "file:../ohospatch"
   }
 }
 ```
@@ -134,7 +134,7 @@ HAR 不声明 `ohos.permission.INTERNET`，不包含 HTTP 客户端、签名实�
 执行完整 patch 字符串：
 
 ```ts
-import { OhosPatch } from 'ohospatch';
+import { OhosPatch } from '@rickytan/ohospatch';
 
 const hookCount = OhosPatch.executeScript(verifiedPatchScript);
 ```

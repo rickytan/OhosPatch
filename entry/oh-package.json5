@@ -4,6 +4,6 @@
   "description": "OhosPatch sample entry module.",
   "main": "Index.ets",
   "dependencies": {
-    "ohospatch": "file:../ohospatch"
+    "@rickytan/ohospatch": "file:../ohospatch"
   }
 }
