@@ -40,7 +40,7 @@ test('installs Fixit and common globals', () => {
   const { context, logs } = createRuntime();
 
   assert.equal(typeof context.Fixit, 'function');
-  assert.equal(context.Fixit.runtimeVersion, '1.2.0');
+  assert.equal(context.Fixit.runtimeVersion, '1.3.0');
   assert.equal(context.nil, null);
   assert.equal(context.Nil, null);
   assert.equal(context.YES, undefined);
@@ -122,6 +122,72 @@ test('require parses a full OHM source path into a target descriptor', () => {
     () => context.require('com.example/entry/src/main/ets/Test#invalid-name'),
     /export name is invalid/
   );
+});
+
+test('registers declarative component value, attribute, and event rules', () => {
+  const { context } = createRuntime();
+  const target = context.require(
+    'com.example.app/entry/src/main/ets/components/DemoPanel#DemoPanel'
+  );
+  const component = context.Fixit.component(target);
+
+  component.param('title').transform((value) => value || 'patched title');
+  component.state('rows').replace([]);
+  const button = component.node({ type: 'Button', occurrence: 0 });
+  button.attrs({ height: 48, backgroundColor: '#1677FF' });
+  button.event('onClick', {
+    capture: ['title', 'rows'],
+    handler(event, componentContext) {
+      componentContext.setState({ title: `clicked:${event.source}` });
+      return 'event handled';
+    }
+  });
+
+  const specs = JSON.parse(context.__ohospatch_uiSpecs());
+  assert.equal(specs.length, 5);
+  assert.deepEqual(specs.map((spec) => spec.kind), [
+    'param', 'state', 'attribute', 'attribute', 'event'
+  ]);
+  assert.deepEqual(specs[2].arguments, [48]);
+  assert.equal(specs[4].nodeType, 'Button');
+  assert.equal(specs[4].occurrence, 0);
+  assert.deepEqual(specs[4].capture, ['title', 'rows']);
+
+  assert.deepEqual(
+    plain(context.__ohospatch_callUiValue(specs[0].ruleId, '')),
+    { handled: true, value: 'patched title' }
+  );
+  assert.deepEqual(
+    plain(context.__ohospatch_callUiValue(specs[1].ruleId, ['old'])),
+    { handled: true, value: [] }
+  );
+  assert.deepEqual(
+    plain(context.__ohospatch_callUiEvent(
+      specs[4].ruleId,
+      { source: 'button' },
+      { title: 'before', rows: ['row'] }
+    )),
+    {
+      handled: true,
+      result: 'event handled',
+      statePatch: { title: 'clicked:button' }
+    }
+  );
+
+  assert.throws(() => button.attr('height', 52), /Duplicate component patch rule/);
+  assert.throws(
+    () => component.node('Button').event('onChange', { mode: 'around', handler() {} }),
+    /Only replace/
+  );
+  assert.throws(() => component.node({ type: 'Text', occurrence: -1 }), /non-negative uint32 integer/);
+  assert.throws(
+    () => component.node('Text').event('onClick', { capture: Array(17).fill('value'), handler() {} }),
+    /at most 16/
+  );
+
+  context.__ohospatch_clear();
+  assert.deepEqual(JSON.parse(context.__ohospatch_uiSpecs()), []);
+  assert.deepEqual(plain(context.__ohospatch_callUiValue(specs[0].ruleId, 'old')), { handled: false });
 });
 
 test('registers instance and class methods and invokes the original method', () => {

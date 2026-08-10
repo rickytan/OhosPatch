@@ -3,9 +3,14 @@
 
   var registry = {
     instance: Object.create(null),
-    klass: Object.create(null)
+    klass: Object.create(null),
+    uiValues: Object.create(null),
+    uiEvents: Object.create(null)
   };
   var specs = [];
+  var uiSpecs = [];
+  var uiRuleKeys = Object.create(null);
+  var nextUiRuleId = 1;
   var targets = Object.create(null);
   var timers = Object.create(null);
   var nextTimerId = 1;
@@ -157,6 +162,191 @@
     };
   }
 
+  function validateUiName(value, label) {
+    if (typeof value !== 'string' || !/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(value)) {
+      throw new TypeError(label + ' must be a valid identifier');
+    }
+    return value;
+  }
+
+  function copyJsonValue(value, label) {
+    if (value === undefined || typeof value === 'function' || typeof value === 'symbol') {
+      throw new TypeError(label + ' must be JSON-serializable');
+    }
+    var json;
+    try {
+      json = JSON.stringify(value);
+    } catch (_) {
+      throw new TypeError(label + ' must be JSON-serializable');
+    }
+    if (json === undefined) {
+      throw new TypeError(label + ' must be JSON-serializable');
+    }
+    return JSON.parse(json);
+  }
+
+  function nextRuleId() {
+    var id = nextUiRuleId;
+    nextUiRuleId += 1;
+    return id;
+  }
+
+  function registerUiRule(uniqueKey, rule, handlerBucket, handler) {
+    if (own(uiRuleKeys, uniqueKey)) {
+      throw new Error('Duplicate component patch rule for ' + uniqueKey);
+    }
+    var ruleId = nextRuleId();
+    rule.ruleId = ruleId;
+    uiRuleKeys[uniqueKey] = ruleId;
+    uiSpecs.push(rule);
+    if (handlerBucket) {
+      handlerBucket[ruleId] = handler;
+    }
+    return ruleId;
+  }
+
+  function copyUiTarget(target) {
+    var descriptor = copyTarget(target);
+    descriptor.targetKey = targetKey(target);
+    return descriptor;
+  }
+
+  function ComponentFix(target, modulePath, exportName) {
+    this.target = normalizeTarget(target, modulePath, exportName);
+  }
+
+  function ComponentValueFix(component, kind, propertyName) {
+    this.component = component;
+    this.kind = kind;
+    this.propertyName = validateUiName(propertyName, 'Component property name');
+  }
+
+  ComponentValueFix.prototype.transform = function (handler) {
+    if (typeof handler !== 'function') {
+      throw new TypeError('Component value transform must be a function');
+    }
+    var target = this.component.target;
+    var uniqueKey = targetKey(target) + '|' + this.kind + '|' + this.propertyName;
+    var rule = copyUiTarget(target);
+    rule.kind = this.kind;
+    rule.propertyName = this.propertyName;
+    rule.operation = 'transform';
+    registerUiRule(uniqueKey, rule, registry.uiValues, handler);
+    return this.component;
+  };
+
+  ComponentValueFix.prototype.replace = function (value) {
+    var replacement = copyJsonValue(value, 'Component replacement value');
+    return this.transform(function () {
+      return replacement;
+    });
+  };
+
+  function normalizeNodeSelector(selector) {
+    var normalized = typeof selector === 'string' ? { type: selector } : selector;
+    if (!normalized || typeof normalized !== 'object') {
+      throw new TypeError('Component node selector must be a type string or descriptor');
+    }
+    var type = validateUiName(normalized.type, 'Component node type');
+    var occurrence = normalized.occurrence === undefined ? 0 : Number(normalized.occurrence);
+    if (!Number.isInteger(occurrence) || occurrence < 0 || occurrence > 4294967295) {
+      throw new TypeError('Component node occurrence must be a non-negative uint32 integer');
+    }
+    return {
+      type: type,
+      occurrence: occurrence
+    };
+  }
+
+  function ComponentNodeFix(component, selector) {
+    this.component = component;
+    this.selector = normalizeNodeSelector(selector);
+  }
+
+  ComponentNodeFix.prototype.attr = function (attributeName) {
+    var name = validateUiName(attributeName, 'Component attribute name');
+    var args = Array.prototype.slice.call(arguments, 1);
+    if (args.length === 0) {
+      throw new TypeError('Component attribute requires at least one argument');
+    }
+    args = copyJsonValue(args, 'Component attribute arguments');
+
+    var target = this.component.target;
+    var selector = this.selector;
+    var uniqueKey = targetKey(target) + '|node|' + selector.type + '|' + selector.occurrence + '|attr|' + name;
+    var rule = copyUiTarget(target);
+    rule.kind = 'attribute';
+    rule.nodeType = selector.type;
+    rule.occurrence = selector.occurrence;
+    rule.attributeName = name;
+    rule.arguments = args;
+    registerUiRule(uniqueKey, rule, null, null);
+    return this;
+  };
+
+  ComponentNodeFix.prototype.attrs = function (attributes) {
+    if (!attributes || typeof attributes !== 'object' || Array.isArray(attributes)) {
+      throw new TypeError('Component attributes must be an object');
+    }
+    var self = this;
+    Object.keys(attributes).forEach(function (name) {
+      self.attr(name, attributes[name]);
+    });
+    return this;
+  };
+
+  ComponentNodeFix.prototype.event = function (eventName, ruleOrHandler) {
+    var name = validateUiName(eventName, 'Component event name');
+    var mode = 'replace';
+    var capture = [];
+    var handler = ruleOrHandler;
+    if (ruleOrHandler && typeof ruleOrHandler === 'object') {
+      mode = ruleOrHandler.mode || mode;
+      capture = ruleOrHandler.capture || capture;
+      handler = ruleOrHandler.handler;
+    }
+    if (mode !== 'replace') {
+      throw new Error('Only replace component event mode is currently supported');
+    }
+    if (typeof handler !== 'function') {
+      throw new TypeError('Component event handler must be a function');
+    }
+    if (!Array.isArray(capture)) {
+      throw new TypeError('Component event capture must be an array');
+    }
+    if (capture.length > 16) {
+      throw new RangeError('Component event capture supports at most 16 properties');
+    }
+    capture = capture.map(function (propertyName) {
+      return validateUiName(propertyName, 'Captured component property');
+    });
+
+    var target = this.component.target;
+    var selector = this.selector;
+    var uniqueKey = targetKey(target) + '|node|' + selector.type + '|' + selector.occurrence + '|event|' + name;
+    var rule = copyUiTarget(target);
+    rule.kind = 'event';
+    rule.nodeType = selector.type;
+    rule.occurrence = selector.occurrence;
+    rule.eventName = name;
+    rule.mode = mode;
+    rule.capture = capture;
+    registerUiRule(uniqueKey, rule, registry.uiEvents, handler);
+    return this;
+  };
+
+  ComponentFix.prototype.param = function (propertyName) {
+    return new ComponentValueFix(this, 'param', propertyName);
+  };
+
+  ComponentFix.prototype.state = function (propertyName) {
+    return new ComponentValueFix(this, 'state', propertyName);
+  };
+
+  ComponentFix.prototype.node = function (selector) {
+    return new ComponentNodeFix(this, selector);
+  };
+
   function Fixit(target, modulePath, exportName) {
     if (!(this instanceof Fixit)) {
       return new Fixit(target, modulePath, exportName);
@@ -166,6 +356,10 @@
 
   Fixit.fix = function (target, modulePath, exportName) {
     return new Fixit(target, modulePath, exportName);
+  };
+
+  Fixit.component = function (target, modulePath, exportName) {
+    return new ComponentFix(target, modulePath, exportName);
   };
 
   Fixit.registerTarget = function (className, target) {
@@ -186,7 +380,7 @@
   };
 
   Object.defineProperty(Fixit, 'runtimeVersion', {
-    value: '1.2.0',
+    value: '1.3.0',
     enumerable: true
   });
 
@@ -305,11 +499,20 @@
     return JSON.stringify(specs);
   };
 
+  global.__ohospatch_uiSpecs = function () {
+    return JSON.stringify(uiSpecs);
+  };
+
   global.__ohospatch_clear = function () {
     clearAllTimers();
     registry.instance = Object.create(null);
     registry.klass = Object.create(null);
+    registry.uiValues = Object.create(null);
+    registry.uiEvents = Object.create(null);
     specs = [];
+    uiSpecs = [];
+    uiRuleKeys = Object.create(null);
+    nextUiRuleId = 1;
     targets = Object.create(null);
   };
 
@@ -333,6 +536,42 @@
       handled: true,
       result: handler.apply(target, args),
       target: target
+    };
+  };
+
+  global.__ohospatch_callUiValue = function (ruleId, value) {
+    var handler = registry.uiValues[ruleId];
+    if (!handler) {
+      return { handled: false };
+    }
+    return {
+      handled: true,
+      value: handler(value)
+    };
+  };
+
+  global.__ohospatch_callUiEvent = function (ruleId, event, state) {
+    var handler = registry.uiEvents[ruleId];
+    if (!handler) {
+      return { handled: false };
+    }
+    var statePatch = Object.create(null);
+    var context = {
+      state: state || {},
+      setState: function (patch) {
+        if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+          throw new TypeError('Component event state patch must be an object');
+        }
+        Object.keys(patch).forEach(function (name) {
+          statePatch[validateUiName(name, 'Component state property')] = patch[name];
+        });
+      }
+    };
+    var result = handler(event || {}, context);
+    return {
+      handled: true,
+      result: result,
+      statePatch: statePatch
     };
   };
 })(typeof globalThis === 'undefined' ? this : globalThis);

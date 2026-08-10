@@ -40,6 +40,8 @@ HarmonyOS 中，`OH_JSVM_CreateVM` 创建的独立 JSVM 与 ArkTS 主 VM 不共�
 
 普通 public 方法调用会经过对象属性和原型查找，因此已创建的业务实例也会在替换后进入 patch。
 
+声明式组件使用 API 20 状态管理 V1 适配器。Native 在目标组件原型上包装编译产物的参数初始化、首次渲染和节点创建入口；参数和状态在原渲染前转换，节点 builder 执行后再写入属性并注册事件回调。公开 DSL 不暴露这些编译器生成的方法名。
+
 ## 内置 JS Runtime
 
 `ohospatch/src/main/cpp/runtime/fixit.js` 定义 `Fixit` 构造函数和 patch 常用全局函数。CMake 在构建 HAR 时将该文件嵌入 `libohospatch.so`；JSVM 创建后先执行内置 runtime，再执行宿主传入的 patch，因此宿主和 patch 都不需要单独加载它。
@@ -47,6 +49,11 @@ HarmonyOS 中，`OH_JSVM_CreateVM` 创建的独立 JSVM 与 ArkTS 主 VM 不共�
 内置 API：
 
 - `Fixit.fix(target)`：创建目标类的 patch 对象。
+- `Fixit.component(target)`：创建声明式组件 patch 对象。
+- `component.param(name)` / `component.state(name)`：转换或替换组件参数与状态。
+- `component.node({ type, occurrence })`：按 ArkUI 节点类型和同类型出现序号选择节点。
+- `node.attr(name, ...args)` / `node.attrs({...})`：覆盖节点属性。
+- `node.event(name, rule)`：替换节点事件并按需读取、更新组件状态。
 - `Fixit.registerTarget(className, descriptor)`：注册类名到 HarmonyOS 模块描述符的映射，使后续可以使用 `Fixit.fix('ClassName')`。
 - `instanceMethod(name, handler)` / `classMethod(name, handler)`：替换实例方法或静态方法，并返回原实现代理。
 - `require(fullPath)`：解析目标类完整 OHM 源路径，生成 `Fixit.fix` 使用的类描述符。
@@ -137,6 +144,34 @@ exportName = DemoViewModel
 
 演示补丁位于 `patch-server/patch.js`，不会打入 HAR 或 HAP。
 
+### 声明式组件 DSL
+
+目标必须是业务模块导出的 API 20 状态管理 V1 自定义组件。业务组件本身不引用 OhosPatch，也不需要基类、装饰器或转发代码：
+
+```js
+var PatchablePanel = require(
+  'com.rickytan.ohospatch/entry/src/main/ets/demo/PatchablePanel#PatchablePanel'
+);
+var panel = Fixit.component(PatchablePanel);
+
+panel.param('message').replace('Patched component parameter');
+panel.state('tapCount').transform(function (value) {
+  return value === 0 ? 40 : value;
+});
+
+panel.node({ type: 'Button', occurrence: 0 })
+  .attrs({ height: 52, backgroundColor: '#C44736' })
+  .event('onClick', {
+    mode: 'replace',
+    capture: ['tapCount'],
+    handler: function (_event, context) {
+      context.setState({ tapCount: context.state.tapCount + 10 });
+    }
+  });
+```
+
+`occurrence` 从 `0` 开始，只在同一目标组件、同一节点类型内计数。属性参数必须可 JSON 序列化。事件首版只支持同步 `replace`；`capture` 最多读取 16 个组件属性，`context.setState()` 的对象会通过组件访问器写回 ArkTS 主 VM。patch handler 不存在或执行失败时，已安装的事件 trampoline 会回调原业务事件。
+
 ## 构建
 
 构建独立 HAR：
@@ -190,12 +225,14 @@ node patch-server/server.mjs
 hdc rport tcp:8080 tcp:8080
 ```
 
-安装并启动 Demo 后，宿主的 AppStartup 任务会下载 patch 字符串并调用 HAR，页面应显示越界访问、实例方法和静态方法均已修复。远程 patch 还会执行 `setTimeout`；等待 100 ms 后点击 `Run again`，实例方法结果应包含 `timer=fired`，HiLog 应出现 `OhosPatch setTimeout callback fired`。停止 patch 服务并重新冷启动应用时，页面应恢复为原始异常结果，从而证明 patch 不是本地打包资源。
+安装并启动 Demo 后，宿主的 AppStartup 任务会下载 patch 字符串并调用 HAR，页面应显示越界访问、实例方法和静态方法均已修复。组件区域应显示 `Patched component parameter | taps=40` 和红色加高按钮；点击 `Component action` 后计数应变为 `50`，证明原来的 `+1` 回调已被替换。远程 patch 还会执行 `setTimeout`；等待 100 ms 后点击 `Run again`，实例方法结果应包含 `timer=fired`，HiLog 应出现 `OhosPatch setTimeout callback fired`。停止 patch 服务并重新冷启动应用时，页面应恢复为原始异常结果，从而证明 patch 不是本地打包资源。
 
 ## 当前边界
 
 - prototype hook 不覆盖构造函数、实例字段形式的箭头函数、私有实现或不经过属性查找的调用点。
 - ArkTS 与 JSVM 当前使用 JSON 数据桥，不能保留任意对象身份、循环引用、函数或 Native 对象。
+- 声明式组件 DSL 首版只支持 API 20 状态管理 V1、业务模块导出的自定义组件、`type + occurrence` 节点选择器、JSON 属性参数和同步事件替换。
+- 非导出的 `@Entry` 页面、状态管理 V2、层级/ID 选择器、资源与控制器类型、已挂载组件的主动刷新，以及 `before/after/around/origin` 事件模式尚未支持。
 - 单个 runtime 最多同时存在 256 个 timer；`setInterval(..., 0)` 会按 1 ms 调度。
 - 生产宿主必须在调用 HAR 前完成非对称签名校验、版本和设备匹配、灰度、缓存、回滚、超时与熔断。
 - HAR 不决定下载方式和启动时机，宿主可以在 AppStartup、业务初始化或其他受控阶段调用。

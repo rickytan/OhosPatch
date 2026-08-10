@@ -3,7 +3,28 @@
     'com.rickytan.ohospatch/entry/src/main/ets/demo/DemoViewModel#DemoViewModel'
   );
   var fix = Fixit.fix(DemoViewModel);
+  var PatchablePanel = require(
+    'com.rickytan.ohospatch/entry/src/main/ets/demo/PatchablePanel#PatchablePanel'
+  );
+  var panel = Fixit.component(PatchablePanel);
   var timerState = 'pending';
+
+  panel.param('message').replace('Patched component parameter');
+  panel.state('tapCount').transform(function (value) {
+    return value === 0 ? 40 : value;
+  });
+  panel.node({ type: 'Button', occurrence: 0 })
+    .attrs({
+      height: 52,
+      backgroundColor: '#C44736'
+    })
+    .event('onClick', {
+      mode: 'replace',
+      capture: ['tapCount'],
+      handler: function (_event, context) {
+        context.setState({ tapCount: context.state.tapCount + 10 });
+      }
+    });
 
   setTimeout(function () {
     timerState = 'fired';

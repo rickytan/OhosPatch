@@ -1,4 +1,5 @@
 import { DemoResult, DemoScenario } from '../demo/DemoScenario';
+import { PatchablePanel } from '../demo/PatchablePanel';
 
 @Entry
 @Component
@@ -30,6 +31,8 @@ struct Index {
         .onClick(() => {
           this.runDemo();
         })
+
+      PatchablePanel({ message: 'Original component parameter' })
 
       Column({ space: 10 }) {
         ForEach(this.rows, (row: string) => {

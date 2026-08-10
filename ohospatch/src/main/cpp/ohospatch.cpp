@@ -77,6 +77,17 @@ napi_value NapiUint32(napi_env env, uint32_t number)
     return value;
 }
 
+void DeleteNapiReference(napi_env env, napi_ref reference, const char *operation)
+{
+    if (!env || !reference) {
+        return;
+    }
+    napi_status status = napi_delete_reference(env, reference);
+    if (status != napi_ok) {
+        LogError(operation, static_cast<int>(status));
+    }
+}
+
 bool NapiString(napi_env env, napi_value value, std::string *output)
 {
     if (!value || !output) {
@@ -96,6 +107,20 @@ bool NapiString(napi_env env, napi_value value, std::string *output)
     text.resize(length);
     *output = std::move(text);
     return true;
+}
+
+bool NapiNamedString(napi_env env, napi_value object, const char *name, std::string *output)
+{
+    napi_value value = nullptr;
+    return NapiOk(env, napi_get_named_property(env, object, name, &value), "napi_get_named_property(string)") &&
+           NapiString(env, value, output);
+}
+
+bool NapiNamedUint32(napi_env env, napi_value object, const char *name, uint32_t *output)
+{
+    napi_value value = nullptr;
+    return NapiOk(env, napi_get_named_property(env, object, name, &value), "napi_get_named_property(uint32)") &&
+           NapiOk(env, napi_get_value_uint32(env, value, output), "napi_get_value_uint32");
 }
 
 bool NapiJsonFunction(napi_env env, const char *name, napi_value *jsonObject, napi_value *function)
@@ -164,6 +189,99 @@ struct ActiveInvocation {
     bool originalExceptionPending = false;
 };
 
+enum class UiRuleKind {
+    PARAM,
+    STATE,
+    ATTRIBUTE,
+    EVENT,
+};
+
+enum class UiMethodKind {
+    PARAM_INITIAL,
+    PARAM_UPDATE,
+    INITIAL_RENDER,
+    OBSERVE_CREATION,
+};
+
+constexpr size_t kMaxUiCaptureProperties = 16;
+constexpr size_t kMaxUiNodeTypesPerRender = 64;
+constexpr size_t kMaxUiEventsPerNode = 16;
+
+struct UiRule {
+    UiRuleKind kind = UiRuleKind::ATTRIBUTE;
+    uint32_t ruleId = 0;
+    std::string className;
+    std::string modulePath;
+    std::string moduleInfo;
+    std::string exportName;
+    std::string targetKey;
+    std::string propertyName;
+    std::string nodeType;
+    uint32_t occurrence = 0;
+    std::string attributeName;
+    std::string argumentsJson;
+    std::string eventName;
+    std::array<std::string, kMaxUiCaptureProperties> captureProperties;
+    size_t captureCount = 0;
+};
+
+struct UiComponentHook;
+
+struct UiMethodHook {
+    UiComponentHook *component = nullptr;
+    UiMethodKind kind = UiMethodKind::PARAM_INITIAL;
+    napi_ref original = nullptr;
+    std::string methodName;
+};
+
+struct UiComponentHook {
+    napi_env env = nullptr;
+    napi_ref holder = nullptr;
+    std::string className;
+    std::string targetKey;
+    std::array<UiMethodHook, 4> methods;
+    size_t methodCount = 0;
+};
+
+struct UiNodeCallbackRecord {
+    napi_env env = nullptr;
+    napi_ref originalBuilder = nullptr;
+    napi_ref componentApi = nullptr;
+    napi_ref owner = nullptr;
+    std::string targetKey;
+    std::string nodeType;
+    uint32_t occurrence = 0;
+};
+
+struct UiEventCallbackRecord {
+    napi_env env = nullptr;
+    napi_ref owner = nullptr;
+    napi_ref originalEvent = nullptr;
+    uint32_t ruleId = 0;
+    std::array<std::string, kMaxUiCaptureProperties> captureProperties;
+    size_t captureCount = 0;
+};
+
+struct UiEventCaptureContext {
+    napi_env env = nullptr;
+    napi_ref originalRegistrar = nullptr;
+    napi_ref originalEvent = nullptr;
+    UiRule *rule = nullptr;
+    bool installed = false;
+};
+
+struct UiNodeTypeCounter {
+    std::string nodeType;
+    uint32_t count = 0;
+};
+
+struct UiRenderFrame {
+    std::string targetKey;
+    napi_value owner = nullptr;
+    std::array<UiNodeTypeCounter, kMaxUiNodeTypesPerRender> counters;
+    size_t counterCount = 0;
+};
+
 class JsvmRuntime;
 
 struct TimerRecord {
@@ -197,7 +315,7 @@ class JsvmRuntime
             !JsvmOk(OH_JSVM_OpenVMScope(vm_, &vmScope_), "OH_JSVM_OpenVMScope", nullptr) ||
             !JsvmOk(OH_JSVM_CreateEnv(vm_, 0, nullptr, &env_), "OH_JSVM_CreateEnv", nullptr) ||
             !JsvmOk(OH_JSVM_OpenEnvScope(env_, &envScope_), "OH_JSVM_OpenEnvScope", env_) ||
-            !InstallNativeFunctions() || !Run(kFixitRuntimeScript)) {
+            !InstallNativeFunctionsWithScope() || !Run(kFixitRuntimeScript)) {
             ResetVm();
             return false;
         }
@@ -215,12 +333,23 @@ class JsvmRuntime
             ClearRegistry();
             return 0;
         }
-        if (!InstallHooks(napiEnv)) {
+        JSVM_HandleScope scope = nullptr;
+        if (!JsvmOk(OH_JSVM_OpenHandleScope(env_, &scope), "OH_JSVM_OpenHandleScope(patch install)", env_)) {
+            ClearRegistry();
+            return 0;
+        }
+        bool hooksInstalled = InstallHooks(napiEnv);
+        bool uiInstalled = hooksInstalled && InstallUiRules(napiEnv);
+        bool scopeClosed = JsvmOk(OH_JSVM_CloseHandleScope(env_, scope),
+                                  "OH_JSVM_CloseHandleScope(patch install)", env_);
+        if (!hooksInstalled || !uiInstalled || !scopeClosed) {
+            RestoreUiHooks();
+            ClearUiRules();
             RestoreHooks();
             ClearRegistry();
             return 0;
         }
-        return hookCount_;
+        return hookCount_ + uiRuleCount_;
     }
 
     bool Clear(napi_env napiEnv)
@@ -228,13 +357,17 @@ class JsvmRuntime
         if (!ready_) {
             return true;
         }
-        if ((hookCount_ > 0 && hooks_[0]->env != napiEnv) || (HasTimers() && hostEnv_ != napiEnv)) {
+        if ((hookCount_ > 0 && hooks_[0]->env != napiEnv) ||
+            (uiComponentHookCount_ > 0 && uiComponentHooks_[0]->env != napiEnv) ||
+            (HasTimers() && hostEnv_ != napiEnv)) {
             LogError("OhosPatch must be cleared on the ArkTS VM where it was installed");
             return false;
         }
+        bool uiRestored = RestoreUiHooks();
+        ClearUiRules();
         bool restored = RestoreHooks();
         bool cleared = ClearRegistry();
-        return restored && cleared;
+        return uiRestored && restored && cleared;
     }
 
     napi_value InvokeHook(napi_env napiEnv, HookRecord *hook, napi_value receiver, size_t argc, const napi_value *argv)
@@ -272,6 +405,14 @@ class JsvmRuntime
             return callOriginal();
         }
 
+        JSVM_HandleScope scope = nullptr;
+        if (!JsvmOk(OH_JSVM_OpenHandleScope(env_, &scope), "OH_JSVM_OpenHandleScope(method patch)", env_)) {
+            return callOriginal();
+        }
+        auto closeScope = [&]() {
+            return JsvmOk(OH_JSVM_CloseHandleScope(env_, scope), "OH_JSVM_CloseHandleScope(method patch)", env_);
+        };
+
         JSVM_Value targetKeyValue = nullptr;
         JSVM_Value methodNameValue = nullptr;
         JSVM_Value classMethodValue = nullptr;
@@ -280,6 +421,7 @@ class JsvmRuntime
         if (!String(hook->targetKey, &targetKeyValue) || !String(hook->methodName, &methodNameValue) ||
             !Bool(hook->classMethod, &classMethodValue) || !ParseJson(targetJson, &targetValue) ||
             !ParseJson(argsJson, &argsValue)) {
+            closeScope();
             return callOriginal();
         }
 
@@ -291,14 +433,18 @@ class JsvmRuntime
         bool originalExceptionPending = activeInvocation_.originalExceptionPending;
         activeInvocation_ = previous;
         if (originalExceptionPending) {
+            closeScope();
             return nullptr;
         }
         if (!called) {
+            closeScope();
             return callOriginal();
         }
 
         std::string resultJson;
-        if (!StringifyJson(patchResult, &resultJson)) {
+        bool stringified = StringifyJson(patchResult, &resultJson);
+        bool scopeClosed = closeScope();
+        if (!stringified || !scopeClosed) {
             return callOriginal();
         }
         napi_value envelope = nullptr;
@@ -351,6 +497,9 @@ class JsvmRuntime
     static constexpr size_t kMaxArguments = 64;
     static constexpr size_t kMaxHooks = 256;
     static constexpr size_t kMaxTimers = 256;
+    static constexpr size_t kMaxUiRules = 256;
+    static constexpr size_t kMaxUiComponentHooks = 64;
+    static constexpr size_t kMaxUiRenderDepth = 16;
 
     JSVM_VM vm_ = nullptr;
     JSVM_VMScope vmScope_ = nullptr;
@@ -364,6 +513,12 @@ class JsvmRuntime
     std::array<std::unique_ptr<HookRecord>, kMaxHooks> hooks_;
     size_t hookCount_ = 0;
     std::array<TimerRecord *, kMaxTimers> timers_{};
+    std::array<std::unique_ptr<UiRule>, kMaxUiRules> uiRules_;
+    size_t uiRuleCount_ = 0;
+    std::array<std::unique_ptr<UiComponentHook>, kMaxUiComponentHooks> uiComponentHooks_;
+    size_t uiComponentHookCount_ = 0;
+    std::array<UiRenderFrame, kMaxUiRenderDepth> uiRenderFrames_;
+    size_t uiRenderDepth_ = 0;
 
     bool BindEventLoop(napi_env napiEnv)
     {
@@ -582,6 +737,292 @@ class JsvmRuntime
             success = false;
         }
         return success;
+    }
+
+    static napi_value UiMethodCallback(napi_env env, napi_callback_info info)
+    {
+        size_t argc = kMaxArguments;
+        napi_value receiver = nullptr;
+        void *data = nullptr;
+        std::array<napi_value, kMaxArguments> argv{};
+        if (!NapiOk(env, napi_get_cb_info(env, info, &argc, argv.data(), &receiver, &data),
+                    "napi_get_cb_info(component method)")) {
+            return NapiUndefined(env);
+        }
+        if (!data) {
+            LogError("OhosPatch component method callback has no UiMethodHook");
+            return NapiUndefined(env);
+        }
+        if (argc > kMaxArguments) {
+            LogError("Component method arguments were truncated to the OhosPatch limit");
+            argc = kMaxArguments;
+        }
+        return Runtime().InvokeUiMethod(env, static_cast<UiMethodHook *>(data), receiver, argc, argv.data());
+    }
+
+    static napi_value UiNodeBuilderCallback(napi_env env, napi_callback_info info)
+    {
+        size_t argc = kMaxArguments;
+        napi_value receiver = nullptr;
+        void *data = nullptr;
+        std::array<napi_value, kMaxArguments> argv{};
+        if (!NapiOk(env, napi_get_cb_info(env, info, &argc, argv.data(), &receiver, &data),
+                    "napi_get_cb_info(component node builder)")) {
+            return NapiUndefined(env);
+        }
+        if (!data) {
+            LogError("OhosPatch component node callback has no UiNodeCallbackRecord");
+            return NapiUndefined(env);
+        }
+        if (argc > kMaxArguments) {
+            LogError("Component node builder arguments were truncated to the OhosPatch limit");
+            argc = kMaxArguments;
+        }
+        return Runtime().InvokeUiNodeBuilder(env, static_cast<UiNodeCallbackRecord *>(data), receiver, argc,
+                                             argv.data());
+    }
+
+    static napi_value UiEventCaptureCallback(napi_env env, napi_callback_info info)
+    {
+        size_t argc = kMaxArguments;
+        napi_value receiver = nullptr;
+        void *data = nullptr;
+        std::array<napi_value, kMaxArguments> argv{};
+        if (!NapiOk(env, napi_get_cb_info(env, info, &argc, argv.data(), &receiver, &data),
+                    "napi_get_cb_info(component event capture)")) {
+            return NapiUndefined(env);
+        }
+        UiEventCaptureContext *capture = static_cast<UiEventCaptureContext *>(data);
+        if (!capture) {
+            LogError("OhosPatch component event capture has no context");
+            return NapiUndefined(env);
+        }
+        if (argc > kMaxArguments) {
+            LogError("Component event registration arguments were truncated to the OhosPatch limit");
+            argc = kMaxArguments;
+        }
+
+        if (argc > 0) {
+            DeleteNapiReference(env, capture->originalEvent, "napi_delete_reference(previous component event)");
+            capture->originalEvent = nullptr;
+            if (!NapiOk(env, napi_create_reference(env, argv[0], 1, &capture->originalEvent),
+                        "napi_create_reference(original component event)")) {
+                capture->originalEvent = nullptr;
+            }
+        }
+
+        napi_value registrar = nullptr;
+        if (!NapiOk(env, napi_get_reference_value(env, capture->originalRegistrar, &registrar),
+                    "napi_get_reference_value(component event registrar)")) {
+            return NapiUndefined(env);
+        }
+        napi_value result = nullptr;
+        napi_status status = napi_call_function(env, receiver, registrar, argc, argv.data(), &result);
+        if (status == napi_pending_exception) {
+            LogError("Original component event registrar threw an exception");
+            return nullptr;
+        }
+        if (!NapiOk(env, status, "napi_call_function(component event registrar)")) {
+            return NapiUndefined(env);
+        }
+        return result;
+    }
+
+    static napi_value UiEventCallback(napi_env env, napi_callback_info info)
+    {
+        size_t argc = kMaxArguments;
+        napi_value receiver = nullptr;
+        void *data = nullptr;
+        std::array<napi_value, kMaxArguments> argv{};
+        if (!NapiOk(env, napi_get_cb_info(env, info, &argc, argv.data(), &receiver, &data),
+                    "napi_get_cb_info(component event)")) {
+            return NapiUndefined(env);
+        }
+        if (!data) {
+            LogError("OhosPatch component event callback has no UiEventCallbackRecord");
+            return NapiUndefined(env);
+        }
+        if (argc > kMaxArguments) {
+            LogError("Component event arguments were truncated to the OhosPatch limit");
+            argc = kMaxArguments;
+        }
+        return Runtime().InvokeUiEvent(env, static_cast<UiEventCallbackRecord *>(data), receiver, argc, argv.data());
+    }
+
+    static void FinalizeUiNodeCallback(napi_env env, void *data, void *)
+    {
+        UiNodeCallbackRecord *record = static_cast<UiNodeCallbackRecord *>(data);
+        if (!record) {
+            return;
+        }
+        DeleteNapiReference(env, record->originalBuilder, "napi_delete_reference(component node builder)");
+        DeleteNapiReference(env, record->componentApi, "napi_delete_reference(component API)");
+        DeleteNapiReference(env, record->owner, "napi_delete_reference(component owner)");
+        delete record;
+    }
+
+    static void FinalizeUiEventCallback(napi_env env, void *data, void *)
+    {
+        UiEventCallbackRecord *record = static_cast<UiEventCallbackRecord *>(data);
+        if (!record) {
+            return;
+        }
+        DeleteNapiReference(env, record->owner, "napi_delete_reference(component event owner)");
+        DeleteNapiReference(env, record->originalEvent, "napi_delete_reference(original component event)");
+        delete record;
+    }
+
+    static napi_value CallUiOriginal(napi_env env, UiMethodHook *method, napi_value receiver, size_t argc,
+                                     const napi_value *argv)
+    {
+        if (!method || !method->original) {
+            LogError("CallUiOriginal received an invalid method hook");
+            return NapiUndefined(env);
+        }
+        napi_value original = nullptr;
+        if (!NapiOk(env, napi_get_reference_value(env, method->original, &original),
+                    "napi_get_reference_value(component original)")) {
+            return NapiUndefined(env);
+        }
+        napi_value result = nullptr;
+        napi_status status = napi_call_function(env, receiver, original, argc, argv, &result);
+        if (status == napi_pending_exception) {
+            LogError("Original ArkUI component method threw an exception");
+            return nullptr;
+        }
+        if (!NapiOk(env, status, "napi_call_function(component original)")) {
+            return NapiUndefined(env);
+        }
+        return result;
+    }
+
+    napi_value InvokeUiMethod(napi_env napiEnv, UiMethodHook *method, napi_value receiver, size_t argc,
+                              napi_value *argv)
+    {
+        if (!method || !method->component) {
+            LogError("Cannot invoke an unavailable component method hook");
+            return NapiUndefined(napiEnv);
+        }
+
+        if ((method->kind == UiMethodKind::PARAM_INITIAL || method->kind == UiMethodKind::PARAM_UPDATE) && argc > 0) {
+            ApplyUiValueRules(napiEnv, method->component->targetKey, UiRuleKind::PARAM, argv[0]);
+        }
+
+        bool pushedFrame = false;
+        if (method->kind == UiMethodKind::INITIAL_RENDER) {
+            ApplyUiValueRules(napiEnv, method->component->targetKey, UiRuleKind::STATE, receiver);
+            pushedFrame = PushUiRenderFrame(method->component->targetKey, receiver);
+        } else if (method->kind == UiMethodKind::OBSERVE_CREATION) {
+            WrapUiNodeBuilder(napiEnv, method->component->targetKey, argc, argv);
+        }
+
+        napi_value result = CallUiOriginal(napiEnv, method, receiver, argc, argv);
+        if (result &&
+            (method->kind == UiMethodKind::PARAM_INITIAL || method->kind == UiMethodKind::PARAM_UPDATE) && argc > 0) {
+            ApplyUiParamValuesToOwner(napiEnv, method->component->targetKey, argv[0], receiver);
+        }
+        if (pushedFrame) {
+            PopUiRenderFrame();
+        }
+        return result;
+    }
+
+    napi_value InvokeUiNodeBuilder(napi_env napiEnv, UiNodeCallbackRecord *record, napi_value receiver, size_t argc,
+                                   napi_value *argv)
+    {
+        if (!record) {
+            return NapiUndefined(napiEnv);
+        }
+        napi_value builder = nullptr;
+        napi_value componentApi = nullptr;
+        if (!NapiOk(napiEnv, napi_get_reference_value(napiEnv, record->originalBuilder, &builder),
+                    "napi_get_reference_value(component node builder)") ||
+            !NapiOk(napiEnv, napi_get_reference_value(napiEnv, record->componentApi, &componentApi),
+                    "napi_get_reference_value(component API)")) {
+            return NapiUndefined(napiEnv);
+        }
+
+        std::array<UiEventCaptureContext, kMaxUiEventsPerNode> captures{};
+        size_t captureCount = PrepareUiEventCaptures(napiEnv, record, componentApi, captures.data(), captures.size());
+
+        napi_value result = nullptr;
+        napi_status status = napi_call_function(napiEnv, receiver, builder, argc, argv, &result);
+        RestoreUiEventCaptures(napiEnv, componentApi, captures.data(), captureCount);
+        if (status == napi_pending_exception) {
+            LogError("Original ArkUI node builder threw an exception");
+            ReleaseUiEventCaptures(napiEnv, captures.data(), captureCount);
+            return nullptr;
+        }
+        if (!NapiOk(napiEnv, status, "napi_call_function(component node builder)")) {
+            ReleaseUiEventCaptures(napiEnv, captures.data(), captureCount);
+            return NapiUndefined(napiEnv);
+        }
+
+        ApplyUiAttributes(napiEnv, record, componentApi);
+        InstallUiEventCallbacks(napiEnv, record, componentApi, captures.data(), captureCount);
+        ReleaseUiEventCaptures(napiEnv, captures.data(), captureCount);
+        return result;
+    }
+
+    napi_value InvokeUiEvent(napi_env napiEnv, UiEventCallbackRecord *record, napi_value receiver, size_t argc,
+                             napi_value *argv)
+    {
+        if (!record) {
+            return NapiUndefined(napiEnv);
+        }
+
+        napi_value event = argc > 0 ? argv[0] : NapiUndefined(napiEnv);
+        napi_value owner = nullptr;
+        NapiOk(napiEnv, napi_get_reference_value(napiEnv, record->owner, &owner),
+               "napi_get_reference_value(component event owner)");
+
+        napi_value state = nullptr;
+        if (!NapiOk(napiEnv, napi_create_object(napiEnv, &state), "napi_create_object(component state)")) {
+            return CallOriginalUiEvent(napiEnv, record, receiver, argc, argv);
+        }
+        if (owner) {
+            for (size_t index = 0; index < record->captureCount; ++index) {
+                napi_value value = nullptr;
+                const std::string &name = record->captureProperties[index];
+                if (NapiOk(napiEnv, napi_get_named_property(napiEnv, owner, name.c_str(), &value),
+                           "napi_get_named_property(captured component state)")) {
+                    NapiOk(napiEnv, napi_set_named_property(napiEnv, state, name.c_str(), value),
+                           "napi_set_named_property(captured component state)");
+                }
+            }
+        }
+
+        napi_value envelope = nullptr;
+        bool handled = false;
+        if (!CallUiEventHandler(napiEnv, record->ruleId, event, state, &envelope, &handled) || !handled) {
+            return CallOriginalUiEvent(napiEnv, record, receiver, argc, argv);
+        }
+
+        if (owner) {
+            bool hasStatePatch = false;
+            if (NapiOk(napiEnv, napi_has_named_property(napiEnv, envelope, "statePatch", &hasStatePatch),
+                       "napi_has_named_property(component state patch)") &&
+                hasStatePatch) {
+                napi_value statePatch = nullptr;
+                if (NapiOk(napiEnv, napi_get_named_property(napiEnv, envelope, "statePatch", &statePatch),
+                           "napi_get_named_property(component state patch)")) {
+                    ApplyTargetPatch(napiEnv, owner, statePatch);
+                }
+            }
+        }
+
+        bool hasResult = false;
+        if (!NapiOk(napiEnv, napi_has_named_property(napiEnv, envelope, "result", &hasResult),
+                    "napi_has_named_property(component event result)") ||
+            !hasResult) {
+            return NapiUndefined(napiEnv);
+        }
+        napi_value result = nullptr;
+        if (!NapiOk(napiEnv, napi_get_named_property(napiEnv, envelope, "result", &result),
+                    "napi_get_named_property(component event result)")) {
+            return NapiUndefined(napiEnv);
+        }
+        return result;
     }
 
     static JSVM_Value OriginCallback(JSVM_Env env, JSVM_CallbackInfo info)
@@ -836,6 +1277,804 @@ class JsvmRuntime
         return true;
     }
 
+    bool CallUiValueHandler(napi_env napiEnv, uint32_t ruleId, napi_value value, napi_value *envelope, bool *handled)
+    {
+        if (!envelope || !handled) {
+            LogError("CallUiValueHandler received an invalid argument");
+            return false;
+        }
+        *handled = false;
+
+        std::string valueJson;
+        if (!NapiJsonStringify(napiEnv, value, "null", &valueJson)) {
+            return false;
+        }
+
+        JSVM_HandleScope scope = nullptr;
+        if (!JsvmOk(OH_JSVM_OpenHandleScope(env_, &scope), "OH_JSVM_OpenHandleScope(component value)", env_)) {
+            return false;
+        }
+
+        JSVM_Value ruleIdValue = nullptr;
+        JSVM_Value valueValue = nullptr;
+        JSVM_Value result = nullptr;
+        std::string resultJson;
+        bool success = JsvmOk(OH_JSVM_CreateUint32(env_, ruleId, &ruleIdValue),
+                              "OH_JSVM_CreateUint32(component value rule)", env_) &&
+                       ParseJson(valueJson, &valueValue);
+        if (success) {
+            JSVM_Value args[] = {ruleIdValue, valueValue};
+            success = CallGlobal("__ohospatch_callUiValue", args, std::size(args), &result) &&
+                      StringifyJson(result, &resultJson);
+        }
+        if (!JsvmOk(OH_JSVM_CloseHandleScope(env_, scope), "OH_JSVM_CloseHandleScope(component value)", env_)) {
+            success = false;
+        }
+        if (!success || !NapiJsonParse(napiEnv, resultJson, envelope)) {
+            return false;
+        }
+
+        napi_value handledValue = nullptr;
+        return NapiOk(napiEnv, napi_get_named_property(napiEnv, *envelope, "handled", &handledValue),
+                      "napi_get_named_property(component value handled)") &&
+               NapiOk(napiEnv, napi_get_value_bool(napiEnv, handledValue, handled),
+                      "napi_get_value_bool(component value handled)");
+    }
+
+    bool CallUiEventHandler(napi_env napiEnv, uint32_t ruleId, napi_value event, napi_value state,
+                            napi_value *envelope, bool *handled)
+    {
+        if (!envelope || !handled) {
+            LogError("CallUiEventHandler received an invalid argument");
+            return false;
+        }
+        *handled = false;
+
+        std::string eventJson;
+        std::string stateJson;
+        if (!NapiJsonStringify(napiEnv, event, "{}", &eventJson) ||
+            !NapiJsonStringify(napiEnv, state, "{}", &stateJson)) {
+            return false;
+        }
+
+        JSVM_HandleScope scope = nullptr;
+        if (!JsvmOk(OH_JSVM_OpenHandleScope(env_, &scope), "OH_JSVM_OpenHandleScope(component event)", env_)) {
+            return false;
+        }
+
+        JSVM_Value ruleIdValue = nullptr;
+        JSVM_Value eventValue = nullptr;
+        JSVM_Value stateValue = nullptr;
+        JSVM_Value result = nullptr;
+        std::string resultJson;
+        bool success = JsvmOk(OH_JSVM_CreateUint32(env_, ruleId, &ruleIdValue),
+                              "OH_JSVM_CreateUint32(component event rule)", env_) &&
+                       ParseJson(eventJson, &eventValue) && ParseJson(stateJson, &stateValue);
+        if (success) {
+            JSVM_Value args[] = {ruleIdValue, eventValue, stateValue};
+            success = CallGlobal("__ohospatch_callUiEvent", args, std::size(args), &result) &&
+                      StringifyJson(result, &resultJson);
+        }
+        if (!JsvmOk(OH_JSVM_CloseHandleScope(env_, scope), "OH_JSVM_CloseHandleScope(component event)", env_)) {
+            success = false;
+        }
+        if (!success || !NapiJsonParse(napiEnv, resultJson, envelope)) {
+            return false;
+        }
+
+        napi_value handledValue = nullptr;
+        return NapiOk(napiEnv, napi_get_named_property(napiEnv, *envelope, "handled", &handledValue),
+                      "napi_get_named_property(component event handled)") &&
+               NapiOk(napiEnv, napi_get_value_bool(napiEnv, handledValue, handled),
+                      "napi_get_value_bool(component event handled)");
+    }
+
+    static napi_value CallOriginalUiEvent(napi_env env, UiEventCallbackRecord *record, napi_value receiver,
+                                          size_t argc, const napi_value *argv)
+    {
+        if (!record || !record->originalEvent) {
+            return NapiUndefined(env);
+        }
+        napi_value original = nullptr;
+        if (!NapiOk(env, napi_get_reference_value(env, record->originalEvent, &original),
+                    "napi_get_reference_value(original component event)")) {
+            return NapiUndefined(env);
+        }
+        napi_value result = nullptr;
+        napi_status status = napi_call_function(env, receiver, original, argc, argv, &result);
+        if (status == napi_pending_exception) {
+            LogError("Original component event callback produced a pending exception");
+            return nullptr;
+        }
+        if (!NapiOk(env, status, "napi_call_function(original component event)")) {
+            return NapiUndefined(env);
+        }
+        return result;
+    }
+
+    void ApplyUiValueRules(napi_env napiEnv, const std::string &targetKey, UiRuleKind kind, napi_value target)
+    {
+        if (!target) {
+            return;
+        }
+        for (size_t index = 0; index < uiRuleCount_; ++index) {
+            UiRule *rule = uiRules_[index].get();
+            if (!rule || rule->kind != kind || rule->targetKey != targetKey) {
+                continue;
+            }
+
+            napi_value current = nullptr;
+            if (!NapiOk(napiEnv, napi_get_named_property(napiEnv, target, rule->propertyName.c_str(), &current),
+                        "napi_get_named_property(component value)")) {
+                continue;
+            }
+            napi_value envelope = nullptr;
+            bool handled = false;
+            if (!CallUiValueHandler(napiEnv, rule->ruleId, current, &envelope, &handled) || !handled) {
+                continue;
+            }
+            napi_value replacement = nullptr;
+            if (!NapiOk(napiEnv, napi_get_named_property(napiEnv, envelope, "value", &replacement),
+                        "napi_get_named_property(component replacement value)")) {
+                continue;
+            }
+            NapiOk(napiEnv, napi_set_named_property(napiEnv, target, rule->propertyName.c_str(), replacement),
+                   "napi_set_named_property(component replacement value)");
+        }
+    }
+
+    void ApplyUiParamValuesToOwner(napi_env napiEnv, const std::string &targetKey, napi_value params,
+                                   napi_value owner)
+    {
+        for (size_t index = 0; index < uiRuleCount_; ++index) {
+            UiRule *rule = uiRules_[index].get();
+            if (!rule || rule->kind != UiRuleKind::PARAM || rule->targetKey != targetKey) {
+                continue;
+            }
+            bool hasValue = false;
+            napi_value value = nullptr;
+            if (NapiOk(napiEnv, napi_has_named_property(napiEnv, params, rule->propertyName.c_str(), &hasValue),
+                       "napi_has_named_property(component parameter)") &&
+                hasValue &&
+                NapiOk(napiEnv, napi_get_named_property(napiEnv, params, rule->propertyName.c_str(), &value),
+                       "napi_get_named_property(component parameter)")) {
+                NapiOk(napiEnv, napi_set_named_property(napiEnv, owner, rule->propertyName.c_str(), value),
+                       "napi_set_named_property(component parameter)");
+            }
+        }
+    }
+
+    bool PushUiRenderFrame(const std::string &targetKey, napi_value owner)
+    {
+        if (uiRenderDepth_ >= kMaxUiRenderDepth) {
+            LogError("Component render nesting exceeds the OhosPatch limit");
+            return false;
+        }
+        UiRenderFrame &frame = uiRenderFrames_[uiRenderDepth_++];
+        frame.targetKey = targetKey;
+        frame.owner = owner;
+        frame.counterCount = 0;
+        return true;
+    }
+
+    void PopUiRenderFrame()
+    {
+        if (uiRenderDepth_ == 0) {
+            return;
+        }
+        UiRenderFrame &frame = uiRenderFrames_[--uiRenderDepth_];
+        frame.targetKey.clear();
+        frame.owner = nullptr;
+        frame.counterCount = 0;
+    }
+
+    bool RuleMatchesNode(const UiRule *rule, const UiNodeCallbackRecord *record) const
+    {
+        return rule && record && rule->targetKey == record->targetKey && rule->nodeType == record->nodeType &&
+               rule->occurrence == record->occurrence;
+    }
+
+    bool ResolveUiNodeType(napi_env napiEnv, const std::string &targetKey, napi_value componentApi,
+                           std::string *nodeType)
+    {
+        napi_value global = nullptr;
+        if (!NapiOk(napiEnv, napi_get_global(napiEnv, &global), "napi_get_global(component node type)")) {
+            return false;
+        }
+        for (size_t index = 0; index < uiRuleCount_; ++index) {
+            UiRule *rule = uiRules_[index].get();
+            if (!rule || (rule->kind != UiRuleKind::ATTRIBUTE && rule->kind != UiRuleKind::EVENT) ||
+                rule->targetKey != targetKey) {
+                continue;
+            }
+            bool alreadyChecked = false;
+            for (size_t previous = 0; previous < index; ++previous) {
+                UiRule *candidate = uiRules_[previous].get();
+                if (candidate && candidate->targetKey == targetKey && candidate->nodeType == rule->nodeType) {
+                    alreadyChecked = true;
+                    break;
+                }
+            }
+            if (alreadyChecked) {
+                continue;
+            }
+
+            bool hasApi = false;
+            if (!NapiOk(napiEnv, napi_has_named_property(napiEnv, global, rule->nodeType.c_str(), &hasApi),
+                        "napi_has_named_property(component API)") ||
+                !hasApi) {
+                continue;
+            }
+            napi_value expectedApi = nullptr;
+            bool equal = false;
+            if (NapiOk(napiEnv, napi_get_named_property(napiEnv, global, rule->nodeType.c_str(), &expectedApi),
+                       "napi_get_named_property(component API)") &&
+                NapiOk(napiEnv, napi_strict_equals(napiEnv, componentApi, expectedApi, &equal),
+                       "napi_strict_equals(component API)") &&
+                equal) {
+                *nodeType = rule->nodeType;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void WrapUiNodeBuilder(napi_env napiEnv, const std::string &targetKey, size_t argc, napi_value *argv)
+    {
+        if (uiRenderDepth_ == 0 || argc < 2 || !argv || uiRenderFrames_[uiRenderDepth_ - 1].targetKey != targetKey) {
+            return;
+        }
+        napi_valuetype builderType = napi_undefined;
+        if (!NapiOk(napiEnv, napi_typeof(napiEnv, argv[0], &builderType), "napi_typeof(component node builder)") ||
+            builderType != napi_function) {
+            return;
+        }
+
+        std::string nodeType;
+        if (!ResolveUiNodeType(napiEnv, targetKey, argv[1], &nodeType)) {
+            return;
+        }
+        UiRenderFrame &frame = uiRenderFrames_[uiRenderDepth_ - 1];
+        UiNodeTypeCounter *counter = nullptr;
+        for (size_t index = 0; index < frame.counterCount; ++index) {
+            if (frame.counters[index].nodeType == nodeType) {
+                counter = &frame.counters[index];
+                break;
+            }
+        }
+        if (!counter) {
+            if (frame.counterCount >= frame.counters.size()) {
+                LogError("Component node type count exceeds the OhosPatch limit");
+                return;
+            }
+            counter = &frame.counters[frame.counterCount++];
+            counter->nodeType = nodeType;
+            counter->count = 0;
+        }
+        uint32_t occurrence = counter->count++;
+
+        bool hasMatchingRule = false;
+        for (size_t index = 0; index < uiRuleCount_; ++index) {
+            UiRule *rule = uiRules_[index].get();
+            if (rule && (rule->kind == UiRuleKind::ATTRIBUTE || rule->kind == UiRuleKind::EVENT) &&
+                rule->targetKey == targetKey && rule->nodeType == nodeType && rule->occurrence == occurrence) {
+                hasMatchingRule = true;
+                break;
+            }
+        }
+        if (!hasMatchingRule) {
+            return;
+        }
+
+        UiNodeCallbackRecord *record = new (std::nothrow) UiNodeCallbackRecord();
+        if (!record) {
+            LogError("Cannot allocate OhosPatch UiNodeCallbackRecord");
+            return;
+        }
+        record->env = napiEnv;
+        record->targetKey = targetKey;
+        record->nodeType = nodeType;
+        record->occurrence = occurrence;
+        if (!NapiOk(napiEnv, napi_create_reference(napiEnv, argv[0], 1, &record->originalBuilder),
+                    "napi_create_reference(component node builder)") ||
+            !NapiOk(napiEnv, napi_create_reference(napiEnv, argv[1], 1, &record->componentApi),
+                    "napi_create_reference(component API)") ||
+            !NapiOk(napiEnv, napi_create_reference(napiEnv, frame.owner, 0, &record->owner),
+                    "napi_create_reference(component owner)")) {
+            FinalizeUiNodeCallback(napiEnv, record, nullptr);
+            return;
+        }
+
+        napi_value wrapper = nullptr;
+        if (!NapiOk(napiEnv,
+                    napi_create_function(napiEnv, "ohospatchNodeBuilder", NAPI_AUTO_LENGTH, UiNodeBuilderCallback,
+                                         record, &wrapper),
+                    "napi_create_function(component node builder)") ||
+            !NapiOk(napiEnv, napi_add_finalizer(napiEnv, wrapper, record, FinalizeUiNodeCallback, nullptr, nullptr),
+                    "napi_add_finalizer(component node builder)")) {
+            FinalizeUiNodeCallback(napiEnv, record, nullptr);
+            return;
+        }
+        argv[0] = wrapper;
+    }
+
+    size_t PrepareUiEventCaptures(napi_env napiEnv, UiNodeCallbackRecord *record, napi_value componentApi,
+                                  UiEventCaptureContext *captures, size_t capacity)
+    {
+        size_t count = 0;
+        for (size_t index = 0; index < uiRuleCount_ && count < capacity; ++index) {
+            UiRule *rule = uiRules_[index].get();
+            if (!rule || rule->kind != UiRuleKind::EVENT || !RuleMatchesNode(rule, record)) {
+                continue;
+            }
+
+            napi_value registrar = nullptr;
+            napi_valuetype registrarType = napi_undefined;
+            if (!NapiOk(napiEnv, napi_get_named_property(napiEnv, componentApi, rule->eventName.c_str(), &registrar),
+                        "napi_get_named_property(component event registrar)") ||
+                !NapiOk(napiEnv, napi_typeof(napiEnv, registrar, &registrarType),
+                        "napi_typeof(component event registrar)") ||
+                registrarType != napi_function) {
+                LogError(rule->nodeType + "." + rule->eventName + " is not an event registrar");
+                continue;
+            }
+
+            UiEventCaptureContext &capture = captures[count];
+            capture.env = napiEnv;
+            capture.rule = rule;
+            if (!NapiOk(napiEnv, napi_create_reference(napiEnv, registrar, 1, &capture.originalRegistrar),
+                        "napi_create_reference(component event registrar)")) {
+                continue;
+            }
+            napi_value captureFunction = nullptr;
+            if (!NapiOk(napiEnv,
+                        napi_create_function(napiEnv, "ohospatchEventCapture", NAPI_AUTO_LENGTH, UiEventCaptureCallback,
+                                             &capture, &captureFunction),
+                        "napi_create_function(component event capture)") ||
+                !NapiOk(napiEnv,
+                        napi_set_named_property(napiEnv, componentApi, rule->eventName.c_str(), captureFunction),
+                        "napi_set_named_property(component event capture)")) {
+                DeleteNapiReference(napiEnv, capture.originalRegistrar,
+                                    "napi_delete_reference(component event registrar)");
+                capture.originalRegistrar = nullptr;
+                continue;
+            }
+            capture.installed = true;
+            ++count;
+        }
+        if (count == capacity) {
+            for (size_t index = 0; index < uiRuleCount_; ++index) {
+                UiRule *rule = uiRules_[index].get();
+                if (rule && rule->kind == UiRuleKind::EVENT && RuleMatchesNode(rule, record)) {
+                    LogError("Component event count reached the OhosPatch per-node limit");
+                    break;
+                }
+            }
+        }
+        return count;
+    }
+
+    static void RestoreUiEventCaptures(napi_env napiEnv, napi_value componentApi, UiEventCaptureContext *captures,
+                                       size_t count)
+    {
+        for (size_t index = 0; index < count; ++index) {
+            UiEventCaptureContext &capture = captures[index];
+            if (!capture.installed || !capture.rule || !capture.originalRegistrar) {
+                continue;
+            }
+            napi_value registrar = nullptr;
+            if (NapiOk(napiEnv, napi_get_reference_value(napiEnv, capture.originalRegistrar, &registrar),
+                       "napi_get_reference_value(component event registrar)")) {
+                NapiOk(napiEnv,
+                       napi_set_named_property(napiEnv, componentApi, capture.rule->eventName.c_str(), registrar),
+                       "napi_set_named_property(restore component event registrar)");
+            }
+            capture.installed = false;
+        }
+    }
+
+    static void ReleaseUiEventCaptures(napi_env napiEnv, UiEventCaptureContext *captures, size_t count)
+    {
+        for (size_t index = 0; index < count; ++index) {
+            DeleteNapiReference(napiEnv, captures[index].originalRegistrar,
+                                "napi_delete_reference(component event registrar)");
+            DeleteNapiReference(napiEnv, captures[index].originalEvent,
+                                "napi_delete_reference(original component event)");
+            captures[index].originalRegistrar = nullptr;
+            captures[index].originalEvent = nullptr;
+        }
+    }
+
+    void ApplyUiAttributes(napi_env napiEnv, UiNodeCallbackRecord *record, napi_value componentApi)
+    {
+        for (size_t index = 0; index < uiRuleCount_; ++index) {
+            UiRule *rule = uiRules_[index].get();
+            if (!rule || rule->kind != UiRuleKind::ATTRIBUTE || !RuleMatchesNode(rule, record)) {
+                continue;
+            }
+
+            napi_value arguments = nullptr;
+            uint32_t argc = 0;
+            if (!NapiJsonParse(napiEnv, rule->argumentsJson, &arguments) ||
+                !NapiOk(napiEnv, napi_get_array_length(napiEnv, arguments, &argc),
+                        "napi_get_array_length(component attribute arguments)")) {
+                continue;
+            }
+            if (argc > kMaxArguments) {
+                LogError("Component attribute argument count exceeds the OhosPatch limit");
+                continue;
+            }
+            std::array<napi_value, kMaxArguments> argv{};
+            bool argsReady = true;
+            for (uint32_t argumentIndex = 0; argumentIndex < argc; ++argumentIndex) {
+                if (!NapiOk(napiEnv, napi_get_element(napiEnv, arguments, argumentIndex, &argv[argumentIndex]),
+                            "napi_get_element(component attribute argument)")) {
+                    argsReady = false;
+                    break;
+                }
+            }
+            if (!argsReady) {
+                continue;
+            }
+
+            napi_value attribute = nullptr;
+            napi_valuetype attributeType = napi_undefined;
+            if (!NapiOk(napiEnv,
+                        napi_get_named_property(napiEnv, componentApi, rule->attributeName.c_str(), &attribute),
+                        "napi_get_named_property(component attribute)") ||
+                !NapiOk(napiEnv, napi_typeof(napiEnv, attribute, &attributeType),
+                        "napi_typeof(component attribute)") ||
+                attributeType != napi_function) {
+                LogError(rule->nodeType + "." + rule->attributeName + " is not an attribute function");
+                continue;
+            }
+            napi_value ignored = nullptr;
+            NapiOk(napiEnv, napi_call_function(napiEnv, componentApi, attribute, argc, argv.data(), &ignored),
+                   "napi_call_function(component attribute)");
+        }
+    }
+
+    void InstallUiEventCallbacks(napi_env napiEnv, UiNodeCallbackRecord *nodeRecord, napi_value componentApi,
+                                 UiEventCaptureContext *captures, size_t count)
+    {
+        napi_value owner = nullptr;
+        NapiOk(napiEnv, napi_get_reference_value(napiEnv, nodeRecord->owner, &owner),
+               "napi_get_reference_value(component owner for event)");
+
+        for (size_t index = 0; index < count; ++index) {
+            UiEventCaptureContext &capture = captures[index];
+            UiRule *rule = capture.rule;
+            if (!rule || !capture.originalRegistrar) {
+                continue;
+            }
+
+            UiEventCallbackRecord *record = new (std::nothrow) UiEventCallbackRecord();
+            if (!record) {
+                LogError("Cannot allocate OhosPatch UiEventCallbackRecord");
+                continue;
+            }
+            record->env = napiEnv;
+            record->ruleId = rule->ruleId;
+            record->captureCount = rule->captureCount;
+            record->captureProperties = rule->captureProperties;
+            record->originalEvent = capture.originalEvent;
+            capture.originalEvent = nullptr;
+            if (owner && !NapiOk(napiEnv, napi_create_reference(napiEnv, owner, 0, &record->owner),
+                                 "napi_create_reference(component event owner)")) {
+                FinalizeUiEventCallback(napiEnv, record, nullptr);
+                continue;
+            }
+
+            napi_value callback = nullptr;
+            if (!NapiOk(napiEnv,
+                        napi_create_function(napiEnv, "ohospatchEvent", NAPI_AUTO_LENGTH, UiEventCallback, record,
+                                             &callback),
+                        "napi_create_function(component event)") ||
+                !NapiOk(napiEnv, napi_add_finalizer(napiEnv, callback, record, FinalizeUiEventCallback, nullptr, nullptr),
+                        "napi_add_finalizer(component event)")) {
+                FinalizeUiEventCallback(napiEnv, record, nullptr);
+                continue;
+            }
+
+            napi_value registrar = nullptr;
+            if (!NapiOk(napiEnv, napi_get_reference_value(napiEnv, capture.originalRegistrar, &registrar),
+                        "napi_get_reference_value(component event registrar)")) {
+                continue;
+            }
+            napi_value ignored = nullptr;
+            NapiOk(napiEnv, napi_call_function(napiEnv, componentApi, registrar, 1, &callback, &ignored),
+                   "napi_call_function(install component event)");
+        }
+    }
+
+    bool ParseUiRule(napi_env napiEnv, napi_value spec, std::unique_ptr<UiRule> *output)
+    {
+        std::unique_ptr<UiRule> rule(new (std::nothrow) UiRule());
+        if (!rule) {
+            LogError("Cannot allocate OhosPatch UiRule");
+            return false;
+        }
+
+        std::string kind;
+        if (!NapiNamedString(napiEnv, spec, "kind", &kind) ||
+            !NapiNamedUint32(napiEnv, spec, "ruleId", &rule->ruleId) ||
+            !NapiNamedString(napiEnv, spec, "className", &rule->className) ||
+            !NapiNamedString(napiEnv, spec, "modulePath", &rule->modulePath) ||
+            !NapiNamedString(napiEnv, spec, "moduleInfo", &rule->moduleInfo) ||
+            !NapiNamedString(napiEnv, spec, "exportName", &rule->exportName) ||
+            !NapiNamedString(napiEnv, spec, "targetKey", &rule->targetKey)) {
+            return false;
+        }
+
+        if (kind == "param") {
+            rule->kind = UiRuleKind::PARAM;
+            if (!NapiNamedString(napiEnv, spec, "propertyName", &rule->propertyName)) {
+                return false;
+            }
+        } else if (kind == "state") {
+            rule->kind = UiRuleKind::STATE;
+            if (!NapiNamedString(napiEnv, spec, "propertyName", &rule->propertyName)) {
+                return false;
+            }
+        } else if (kind == "attribute") {
+            rule->kind = UiRuleKind::ATTRIBUTE;
+            napi_value arguments = nullptr;
+            if (!NapiNamedString(napiEnv, spec, "nodeType", &rule->nodeType) ||
+                !NapiNamedUint32(napiEnv, spec, "occurrence", &rule->occurrence) ||
+                !NapiNamedString(napiEnv, spec, "attributeName", &rule->attributeName) ||
+                !NapiOk(napiEnv, napi_get_named_property(napiEnv, spec, "arguments", &arguments),
+                        "napi_get_named_property(component attribute arguments)") ||
+                !NapiJsonStringify(napiEnv, arguments, "[]", &rule->argumentsJson)) {
+                return false;
+            }
+        } else if (kind == "event") {
+            rule->kind = UiRuleKind::EVENT;
+            napi_value capture = nullptr;
+            uint32_t captureCount = 0;
+            if (!NapiNamedString(napiEnv, spec, "nodeType", &rule->nodeType) ||
+                !NapiNamedUint32(napiEnv, spec, "occurrence", &rule->occurrence) ||
+                !NapiNamedString(napiEnv, spec, "eventName", &rule->eventName) ||
+                !NapiOk(napiEnv, napi_get_named_property(napiEnv, spec, "capture", &capture),
+                        "napi_get_named_property(component event capture)") ||
+                !NapiOk(napiEnv, napi_get_array_length(napiEnv, capture, &captureCount),
+                        "napi_get_array_length(component event capture)")) {
+                return false;
+            }
+            if (captureCount > kMaxUiCaptureProperties) {
+                LogError("Component event capture count exceeds the OhosPatch limit");
+                return false;
+            }
+            rule->captureCount = captureCount;
+            for (uint32_t index = 0; index < captureCount; ++index) {
+                napi_value property = nullptr;
+                if (!NapiOk(napiEnv, napi_get_element(napiEnv, capture, index, &property),
+                            "napi_get_element(component event capture)") ||
+                    !NapiString(napiEnv, property, &rule->captureProperties[index])) {
+                    return false;
+                }
+            }
+        } else {
+            LogError("Unsupported component rule kind: " + kind);
+            return false;
+        }
+
+        *output = std::move(rule);
+        return true;
+    }
+
+    bool TargetNeedsRuleKind(const std::string &targetKey, UiRuleKind kind) const
+    {
+        for (size_t index = 0; index < uiRuleCount_; ++index) {
+            UiRule *rule = uiRules_[index].get();
+            if (rule && rule->targetKey == targetKey && rule->kind == kind) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool InstallUiMethod(napi_env napiEnv, UiComponentHook *component, napi_value holder, const char *methodName,
+                         UiMethodKind kind)
+    {
+        if (component->methodCount >= component->methods.size()) {
+            LogError("Component method hook count exceeds the OhosPatch limit");
+            return false;
+        }
+        napi_value original = nullptr;
+        napi_valuetype originalType = napi_undefined;
+        if (!NapiOk(napiEnv, napi_get_named_property(napiEnv, holder, methodName, &original),
+                    "napi_get_named_property(component original method)") ||
+            !NapiOk(napiEnv, napi_typeof(napiEnv, original, &originalType),
+                    "napi_typeof(component original method)")) {
+            return false;
+        }
+        if (originalType != napi_function) {
+            LogError(component->className + "." + methodName + " is not available for component patching");
+            return false;
+        }
+
+        UiMethodHook &method = component->methods[component->methodCount];
+        method.component = component;
+        method.kind = kind;
+        method.methodName = methodName;
+        if (!NapiOk(napiEnv, napi_create_reference(napiEnv, original, 1, &method.original),
+                    "napi_create_reference(component original method)")) {
+            return false;
+        }
+        napi_value trampoline = nullptr;
+        if (!NapiOk(napiEnv,
+                    napi_create_function(napiEnv, methodName, NAPI_AUTO_LENGTH, UiMethodCallback, &method, &trampoline),
+                    "napi_create_function(component method trampoline)") ||
+            !NapiOk(napiEnv, napi_set_named_property(napiEnv, holder, methodName, trampoline),
+                    "napi_set_named_property(component method trampoline)")) {
+            DeleteNapiReference(napiEnv, method.original, "napi_delete_reference(component original method)");
+            method.original = nullptr;
+            return false;
+        }
+        ++component->methodCount;
+        return true;
+    }
+
+    bool InstallUiComponentHook(napi_env napiEnv, UiRule *rule)
+    {
+        if (!rule || uiComponentHookCount_ >= kMaxUiComponentHooks) {
+            LogError("Component target count exceeds the OhosPatch limit");
+            return false;
+        }
+
+        napi_value module = nullptr;
+        napi_status loadStatus = rule->moduleInfo.empty()
+                                     ? napi_load_module(napiEnv, rule->modulePath.c_str(), &module)
+                                     : napi_load_module_with_info(napiEnv, rule->modulePath.c_str(),
+                                                                  rule->moduleInfo.c_str(), &module);
+        if (!NapiOk(napiEnv, loadStatus, "napi_load_module_with_info(component target)")) {
+            return false;
+        }
+        napi_value constructor = nullptr;
+        napi_value holder = nullptr;
+        if (!NapiOk(napiEnv, napi_get_named_property(napiEnv, module, rule->exportName.c_str(), &constructor),
+                    "napi_get_named_property(component export)") ||
+            !NapiOk(napiEnv, napi_get_named_property(napiEnv, constructor, "prototype", &holder),
+                    "napi_get_named_property(component prototype)")) {
+            return false;
+        }
+
+        std::unique_ptr<UiComponentHook> component(new (std::nothrow) UiComponentHook());
+        if (!component) {
+            LogError("Cannot allocate OhosPatch UiComponentHook");
+            return false;
+        }
+        component->env = napiEnv;
+        component->className = rule->className;
+        component->targetKey = rule->targetKey;
+        if (!NapiOk(napiEnv, napi_create_reference(napiEnv, holder, 1, &component->holder),
+                    "napi_create_reference(component prototype)")) {
+            return false;
+        }
+
+        UiComponentHook *componentPointer = component.get();
+        uiComponentHooks_[uiComponentHookCount_++] = std::move(component);
+        bool needsParam = TargetNeedsRuleKind(rule->targetKey, UiRuleKind::PARAM);
+        bool needsState = TargetNeedsRuleKind(rule->targetKey, UiRuleKind::STATE);
+        bool needsNodes = TargetNeedsRuleKind(rule->targetKey, UiRuleKind::ATTRIBUTE) ||
+                          TargetNeedsRuleKind(rule->targetKey, UiRuleKind::EVENT);
+        if (needsParam &&
+            (!InstallUiMethod(napiEnv, componentPointer, holder, "setInitiallyProvidedValue",
+                              UiMethodKind::PARAM_INITIAL) ||
+             !InstallUiMethod(napiEnv, componentPointer, holder, "updateStateVars", UiMethodKind::PARAM_UPDATE))) {
+            return false;
+        }
+        if ((needsState || needsNodes) &&
+            !InstallUiMethod(napiEnv, componentPointer, holder, "initialRender", UiMethodKind::INITIAL_RENDER)) {
+            return false;
+        }
+        if (needsNodes &&
+            !InstallUiMethod(napiEnv, componentPointer, holder, "observeComponentCreation2",
+                             UiMethodKind::OBSERVE_CREATION)) {
+            return false;
+        }
+        return true;
+    }
+
+    bool InstallUiRules(napi_env napiEnv)
+    {
+        JSVM_Value specsValue = nullptr;
+        std::string specsJson;
+        if (!CallGlobal("__ohospatch_uiSpecs", nullptr, 0, &specsValue) || !JsvmString(specsValue, &specsJson)) {
+            return false;
+        }
+        napi_value specs = nullptr;
+        uint32_t length = 0;
+        if (!NapiJsonParse(napiEnv, specsJson, &specs) ||
+            !NapiOk(napiEnv, napi_get_array_length(napiEnv, specs, &length),
+                    "napi_get_array_length(component patch specs)")) {
+            return false;
+        }
+        if (length > kMaxUiRules) {
+            LogError("Component patch rule count exceeds the OhosPatch limit");
+            return false;
+        }
+
+        for (uint32_t index = 0; index < length; ++index) {
+            napi_value spec = nullptr;
+            std::unique_ptr<UiRule> rule;
+            if (!NapiOk(napiEnv, napi_get_element(napiEnv, specs, index, &spec),
+                        "napi_get_element(component patch spec)") ||
+                !ParseUiRule(napiEnv, spec, &rule)) {
+                return false;
+            }
+            uiRules_[uiRuleCount_++] = std::move(rule);
+        }
+
+        for (size_t index = 0; index < uiRuleCount_; ++index) {
+            UiRule *rule = uiRules_[index].get();
+            bool installed = false;
+            for (size_t componentIndex = 0; componentIndex < uiComponentHookCount_; ++componentIndex) {
+                if (uiComponentHooks_[componentIndex]->targetKey == rule->targetKey) {
+                    installed = true;
+                    break;
+                }
+            }
+            if (!installed && !InstallUiComponentHook(napiEnv, rule)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool RestoreUiHooks()
+    {
+        std::array<std::unique_ptr<UiComponentHook>, kMaxUiComponentHooks> retained;
+        size_t retainedCount = 0;
+        bool success = true;
+        for (size_t index = uiComponentHookCount_; index > 0; --index) {
+            std::unique_ptr<UiComponentHook> component = std::move(uiComponentHooks_[index - 1]);
+            napi_value holder = nullptr;
+            bool restored = NapiOk(component->env,
+                                   napi_get_reference_value(component->env, component->holder, &holder),
+                                   "napi_get_reference_value(component prototype)");
+            for (size_t methodIndex = component->methodCount; restored && methodIndex > 0; --methodIndex) {
+                UiMethodHook &method = component->methods[methodIndex - 1];
+                napi_value original = nullptr;
+                restored = NapiOk(component->env,
+                                  napi_get_reference_value(component->env, method.original, &original),
+                                  "napi_get_reference_value(component original method)") &&
+                           NapiOk(component->env,
+                                  napi_set_named_property(component->env, holder, method.methodName.c_str(), original),
+                                  "napi_set_named_property(restore component method)");
+            }
+            if (!restored) {
+                retained[retainedCount++] = std::move(component);
+                success = false;
+                continue;
+            }
+            for (size_t methodIndex = 0; methodIndex < component->methodCount; ++methodIndex) {
+                DeleteNapiReference(component->env, component->methods[methodIndex].original,
+                                    "napi_delete_reference(component original method)");
+                component->methods[methodIndex].original = nullptr;
+            }
+            DeleteNapiReference(component->env, component->holder, "napi_delete_reference(component prototype)");
+            component->holder = nullptr;
+        }
+
+        uiComponentHookCount_ = retainedCount;
+        for (size_t index = 0; index < retainedCount; ++index) {
+            uiComponentHooks_[index] = std::move(retained[index]);
+        }
+        return success;
+    }
+
+    void ClearUiRules()
+    {
+        for (size_t index = 0; index < uiRuleCount_; ++index) {
+            uiRules_[index].reset();
+        }
+        uiRuleCount_ = 0;
+        while (uiRenderDepth_ > 0) {
+            PopUiRenderFrame();
+        }
+    }
+
     bool InstallNativeFunctions()
     {
         if (!JsvmOk(OH_JSVM_SetInstanceData(env_, this, nullptr, nullptr), "OH_JSVM_SetInstanceData", env_)) {
@@ -846,7 +2085,7 @@ class JsvmRuntime
             return false;
         }
 
-        JSVM_CallbackStruct originCallback{OriginCallback, nullptr};
+        static JSVM_CallbackStruct originCallback{OriginCallback, nullptr};
         JSVM_Value originFunction = nullptr;
         if (!JsvmOk(
                 OH_JSVM_CreateFunction(env_, "__ohospatch_origin", JSVM_AUTO_LENGTH, &originCallback, &originFunction),
@@ -856,7 +2095,7 @@ class JsvmRuntime
             return false;
         }
 
-        JSVM_CallbackStruct logCallback{HiLogCallback, nullptr};
+        static JSVM_CallbackStruct logCallback{HiLogCallback, nullptr};
         JSVM_Value logFunction = nullptr;
         if (!JsvmOk(OH_JSVM_CreateFunction(env_, "__ohospatch_hilog", JSVM_AUTO_LENGTH, &logCallback, &logFunction),
                     "OH_JSVM_CreateFunction(hilog)", env_) ||
@@ -865,7 +2104,7 @@ class JsvmRuntime
             return false;
         }
 
-        JSVM_CallbackStruct scheduleTimerCallback{ScheduleTimerCallback, nullptr};
+        static JSVM_CallbackStruct scheduleTimerCallback{ScheduleTimerCallback, nullptr};
         JSVM_Value scheduleTimerFunction = nullptr;
         if (!JsvmOk(OH_JSVM_CreateFunction(env_, "__ohospatch_scheduleTimer", JSVM_AUTO_LENGTH, &scheduleTimerCallback,
                                            &scheduleTimerFunction),
@@ -875,13 +2114,25 @@ class JsvmRuntime
             return false;
         }
 
-        JSVM_CallbackStruct cancelTimerCallback{CancelTimerCallback, nullptr};
+        static JSVM_CallbackStruct cancelTimerCallback{CancelTimerCallback, nullptr};
         JSVM_Value cancelTimerFunction = nullptr;
         return JsvmOk(OH_JSVM_CreateFunction(env_, "__ohospatch_cancelTimer", JSVM_AUTO_LENGTH, &cancelTimerCallback,
                                              &cancelTimerFunction),
                       "OH_JSVM_CreateFunction(cancel timer)", env_) &&
                JsvmOk(OH_JSVM_SetNamedProperty(env_, global, "__ohospatch_cancelTimer", cancelTimerFunction),
                       "OH_JSVM_SetNamedProperty(cancel timer)", env_);
+    }
+
+    bool InstallNativeFunctionsWithScope()
+    {
+        JSVM_HandleScope scope = nullptr;
+        if (!JsvmOk(OH_JSVM_OpenHandleScope(env_, &scope), "OH_JSVM_OpenHandleScope(native functions)", env_)) {
+            return false;
+        }
+        bool installed = InstallNativeFunctions();
+        bool closed = JsvmOk(OH_JSVM_CloseHandleScope(env_, scope),
+                             "OH_JSVM_CloseHandleScope(native functions)", env_);
+        return installed && closed;
     }
 
     bool Run(const std::string &script)
@@ -1070,9 +2321,15 @@ class JsvmRuntime
     bool ClearRegistry()
     {
         bool timersCleared = CancelAllTimers();
+        JSVM_HandleScope scope = nullptr;
+        if (!JsvmOk(OH_JSVM_OpenHandleScope(env_, &scope), "OH_JSVM_OpenHandleScope(clear registry)", env_)) {
+            return false;
+        }
         JSVM_Value ignored = nullptr;
         bool registryCleared = CallGlobal("__ohospatch_clear", nullptr, 0, &ignored);
-        return timersCleared && registryCleared;
+        bool closed = JsvmOk(OH_JSVM_CloseHandleScope(env_, scope),
+                             "OH_JSVM_CloseHandleScope(clear registry)", env_);
+        return timersCleared && registryCleared && closed;
     }
 
     bool CallGlobal(const char *name, const JSVM_Value *args, size_t argc, JSVM_Value *output)

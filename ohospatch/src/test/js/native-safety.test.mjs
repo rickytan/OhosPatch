@@ -31,3 +31,26 @@ test('native timer bridge uses the host event loop', async () => {
   assert.match(source, /OH_JSVM_PerformMicrotaskCheckpoint/);
   assert.match(cmake, /libuv\.so/);
 });
+
+test('JSVM calls own handle scopes and native callbacks have stable storage', async () => {
+  const source = await readFile(cppUrl, 'utf8');
+
+  assert.match(source, /OH_JSVM_OpenHandleScope\(env_, &scope\).*patch install/s);
+  assert.match(source, /OH_JSVM_OpenHandleScope\(env_, &scope\).*method patch/s);
+  assert.match(source, /OH_JSVM_OpenHandleScope\(env_, &scope\).*clear registry/s);
+  assert.match(source, /static JSVM_CallbackStruct originCallback/);
+  assert.match(source, /static JSVM_CallbackStruct scheduleTimerCallback/);
+});
+
+test('native component adapter covers values, node builders, attributes, and events', async () => {
+  const source = await readFile(cppUrl, 'utf8');
+
+  assert.match(source, /__ohospatch_uiSpecs/);
+  assert.match(source, /setInitiallyProvidedValue/);
+  assert.match(source, /updateStateVars/);
+  assert.match(source, /initialRender/);
+  assert.match(source, /observeComponentCreation2/);
+  assert.match(source, /PrepareUiEventCaptures/);
+  assert.match(source, /ApplyUiAttributes/);
+  assert.match(source, /__ohospatch_callUiEvent/);
+});
