@@ -159,6 +159,23 @@ ohospatch/build/default/outputs/default/ohospatch.har
   --mode module -p module=entry assembleHap --no-daemon
 ```
 
+## GitHub Actions
+
+`.github/workflows/harmonyos-build.yml` 提供两级 CI：
+
+- push 和 pull request 在 GitHub-hosted Ubuntu runner 上执行 JS runtime 单元测试。
+- 手动运行 `HarmonyOS CI` workflow 时，在自托管 macOS ARM64 runner 上构建 HAR 和未签名 HAP，并上传为保留 14 天的 artifact。
+- 设置仓库变量 `HARMONYOS_CI_ENABLED=true` 后，`main` 分支每次 push 也会自动打包。pull request 不会执行自托管打包任务。
+
+打包 runner 需要注册 `self-hosted`、`macOS`、`ARM64`、`harmonyos` 标签，并预装 DevEco Studio、Command Line Tools 和 OpenHarmony API 20 SDK。默认从以下位置查找工具：
+
+```text
+/Applications/DevEco-Studio.app/Contents
+$HOME/Library/OpenHarmony/Sdk
+```
+
+路径不同时，通过仓库变量 `DEVECO_STUDIO_HOME` 和 `OHOS_BASE_SDK_HOME` 覆盖。当前工程没有签名配置，因此 CI 产出的 HAP 仅用于编译验证；发布包仍需在受控环境注入证书与 Profile。
+
 ## Demo 验证
 
 启动动态 patch 服务：

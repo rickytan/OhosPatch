@@ -1,0 +1,111 @@
+name: HarmonyOS CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: harmonyos-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Runtime tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run tests
+        run: npm test
+
+  package:
+    name: Build HAR and HAP
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && vars.HARMONYOS_CI_ENABLED == 'true')
+    needs: test
+    runs-on:
+      - self-hosted
+      - macOS
+      - ARM64
+      - harmonyos
+    timeout-minutes: 30
+    env:
+      CONFIGURED_DEVECO_HOME: ${{ vars.DEVECO_STUDIO_HOME }}
+      CONFIGURED_OHOS_SDK_HOME: ${{ vars.OHOS_BASE_SDK_HOME }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure HarmonyOS toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          deveco_home="${CONFIGURED_DEVECO_HOME:-/Applications/DevEco-Studio.app/Contents}"
+          sdk_home="${CONFIGURED_OHOS_SDK_HOME:-$HOME/Library/OpenHarmony/Sdk}"
+          hvigorw="$deveco_home/tools/hvigor/bin/hvigorw"
+          ohpm="$deveco_home/tools/ohpm/bin/ohpm"
+
+          test -x "$hvigorw"
+          test -x "$ohpm"
+          test -d "$sdk_home/20/native"
+
+          echo "DEVECO_STUDIO_HOME=$deveco_home" >> "$GITHUB_ENV"
+          echo "OHOS_BASE_SDK_HOME=$sdk_home" >> "$GITHUB_ENV"
+          echo "$deveco_home/tools/node/bin" >> "$GITHUB_PATH"
+          echo "$deveco_home/tools/ohpm/bin" >> "$GITHUB_PATH"
+          echo "$deveco_home/tools/hvigor/bin" >> "$GITHUB_PATH"
+
+          "$hvigorw" --version
+          "$ohpm" --version
+
+      - name: Install OHPM dependencies
+        run: ohpm install --all
+
+      - name: Build OhosPatch HAR
+        run: >-
+          hvigorw --mode module -p module=ohospatch
+          clean assembleHar --no-daemon
+
+      - name: Build Demo HAP
+        run: >-
+          hvigorw --mode module -p module=entry
+          clean assembleHap --no-daemon
+
+      - name: Verify native exception policy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          library="ohospatch/build/default/intermediates/cmake/default/obj/arm64-v8a/libohospatch.so"
+          symbols="$($OHOS_BASE_SDK_HOME/20/native/llvm/bin/llvm-nm -D -u "$library")"
+          if grep -Eq '__cxa_(throw|begin_catch|rethrow)|_Unwind_RaiseException' <<< "$symbols"; then
+            echo "C++ exception symbols found in libohospatch.so" >&2
+            exit 1
+          fi
+
+      - name: Upload unsigned packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: ohospatch-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            ohospatch/build/default/outputs/default/*.har
+            entry/build/default/outputs/default/*.hap
