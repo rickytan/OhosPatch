@@ -167,7 +167,7 @@ ohospatch/build/default/outputs/default/ohospatch.har
 - 手动运行 `HarmonyOS CI` workflow 时，在自托管 macOS ARM64 runner 上构建 HAR 和未签名 HAP，并上传为保留 14 天的 artifact。
 - 设置仓库变量 `HARMONYOS_CI_ENABLED=true` 后，`main` 分支每次 push 也会自动打包。pull request 不会执行自托管打包任务。
 
-打包 runner 需要注册 `self-hosted`、`macOS`、`ARM64`、`harmonyos` 标签，并预装 DevEco Studio、Command Line Tools 和 OpenHarmony API 20 SDK。默认从以下位置查找工具：
+打包 runner 需要注册 `self-hosted`、`macOS`、`ARM64`、`harmonyos` 标签，GitHub Actions Runner 版本不低于 `2.327.1`，并预装 DevEco Studio、Command Line Tools 和 OpenHarmony API 20 SDK。默认从以下位置查找工具：
 
 ```text
 /Applications/DevEco-Studio.app/Contents

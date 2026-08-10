@@ -23,10 +23,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 22
 
@@ -50,7 +50,7 @@ jobs:
       CONFIGURED_OHOS_SDK_HOME: ${{ vars.OHOS_BASE_SDK_HOME }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Configure HarmonyOS toolchain
         shell: bash
@@ -101,7 +101,7 @@ jobs:
           fi
 
       - name: Upload unsigned packages
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ohospatch-${{ github.sha }}
           if-no-files-found: error
