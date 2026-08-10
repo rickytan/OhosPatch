@@ -1,9 +1,12 @@
-!(function (Fixit, require) {
-  var DemoViewModel = require(
+/// <reference path="../fixit.d.js" />
+
+(function (Fixit, require) {
+  var loadClass = require;
+  var DemoViewModel = loadClass(
     'com.rickytan.ohospatch/entry/src/main/ets/demo/DemoViewModel#DemoViewModel'
   );
   var fix = Fixit.fix(DemoViewModel);
-  var PatchablePanel = require(
+  var PatchablePanel = loadClass(
     'com.rickytan.ohospatch/entry/src/main/ets/demo/PatchablePanel#PatchablePanel'
   );
   var panel = Fixit.component(PatchablePanel);

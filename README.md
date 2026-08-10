@@ -6,6 +6,8 @@ OhosPatch 是 [FIXiT](https://github.com/rickytan/FIXiT) 在 HarmonyOS/OpenHarmo
 
 ```text
 OhosPatch/
+├── fixit.d.js                 # Patch JS Context 的 JSDoc/IDE 声明
+├── .agents/skills/            # AI Patch 编写 Skill
 ├── ohospatch/                 # 可复用 HAR 模块
 │   ├── Index.ets              # HAR 对外 API
 │   └── src/main/
@@ -62,6 +64,25 @@ HarmonyOS 中，`OH_JSVM_CreateVM` 创建的独立 JSVM 与 ArkTS 主 VM 不共�
 - `console.debug/log/info/warn/error`：输出到 HiLog 的 `OhosPatch` tag。
 - `setTimeout` / `clearTimeout`、`setInterval` / `clearInterval`、`setImmediate` / `clearImmediate`。
 - `queueMicrotask(callback)`：将回调加入 JSVM microtask 队列。
+
+### 编辑器补全
+
+仓库根目录的 `fixit.d.js` 声明 Patch JS Context 中的 `Fixit`、目标描述符、原方法代理、Component DSL、事件上下文、`require`、nil helpers、timer、microtask 和 HiLog console API。Patch 文件首行按相对路径引用声明后，VS Code、WebStorm 等支持 JavaScript/JSDoc 的编辑器即可提供类型提示和自动补全：
+
+```js
+/// <reference path="./fixit.d.js" />
+```
+
+开启 TypeScript `checkJs` 时，建议先为 Runtime 的 `require` 建立别名，避免编辑器将字符串字面量调用误判成 CommonJS 模块加载：
+
+```js
+var loadClass = require;
+var DemoViewModel = loadClass(
+  'com.rickytan.ohospatch/entry/src/main/ets/demo/DemoViewModel#DemoViewModel'
+);
+```
+
+声明文件只用于开发期语言服务，不需要下发给设备，也不能作为 Patch 执行。其 `@version` 应与 `Fixit.runtimeVersion` 保持一致。仓库还提供项目 Skill `.agents/skills/ohospatch-patch-authoring/SKILL.md`；支持 Skill 的 AI 编程工具可使用 `$ohospatch-patch-authoring` 生成或审查 Patch。
 
 独立 JSVM 与 ArkTS 主 VM 不共享对象，因此 `require()` 返回的是类描述符，不是 ArkTS Constructor。安装 Hook 时，Native 根据描述符调用 `napi_load_module_with_info`，在主 ArkTS VM 中加载目标模块并取得导出的类。
 
