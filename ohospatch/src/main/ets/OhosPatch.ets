@@ -31,6 +31,8 @@ export class OhosPatch {
         throw new Error('Patch response is not JavaScript text');
       }
       return OhosPatch.executeScript(response.result);
+    } catch (err) {
+      throw err instanceof Error ? err : new Error(String(err));
     } finally {
       request.destroy();
     }

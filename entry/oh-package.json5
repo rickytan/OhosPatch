@@ -4,6 +4,6 @@
   "description": "OhosPatch sample entry module.",
   "main": "Index.ets",
   "dependencies": {
-    "libohospatch.so": "file:./src/main/cpp/types/libohospatch"
+    "ohospatch": "file:../ohospatch"
   }
 }

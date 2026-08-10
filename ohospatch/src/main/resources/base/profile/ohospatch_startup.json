@@ -2,10 +2,10 @@
   "startupTasks": [
     {
       "name": "OhosPatchStartupTask",
-      "srcEntry": "./ets/ohospatch/OhosPatchStartupTask.ets",
+      "srcEntry": "./ets/OhosPatchStartupTask.ets",
+      "excludeFromAutoStart": true,
       "runOnThread": "mainThread",
       "waitOnMainThread": true
     }
-  ],
-  "configEntry": "./ets/ohospatch/OhosPatchStartupConfig.ets"
+  ]
 }

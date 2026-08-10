@@ -240,12 +240,14 @@ private:
       return {
         className: target,
         modulePath: modulePath || '',
+        moduleInfo: '',
         exportName: exportName || target
       };
     }
     return {
       className: target.className,
       modulePath: target.modulePath,
+      moduleInfo: target.moduleInfo || '',
       exportName: target.exportName || target.className
     };
   }
@@ -255,6 +257,7 @@ private:
     specs.push({
       className: target.className,
       modulePath: target.modulePath,
+      moduleInfo: target.moduleInfo,
       exportName: target.exportName,
       methodName: methodName,
       classMethod: isClassMethod
@@ -494,6 +497,7 @@ private:
 
         std::string className = stringProperty("className");
         std::string modulePath = stringProperty("modulePath");
+        std::string moduleInfo = stringProperty("moduleInfo");
         std::string exportName = stringProperty("exportName");
         std::string methodName = stringProperty("methodName");
         napi_value classMethodValue = nullptr;
@@ -503,7 +507,10 @@ private:
         CheckNapi(napi_get_value_bool(napiEnv, classMethodValue, &classMethod), "napi_get_value_bool(classMethod)");
 
         napi_value module = nullptr;
-        CheckNapi(napi_load_module(napiEnv, modulePath.c_str(), &module), "napi_load_module(patch target)");
+        napi_status loadStatus = moduleInfo.empty()
+            ? napi_load_module(napiEnv, modulePath.c_str(), &module)
+            : napi_load_module_with_info(napiEnv, modulePath.c_str(), moduleInfo.c_str(), &module);
+        CheckNapi(loadStatus, "napi_load_module_with_info(patch target)");
         napi_value constructor = nullptr;
         CheckNapi(napi_get_named_property(napiEnv, module, exportName.c_str(), &constructor),
             "napi_get_named_property(class export)");

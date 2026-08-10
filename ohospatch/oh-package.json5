@@ -1,0 +1,11 @@
+{
+  "name": "ohospatch",
+  "version": "1.0.0",
+  "description": "Transparent runtime JavaScript patching for HarmonyOS using JSVM.",
+  "main": "Index.ets",
+  "author": "rickytan",
+  "license": "MIT",
+  "dependencies": {
+    "libohospatch.so": "file:./src/main/cpp/types/libohospatch"
+  }
+}

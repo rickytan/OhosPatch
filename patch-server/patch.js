@@ -1,7 +1,8 @@
 !(function (Fixit) {
   var fix = Fixit.fix({
     className: 'DemoViewModel',
-    modulePath: 'ets/demo/DemoViewModel',
+    modulePath: 'entry/src/main/ets/demo/DemoViewModel',
+    moduleInfo: 'com.rickytan.ohospatch/entry',
     exportName: 'DemoViewModel'
   });
 

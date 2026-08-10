@@ -10,7 +10,6 @@
     "deliveryWithInstall": true,
     "installationFree": false,
     "pages": "$profile:main_pages",
-    "appStartup": "$profile:ohospatch_startup",
     "requestPermissions": [
       {
         "name": "ohos.permission.INTERNET"

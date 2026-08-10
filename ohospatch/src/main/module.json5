@@ -1,0 +1,15 @@
+{
+  "module": {
+    "name": "ohospatch",
+    "type": "har",
+    "deviceTypes": [
+      "default"
+    ],
+    "requestPermissions": [
+      {
+        "name": "ohos.permission.INTERNET"
+      }
+    ],
+    "appStartup": "$profile:ohospatch_startup"
+  }
+}

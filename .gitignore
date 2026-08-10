@@ -1,7 +1,10 @@
 .hvigor/
 local.properties
+**/BuildProfile.ets
 entry/.cxx/
 entry/build/
+ohospatch/.cxx/
+ohospatch/build/
 node_modules/
 oh_modules/
 *.hap
