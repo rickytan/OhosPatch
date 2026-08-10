@@ -1,10 +1,10 @@
 !(function (Fixit) {
-  var fix = Fixit.fix({
-    className: 'DemoViewModel',
+  Fixit.registerTarget('DemoViewModel', {
     modulePath: 'entry/src/main/ets/demo/DemoViewModel',
     moduleInfo: 'com.rickytan.ohospatch/entry',
     exportName: 'DemoViewModel'
   });
+  var fix = Fixit.fix('DemoViewModel');
 
   var originLocation = fix.instanceMethod('locationOf', function (locations, index, point) {
     if (index < 0 || index >= locations.length) {

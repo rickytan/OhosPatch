@@ -10,6 +10,7 @@ OhosPatch/
 │   ├── Index.ets              # HAR 对外 API
 │   └── src/main/
 │       ├── cpp/               # JSVM、NAPI、prototype hook
+│       │   └── runtime/       # 内置 Fixit JS runtime
 │       ├── ets/               # 字符串和本地文件执行 API
 │       └── module.json5       # 无权限、无启动任务的 HAR 清单
 ├── entry/                     # Demo APP
@@ -38,6 +39,21 @@ HarmonyOS 中，`OH_JSVM_CreateVM` 创建的独立 JSVM 与 ArkTS 主 VM 不共�
 8. `clear()` 恢复原型上的原函数并释放引用。
 
 普通 public 方法调用会经过对象属性和原型查找，因此已创建的业务实例也会在替换后进入 patch。
+
+## 内置 JS Runtime
+
+`ohospatch/src/main/cpp/runtime/fixit.js` 定义 `Fixit` 构造函数和 patch 常用全局函数。CMake 在构建 HAR 时将该文件嵌入 `libohospatch.so`；JSVM 创建后先执行内置 runtime，再执行宿主传入的 patch，因此宿主和 patch 都不需要单独加载它。
+
+内置 API：
+
+- `Fixit.fix(target)`：创建目标类的 patch 对象。
+- `Fixit.registerTarget(className, descriptor)`：注册类名到 HarmonyOS 模块描述符的映射，使后续可以使用 `Fixit.fix('ClassName')`。
+- `instanceMethod(name, handler)` / `classMethod(name, handler)`：替换实例方法或静态方法，并返回原实现代理。
+- `nil` / `Nil`、`isNil`、`nilToNull`、`nullToNil`、`YES` / `NO`。
+- `CGRectMake`、`CGPointMake`、`CGSizeMake` / `CGSize`、`NSMakeRange`：创建可通过 JSON 桥传递的结构对象。
+- `console.debug/log/info/warn/error`：输出到 HiLog 的 `OhosPatch` tag。
+
+iOS 的 `require()` 可以把 Objective-C Class 代理注入 JavaScriptCore。独立 JSVM 与 ArkTS 主 VM 不共享对象，OhosPatch 无法安全提供相同语义；调用 `require()` 会明确报错，目标类必须通过包含 `modulePath` 的描述符定位。
 
 ## HAR 接入
 
@@ -94,6 +110,17 @@ var origin = fix.instanceMethod('locationOf', function (locations, index, fallba
 fix.classMethod('crash', function () {
   return 'fixed';
 });
+```
+
+也可以先注册映射，再使用接近原 FIXiT 的类名写法：
+
+```js
+Fixit.registerTarget('DemoViewModel', {
+  modulePath: 'entry/src/main/ets/demo/DemoViewModel',
+  moduleInfo: 'com.rickytan.ohospatch/entry'
+});
+
+var fix = Fixit.fix('DemoViewModel');
 ```
 
 演示补丁位于 `patch-server/patch.js`，不会打入 HAR 或 HAP。

@@ -8,6 +8,9 @@
   },
   "description": "ArkTS patch dispatch demo inspired by FIXiT.",
   "license": "MIT",
+  "scripts": {
+    "test": "node --test ohospatch/src/test/js/*.test.mjs"
+  },
   "dependencies": {
     "@ohos/hvigor": "6.23.6",
     "@ohos/hvigor-ohos-plugin": "6.23.6"

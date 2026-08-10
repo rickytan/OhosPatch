@@ -9,5 +9,18 @@ endif()
 
 include_directories(${NATIVERENDER_ROOT_PATH})
 
+set_property(
+    DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/runtime/fixit.js"
+)
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/runtime/fixit.js" FIXIT_RUNTIME_SOURCE)
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/runtime/fixit_runtime.h.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/fixit_runtime.h"
+    @ONLY
+)
+
 add_library(ohospatch SHARED ohospatch.cpp)
-target_link_libraries(ohospatch PUBLIC libace_napi.z.so libjsvm.so)
+target_include_directories(ohospatch PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
+target_link_libraries(ohospatch PUBLIC libace_napi.z.so libhilog_ndk.z.so libjsvm.so)

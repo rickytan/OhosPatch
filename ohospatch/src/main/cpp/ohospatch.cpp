@@ -1,4 +1,6 @@
 #include "ark_runtime/jsvm.h"
+#include "fixit_runtime.h"
+#include "hilog/log.h"
 #include "napi/native_api.h"
 
 #include <memory>
@@ -117,7 +119,7 @@ public:
         Check(OH_JSVM_OpenEnvScope(env_, &envScope_), "OH_JSVM_OpenEnvScope");
 
         InstallNativeFunctions();
-        Run(kRuntimeScript);
+        Run(kFixitRuntimeScript);
         ready_ = true;
     }
 
@@ -227,98 +229,6 @@ private:
     ActiveInvocation activeInvocation_;
     std::vector<std::unique_ptr<HookRecord>> hooks_;
 
-    static constexpr const char* kRuntimeScript = R"JS(
-(function (global) {
-  var registry = { instance: Object.create(null), klass: Object.create(null) };
-  var specs = [];
-
-  function key(cls, method) { return cls + '#' + method; }
-  function bucket(isClassMethod) { return isClassMethod ? registry.klass : registry.instance; }
-
-  function normalizeTarget(target, modulePath, exportName) {
-    if (typeof target === 'string') {
-      return {
-        className: target,
-        modulePath: modulePath || '',
-        moduleInfo: '',
-        exportName: exportName || target
-      };
-    }
-    return {
-      className: target.className,
-      modulePath: target.modulePath,
-      moduleInfo: target.moduleInfo || '',
-      exportName: target.exportName || target.className
-    };
-  }
-
-  function register(target, methodName, isClassMethod, handler) {
-    bucket(isClassMethod)[key(target.className, methodName)] = handler;
-    specs.push({
-      className: target.className,
-      modulePath: target.modulePath,
-      moduleInfo: target.moduleInfo,
-      exportName: target.exportName,
-      methodName: methodName,
-      classMethod: isClassMethod
-    });
-    return function () {
-      return global.__ohospatch_origin.apply(this, arguments);
-    };
-  }
-
-  global.Fixit = {
-    fix: function (target, modulePath, exportName) {
-      var normalized = normalizeTarget(target, modulePath, exportName);
-      if (!normalized.className || !normalized.modulePath) {
-        throw new Error('Fixit.fix requires className and modulePath');
-      }
-      return {
-        instanceMethod: function (methodName, handler) {
-          return register(normalized, methodName, false, handler);
-        },
-        classMethod: function (methodName, handler) {
-          return register(normalized, methodName, true, handler);
-        }
-      };
-    }
-  };
-
-  global.require = function () {};
-  global.isNil = function (value) { return value === null || value === undefined; };
-  global.console = {
-    log: function () {
-      var text = Array.prototype.map.call(arguments, function (value) {
-        return String(value);
-      }).join(' ');
-      global.__ohospatch_log(text);
-    }
-  };
-
-  global.__ohospatch_specs = function () {
-    return JSON.stringify(specs);
-  };
-
-  global.__ohospatch_clear = function () {
-    registry.instance = Object.create(null);
-    registry.klass = Object.create(null);
-    specs = [];
-  };
-
-  global.__ohospatch_callPatch = function (className, methodName, isClassMethod, target, args) {
-    var fn = bucket(isClassMethod)[key(className, methodName)];
-    if (!fn) {
-      return { handled: false };
-    }
-    return {
-      handled: true,
-      result: fn.apply(target, args),
-      target: target
-    };
-  };
-})(this);
-)JS";
-
     static JsvmRuntime* Current(JSVM_Env env)
     {
         void* data = nullptr;
@@ -371,6 +281,29 @@ private:
 
     static JSVM_Value LogCallback(JSVM_Env env, JSVM_CallbackInfo info)
     {
+        JsvmRuntime* runtime = Current(env);
+        if (!runtime) {
+            return Undefined(env);
+        }
+
+        size_t argc = 2;
+        JSVM_Value argv[2] = { nullptr, nullptr };
+        OH_JSVM_GetCbInfo(env, info, &argc, argv, nullptr, nullptr);
+        if (argc < 2) {
+            return Undefined(env);
+        }
+
+        std::string level = runtime->JsvmString(argv[0]);
+        std::string message = runtime->JsvmString(argv[1]);
+        LogLevel logLevel = LOG_INFO;
+        if (level == "debug") {
+            logLevel = LOG_DEBUG;
+        } else if (level == "warn") {
+            logLevel = LOG_WARN;
+        } else if (level == "error") {
+            logLevel = LOG_ERROR;
+        }
+        OH_LOG_Print(LOG_APP, logLevel, 0xD003900, "OhosPatch", "%{public}s", message.c_str());
         return Undefined(env);
     }
 
