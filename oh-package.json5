@@ -1,0 +1,8 @@
+{
+  "modelVersion": "5.0.0",
+  "description": "OhosPatch demo project.",
+  "dependencies": {
+    "libohospatch.so": "file:./entry/src/main/cpp/types/libohospatch"
+  },
+  "devDependencies": {}
+}

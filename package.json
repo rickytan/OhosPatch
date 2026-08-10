@@ -1,0 +1,15 @@
+{
+  "name": "ohospatch",
+  "version": "1.0.0",
+  "ohos": {
+    "org": "openharmony",
+    "buildTool": "hvigor",
+    "directoryLevel": "project"
+  },
+  "description": "ArkTS patch dispatch demo inspired by FIXiT.",
+  "license": "MIT",
+  "dependencies": {
+    "@ohos/hvigor": "6.23.6",
+    "@ohos/hvigor-ohos-plugin": "6.23.6"
+  }
+}

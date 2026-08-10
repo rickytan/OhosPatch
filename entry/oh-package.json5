@@ -1,0 +1,9 @@
+{
+  "name": "entry",
+  "version": "1.0.0",
+  "description": "OhosPatch sample entry module.",
+  "main": "Index.ets",
+  "dependencies": {
+    "libohospatch.so": "file:./src/main/cpp/types/libohospatch"
+  }
+}

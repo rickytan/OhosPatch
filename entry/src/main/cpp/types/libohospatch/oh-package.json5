@@ -1,0 +1,6 @@
+{
+  "name": "libohospatch.so",
+  "version": "1.0.0",
+  "description": "OhosPatch native JSVM bridge.",
+  "types": "./index.d.ts"
+}

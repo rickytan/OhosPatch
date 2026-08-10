@@ -1,0 +1,24 @@
+{
+  "string": [
+    {
+      "name": "app_name",
+      "value": "OhosPatch"
+    },
+    {
+      "name": "module_desc",
+      "value": "OhosPatch entry module"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "OhosPatch demo ability"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "OhosPatch"
+    },
+    {
+      "name": "ohospatch_patch_url",
+      "value": "http://127.0.0.1:8080/patch.js"
+    }
+  ]
+}

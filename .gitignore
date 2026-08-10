@@ -1,0 +1,9 @@
+.hvigor/
+local.properties
+entry/.cxx/
+entry/build/
+node_modules/
+oh_modules/
+*.hap
+*.hsp
+*.har
