@@ -9,6 +9,7 @@ const runtimeSource = await readFile(runtimeUrl, 'utf8');
 function createRuntime() {
   const logs = [];
   const origins = [];
+  const eventOrigins = [];
   const scheduledTimers = [];
   const cancelledTimers = [];
   const handles = [{}];
@@ -81,6 +82,11 @@ function createRuntime() {
       origins.push({ receiver: handles[0], args });
       return response('origin-result');
     },
+    __ohospatch_eventOrigin(wire) {
+      const args = decodeWire(JSON.parse(wire));
+      eventOrigins.push({ receiver: handles[0], args });
+      return response('event-origin-result');
+    },
     __ohospatch_proxyGet(handle, property) {
       return response(handles[handle][property]);
     },
@@ -130,6 +136,7 @@ function createRuntime() {
     context,
     logs,
     origins,
+    eventOrigins,
     scheduledTimers,
     cancelledTimers,
     registerImport(fullPath, value) {
@@ -349,19 +356,20 @@ test('registers declarative component value, attribute, and event rules', () => 
 });
 
 test('binds component event handler this to the current component owner proxy', () => {
-  const { context, setProxyRoot } = createRuntime();
+  const { context, eventOrigins, setProxyRoot } = createRuntime();
   const component = context.Fixit.component(
     'com.example.app/entry/src/main/ets/components/DemoPanel#DemoPanel'
   );
-  component.node('Button').event('onClick', {
+  const origin = component.node('Button').event('onClick', {
     capture: ['tapCount'],
     handler: function (event, componentContext) {
       this.tapCount = this.tapCount + event.delta;
       this.profile.title = this.profile.title.toUpperCase();
       componentContext.setState({ tapCount: this.tapCount });
-      return this.describe(this.profile.title);
+      return `${this.describe(this.profile.title)}:${origin.apply(this, arguments)}`;
     }
   });
+  assert.equal(typeof origin, 'function');
 
   const owner = {
     tapCount: 2,
@@ -383,9 +391,11 @@ test('binds component event handler this to the current component owner proxy', 
   assert.equal(owner.profile.title, 'PATCHED');
   assert.deepEqual(plain(result), {
     handled: true,
-    result: 'PATCHED:5',
+    result: 'PATCHED:5:event-origin-result',
     statePatch: { tapCount: 5 }
   });
+  assert.equal(eventOrigins.length, 1);
+  assert.deepEqual(eventOrigins[0].args, [{ delta: 3 }]);
 });
 
 test('registers instance and class methods and invokes the original method', () => {

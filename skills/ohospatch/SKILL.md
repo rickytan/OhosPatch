@@ -62,7 +62,7 @@ panel.param('title').replace('fixed');
 panel.state('count').transform(function (value) {
   return value < 0 ? 0 : value;
 });
-panel.node({ type: 'Button', occurrence: 0 })
+var originClick = panel.node({ type: 'Button', occurrence: 0 })
   .attrs({ height: 48, backgroundColor: '#1677FF' })
   .event('onClick', {
     mode: 'replace',
@@ -70,6 +70,7 @@ panel.node({ type: 'Button', occurrence: 0 })
     handler: function (_event, context) {
       this.count = context.state.count + 1;
       context.setState({ count: this.count });
+      return originClick.apply(this, arguments);
     }
   });
 ```
@@ -79,6 +80,7 @@ panel.node({ type: 'Button', occurrence: 0 })
 - Keep attribute arguments and replacement values JSON-serializable.
 - Use synchronous event mode `replace`; capture at most 16 properties.
 - Use normal `function` syntax when a Component event patch needs `this`; it is bound to the current Component instance proxy.
+- `node.event(...)` returns the original ArkUI event callback proxy; call it with `origin.apply(this, arguments)` when the patch should preserve original event behavior.
 - Do not generate `before`, `after`, `around`, route interception, V2 state, resource/controller values, ID/hierarchy selectors, or forced refresh logic.
 
 ## Validate

@@ -16,7 +16,7 @@
   panel.state('tapCount').transform(function (value) {
     return value === 0 ? 40 : value;
   });
-  panel.node({ type: 'Button', occurrence: 0 })
+  var originClick = panel.node({ type: 'Button', occurrence: 0 })
     .attrs({
       height: 52,
       backgroundColor: '#C44736'
@@ -27,6 +27,7 @@
       handler: /** @this {any} */ function (_event, context) {
         this.tapCount = context.state.tapCount + 10;
         context.setState({ tapCount: this.tapCount });
+        return originClick.apply(this, arguments);
       }
     });
 

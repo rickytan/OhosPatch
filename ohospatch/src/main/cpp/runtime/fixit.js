@@ -22,6 +22,7 @@
   var REMOTE_HANDLE_KEY = '__ohospatch_proxy_handle__';
   var IMPORT_HANDLE_KEY = '__ohospatch_import_handle__';
   var UNDEFINED_VALUE_KEY = '__ohospatch_proxy_undefined__';
+  var UI_EVENT_CONTEXT_KEY = '__ohospatch_ui_event_context__';
 
   function own(object, property) {
     return Object.prototype.hasOwnProperty.call(object, property);
@@ -481,6 +482,17 @@
     return ruleId;
   }
 
+  function makeUiEventOrigin() {
+    return function () {
+      var args = Array.prototype.slice.call(arguments);
+      var tail = args.length > 0 ? args[args.length - 1] : null;
+      if (tail && tail[UI_EVENT_CONTEXT_KEY] === true) {
+        args.pop();
+      }
+      return decodeNativeResponse(global.__ohospatch_eventOrigin(encodeNativeWire(args)), 0);
+    };
+  }
+
   function copyUiTarget(target) {
     var descriptor = copyTarget(target);
     descriptor.targetKey = targetKey(target);
@@ -608,7 +620,7 @@
     rule.mode = mode;
     rule.capture = capture;
     registerUiRule(uniqueKey, rule, registry.uiEvents, handler);
-    return this;
+    return makeUiEventOrigin();
   };
 
   ComponentFix.prototype.param = function (propertyName) {
@@ -853,6 +865,7 @@
         });
       }
     };
+    Object.defineProperty(context, UI_EVENT_CONTEXT_KEY, { value: true });
     var owner = typeof ownerHandle === 'number' ? makeNativeProxy(ownerHandle, false, ownerHandle) : undefined;
     try {
       var result = handler.apply(owner, [event || {}, context]);

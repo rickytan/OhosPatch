@@ -183,11 +183,14 @@ struct HookRecord {
     bool classMethod = false;
 };
 
+struct UiEventCallbackRecord;
+
 constexpr size_t kMaxProxyHandles = 256;
 
 struct ActiveInvocation {
     napi_env env = nullptr;
     HookRecord *hook = nullptr;
+    UiEventCallbackRecord *uiEvent = nullptr;
     napi_value receiver = nullptr;
     bool originalExceptionPending = false;
     std::array<napi_value, kMaxProxyHandles> proxyValues{};
@@ -1069,7 +1072,7 @@ class JsvmRuntime
 
         napi_value envelope = nullptr;
         bool handled = false;
-        if (!CallUiEventHandler(napiEnv, record->ruleId, event, state, owner, &envelope, &handled) || !handled) {
+        if (!CallUiEventHandler(napiEnv, record, event, state, owner, &envelope, &handled) || !handled) {
             return CallOriginalUiEvent(napiEnv, record, receiver, argc, argv);
         }
 
@@ -1809,6 +1812,56 @@ class JsvmRuntime
         return runtime->ProxyNapiValue(active, result);
     }
 
+    static JSVM_Value EventOriginCallback(JSVM_Env env, JSVM_CallbackInfo info)
+    {
+        JsvmRuntime *runtime = Current(env);
+        if (!runtime || !runtime->activeInvocation_.env || !runtime->activeInvocation_.uiEvent) {
+            LogError("Original component event called outside an active OhosPatch event invocation");
+            return Undefined(env);
+        }
+
+        size_t argc = 1;
+        JSVM_Value argument = nullptr;
+        std::string argsJson;
+        if (!JsvmOk(OH_JSVM_GetCbInfo(env, info, &argc, &argument, nullptr, nullptr),
+                    "OH_JSVM_GetCbInfo(component event origin)", env) ||
+            argc < 1 || !runtime->JsvmString(argument, &argsJson)) {
+            return runtime->ProxyError("Original component event requires encoded arguments");
+        }
+
+        ActiveInvocation &active = runtime->activeInvocation_;
+        napi_value encodedArgs = nullptr;
+        napi_value napiArgsArray = nullptr;
+        if (!NapiJsonParse(active.env, argsJson, &encodedArgs) ||
+            !runtime->ResolveBridgeWireValue(active.env, encodedArgs, 0, &napiArgsArray)) {
+            return runtime->ProxyError("Original component event arguments could not be decoded");
+        }
+        uint32_t napiArgc = 0;
+        if (!NapiOk(active.env, napi_get_array_length(active.env, napiArgsArray, &napiArgc),
+                    "napi_get_array_length(component event origin args)")) {
+            return Undefined(env);
+        }
+        if (napiArgc > kMaxArguments) {
+            LogError("Original component event argument count exceeds the OhosPatch limit");
+            return Undefined(env);
+        }
+
+        std::array<napi_value, kMaxArguments> napiArgv{};
+        for (uint32_t index = 0; index < napiArgc; ++index) {
+            if (!NapiOk(active.env, napi_get_element(active.env, napiArgsArray, index, &napiArgv[index]),
+                        "napi_get_element(component event origin args)")) {
+                return Undefined(env);
+            }
+        }
+
+        napi_value result =
+            CallOriginalUiEvent(active.env, active.uiEvent, active.receiver, napiArgc, napiArgv.data());
+        if (!result) {
+            return Undefined(env);
+        }
+        return runtime->ProxyNapiValue(active, result);
+    }
+
     static JSVM_Value HiLogCallback(JSVM_Env env, JSVM_CallbackInfo info)
     {
         JsvmRuntime *runtime = Current(env);
@@ -2022,7 +2075,8 @@ class JsvmRuntime
                       "napi_get_value_bool(component value handled)");
     }
 
-    bool CallUiEventHandler(napi_env napiEnv, uint32_t ruleId, napi_value event, napi_value state, napi_value owner,
+    bool CallUiEventHandler(napi_env napiEnv, UiEventCallbackRecord *record, napi_value event, napi_value state,
+                            napi_value owner,
                             napi_value *envelope, bool *handled)
     {
         if (!envelope || !handled) {
@@ -2048,13 +2102,15 @@ class JsvmRuntime
         JSVM_Value stateValue = nullptr;
         JSVM_Value result = nullptr;
         std::string resultJson;
-        bool success = JsvmOk(OH_JSVM_CreateUint32(env_, ruleId, &ruleIdValue),
+        bool success = record &&
+                       JsvmOk(OH_JSVM_CreateUint32(env_, record->ruleId, &ruleIdValue),
                               "OH_JSVM_CreateUint32(component event rule)", env_) &&
                        ParseJson(eventJson, &eventValue) && ParseJson(stateJson, &stateValue);
         ActiveInvocation previous = activeInvocation_;
         if (owner) {
             activeInvocation_ = {};
             activeInvocation_.env = napiEnv;
+            activeInvocation_.uiEvent = record;
             activeInvocation_.receiver = owner;
             activeInvocation_.proxyValues[0] = owner;
             activeInvocation_.proxyValueCount = 1;
@@ -2821,12 +2877,19 @@ class JsvmRuntime
         }
 
         static JSVM_CallbackStruct originCallback{OriginCallback, nullptr};
+        static JSVM_CallbackStruct eventOriginCallback{EventOriginCallback, nullptr};
         JSVM_Value originFunction = nullptr;
+        JSVM_Value eventOriginFunction = nullptr;
         if (!JsvmOk(
                 OH_JSVM_CreateFunction(env_, "__ohospatch_origin", JSVM_AUTO_LENGTH, &originCallback, &originFunction),
                 "OH_JSVM_CreateFunction(origin)", env_) ||
             !JsvmOk(OH_JSVM_SetNamedProperty(env_, global, "__ohospatch_origin", originFunction),
-                    "OH_JSVM_SetNamedProperty(origin)", env_)) {
+                    "OH_JSVM_SetNamedProperty(origin)", env_) ||
+            !JsvmOk(OH_JSVM_CreateFunction(env_, "__ohospatch_eventOrigin", JSVM_AUTO_LENGTH, &eventOriginCallback,
+                                           &eventOriginFunction),
+                    "OH_JSVM_CreateFunction(component event origin)", env_) ||
+            !JsvmOk(OH_JSVM_SetNamedProperty(env_, global, "__ohospatch_eventOrigin", eventOriginFunction),
+                    "OH_JSVM_SetNamedProperty(component event origin)", env_)) {
             return false;
         }
 

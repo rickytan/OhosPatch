@@ -125,6 +125,7 @@ Proposed public concepts:
 - `attr`, `attrs`, and synchronous `event(..., { mode: 'replace' })` are implemented.
 - Event `capture` and `context.setState()` are implemented; capture is limited to 16 properties.
 - Component event handlers written with normal `function` syntax receive `this` as the current Component instance Proxy. Arrow functions keep lexical `this`.
+- `node.event(...)` returns an original ArkUI event callback proxy. `origin.apply(this, arguments)` is supported and strips OhosPatch's injected event context before calling the original callback.
 - Event bridges retain the original ArkTS callback and fall back to it after `clear()` or a patch handler failure.
 - The Demo target is `entry/src/main/ets/demo/PatchablePanel.ets` and the dynamic script is `patch-server/patch.js`.
 - API 20 generated output was inspected and matches `setInitiallyProvidedValue`, `updateStateVars`, `initialRender`, and `observeComponentCreation2`.
@@ -151,7 +152,7 @@ Fail closed when a component shape, node selector, attribute, or event cannot be
 - A target-specific wrapper around `observeComponentCreation2` can wrap each node builder callback.
 - Attribute overrides should run after the original builder callback so the patch is the last writer.
 - Event replacement can register a new callback after the original event registration.
-- Calling the original event later requires capturing the original ArkTS callback while the builder runs; do not claim `around/origin` support before this is implemented and tested.
+- Calling the original event later is only supported synchronously through the function returned by `node.event(...)`; do not claim async event origin support.
 - Stored callbacks and component instances need N-API reference lifecycle management. Prefer weak component references.
 - Existing mounted components need rerender/invalidation after install and clear. If that cannot be guaranteed, report that a natural rerender is required.
 - Click/touch event objects may contain native state and cannot be passed through the current generic JSON bridge. Define safe event DTOs.

@@ -76,6 +76,12 @@
  */
 
 /**
+ * Callable proxy for the original ArkUI event callback.
+ *
+ * @typedef {(this: any, ...args: any[]) => any} OhosPatchOriginalEvent
+ */
+
+/**
  * Only synchronous `replace` mode is currently supported and at most 16
  * properties may be captured.
  *
@@ -98,7 +104,7 @@
  * @property {(attributes: Record<string, OhosPatchJsonValue>) => OhosPatchComponentNodeFix} attrs
  *   Override multiple single-argument attributes.
  * @property {(eventName: string, rule: OhosPatchComponentEventRule | OhosPatchComponentEventHandler) =>
- *   OhosPatchComponentNodeFix} event Replace a synchronous node event callback.
+ *   OhosPatchOriginalEvent} event Replace a synchronous node event callback and return the original callback proxy.
  */
 
 /**
