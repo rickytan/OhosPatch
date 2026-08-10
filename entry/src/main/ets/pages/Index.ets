@@ -1,5 +1,5 @@
-import { http } from '@kit.NetworkKit';
 import { OhosPatch } from '@rickytan/ohospatch';
+import { loadPatch } from '../patch/PatchLoader';
 import { DemoResult, DemoScenario } from '../demo/DemoScenario';
 import { PatchablePanel } from '../demo/PatchablePanel';
 
@@ -16,35 +16,18 @@ struct Index {
       return;
     }
     this.loading = true;
-    const request = http.createHttp();
     try {
       const hostContext = this.getUIContext().getHostContext();
       if (!hostContext) {
         throw new Error('Host context is unavailable');
       }
-      const patchUrl = hostContext.resourceManager.getStringByNameSync('ohospatch_patch_url');
-      const response = await request.request(patchUrl, {
-        method: http.RequestMethod.GET,
-        expectDataType: http.HttpDataType.STRING,
-        connectTimeout: 5000,
-        readTimeout: 5000,
-        usingCache: false
-      });
-      if (response.responseCode < 200 || response.responseCode >= 300) {
-        throw new Error(`HTTP ${response.responseCode}`);
-      }
-      if (typeof response.result !== 'string') {
-        throw new Error('Patch response is not JavaScript text');
-      }
-
-      const hookCount = OhosPatch.executeScript(response.result);
-      this.patchState = `Patch loaded: ${hookCount} hooks/rules`;
-      this.patchDetails = patchUrl;
+      const result = await loadPatch(hostContext, { forceNetwork: true });
+      this.patchState = `Patch loaded: ${result.hookCount} hooks (${result.source})`;
+      this.patchDetails = result.detail;
     } catch (err) {
       this.patchState = 'Patch load failed';
       this.patchDetails = (err as Error).message;
     } finally {
-      request.destroy();
       this.loading = false;
     }
   }
