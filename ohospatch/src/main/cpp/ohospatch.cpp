@@ -3,84 +3,141 @@
 #include "hilog/log.h"
 #include "napi/native_api.h"
 
+#include <array>
 #include <memory>
-#include <stdexcept>
+#include <new>
 #include <string>
-#include <vector>
 
 namespace {
 
-void CheckNapi(napi_status status, const char* operation)
+constexpr unsigned int kLogDomain = 0xD003900;
+constexpr const char *kLogTag = "OhosPatch";
+
+void LogError(const char *operation, int status)
 {
-    if (status == napi_ok) {
-        return;
-    }
-    throw std::runtime_error(std::string(operation) + " failed with status " + std::to_string(status));
+    OH_LOG_Print(LOG_APP, LOG_ERROR, kLogDomain, kLogTag, "%{public}s failed with status %{public}d", operation,
+                 status);
 }
 
-std::string NapiString(napi_env env, napi_value value)
+void LogError(const std::string &message)
 {
-    size_t length = 0;
-    CheckNapi(napi_get_value_string_utf8(env, value, nullptr, 0, &length), "napi_get_value_string_utf8(length)");
-    std::string result(length + 1, '\0');
-    CheckNapi(napi_get_value_string_utf8(env, value, result.data(), result.size(), &length),
-        "napi_get_value_string_utf8(value)");
-    result.resize(length);
-    return result;
+    OH_LOG_Print(LOG_APP, LOG_ERROR, kLogDomain, kLogTag, "%{public}s", message.c_str());
 }
 
-napi_value NapiJsonFunction(napi_env env, const char* name, napi_value* jsonObject)
-{
-    napi_value global = nullptr;
-    CheckNapi(napi_get_global(env, &global), "napi_get_global");
-    CheckNapi(napi_get_named_property(env, global, "JSON", jsonObject), "napi_get_named_property(JSON)");
-    napi_value function = nullptr;
-    CheckNapi(napi_get_named_property(env, *jsonObject, name, &function), "napi_get_named_property(JSON function)");
-    return function;
-}
-
-std::string NapiJsonStringify(napi_env env, napi_value value, const char* undefinedFallback)
-{
-    napi_value jsonObject = nullptr;
-    napi_value stringify = NapiJsonFunction(env, "stringify", &jsonObject);
-    napi_value result = nullptr;
-    CheckNapi(napi_call_function(env, jsonObject, stringify, 1, &value, &result), "napi_call_function(JSON.stringify)");
-
-    napi_valuetype type = napi_undefined;
-    CheckNapi(napi_typeof(env, result, &type), "napi_typeof(JSON.stringify result)");
-    return type == napi_string ? NapiString(env, result) : std::string(undefinedFallback);
-}
-
-napi_value NapiJsonParse(napi_env env, const std::string& json)
-{
-    napi_value jsonObject = nullptr;
-    napi_value parse = NapiJsonFunction(env, "parse", &jsonObject);
-    napi_value source = nullptr;
-    CheckNapi(napi_create_string_utf8(env, json.c_str(), json.size(), &source), "napi_create_string_utf8(JSON)");
-    napi_value result = nullptr;
-    CheckNapi(napi_call_function(env, jsonObject, parse, 1, &source, &result), "napi_call_function(JSON.parse)");
-    return result;
-}
-
-std::string LastNapiExceptionMessage(napi_env env)
+void ClearPendingNapiException(napi_env env)
 {
     bool pending = false;
-    napi_is_exception_pending(env, &pending);
+    napi_status pendingStatus = napi_is_exception_pending(env, &pending);
+    if (pendingStatus != napi_ok) {
+        LogError("napi_is_exception_pending", static_cast<int>(pendingStatus));
+        return;
+    }
     if (!pending) {
-        return "ArkTS method threw an exception";
+        return;
+    }
+    napi_value exception = nullptr;
+    napi_status clearStatus = napi_get_and_clear_last_exception(env, &exception);
+    if (clearStatus != napi_ok) {
+        LogError("napi_get_and_clear_last_exception", static_cast<int>(clearStatus));
+    }
+}
+
+bool NapiOk(napi_env env, napi_status status, const char *operation)
+{
+    if (status == napi_ok) {
+        return true;
+    }
+    LogError(operation, static_cast<int>(status));
+    ClearPendingNapiException(env);
+    return false;
+}
+
+napi_value NapiUndefined(napi_env env)
+{
+    napi_value value = nullptr;
+    if (!NapiOk(env, napi_get_undefined(env, &value), "napi_get_undefined")) {
+        return nullptr;
+    }
+    return value;
+}
+
+napi_value NapiUint32(napi_env env, uint32_t number)
+{
+    napi_value value = nullptr;
+    if (!NapiOk(env, napi_create_uint32(env, number, &value), "napi_create_uint32")) {
+        return NapiUndefined(env);
+    }
+    return value;
+}
+
+bool NapiString(napi_env env, napi_value value, std::string *output)
+{
+    if (!value || !output) {
+        LogError("NapiString received an invalid argument");
+        return false;
+    }
+    size_t length = 0;
+    if (!NapiOk(env, napi_get_value_string_utf8(env, value, nullptr, 0, &length),
+                "napi_get_value_string_utf8(length)")) {
+        return false;
+    }
+    std::string text(length + 1, '\0');
+    if (!NapiOk(env, napi_get_value_string_utf8(env, value, text.data(), text.size(), &length),
+                "napi_get_value_string_utf8(value)")) {
+        return false;
+    }
+    text.resize(length);
+    *output = std::move(text);
+    return true;
+}
+
+bool NapiJsonFunction(napi_env env, const char *name, napi_value *jsonObject, napi_value *function)
+{
+    napi_value global = nullptr;
+    return NapiOk(env, napi_get_global(env, &global), "napi_get_global") &&
+           NapiOk(env, napi_get_named_property(env, global, "JSON", jsonObject), "napi_get_named_property(JSON)") &&
+           NapiOk(env, napi_get_named_property(env, *jsonObject, name, function),
+                  "napi_get_named_property(JSON function)");
+}
+
+bool NapiJsonStringify(napi_env env, napi_value value, const char *undefinedFallback, std::string *output)
+{
+    napi_value jsonObject = nullptr;
+    napi_value stringify = nullptr;
+    if (!NapiJsonFunction(env, "stringify", &jsonObject, &stringify)) {
+        return false;
     }
 
-    napi_value exception = nullptr;
-    napi_get_and_clear_last_exception(env, &exception);
-    napi_value message = nullptr;
-    if (napi_get_named_property(env, exception, "message", &message) != napi_ok) {
-        return "ArkTS method threw an exception";
+    napi_value result = nullptr;
+    if (!NapiOk(env, napi_call_function(env, jsonObject, stringify, 1, &value, &result),
+                "napi_call_function(JSON.stringify)")) {
+        return false;
     }
-    napi_value text = nullptr;
-    if (napi_coerce_to_string(env, message, &text) != napi_ok) {
-        return "ArkTS method threw an exception";
+    napi_valuetype type = napi_undefined;
+    if (!NapiOk(env, napi_typeof(env, result, &type), "napi_typeof(JSON.stringify result)")) {
+        return false;
     }
-    return NapiString(env, text);
+    if (type != napi_string) {
+        *output = undefinedFallback;
+        return true;
+    }
+    return NapiString(env, result, output);
+}
+
+bool NapiJsonParse(napi_env env, const std::string &json, napi_value *output)
+{
+    napi_value jsonObject = nullptr;
+    napi_value parse = nullptr;
+    if (!NapiJsonFunction(env, "parse", &jsonObject, &parse)) {
+        return false;
+    }
+    napi_value source = nullptr;
+    if (!NapiOk(env, napi_create_string_utf8(env, json.c_str(), json.size(), &source),
+                "napi_create_string_utf8(JSON)")) {
+        return false;
+    }
+    return NapiOk(env, napi_call_function(env, jsonObject, parse, 1, &source, output),
+                  "napi_call_function(JSON.parse)");
 }
 
 struct HookRecord {
@@ -95,207 +152,354 @@ struct HookRecord {
 
 struct ActiveInvocation {
     napi_env env = nullptr;
-    HookRecord* hook = nullptr;
+    HookRecord *hook = nullptr;
     napi_value receiver = nullptr;
+    bool originalExceptionPending = false;
 };
 
 class JsvmRuntime;
-JsvmRuntime& Runtime();
+JsvmRuntime &Runtime();
 
-class JsvmRuntime {
-public:
-    void Ensure()
+class JsvmRuntime
+{
+  public:
+    bool Ensure()
     {
         if (ready_) {
-            return;
+            return true;
         }
 
-        JSVM_InitOptions initOptions {};
-        Check(OH_JSVM_Init(&initOptions), "OH_JSVM_Init");
+        if (!initialized_) {
+            JSVM_InitOptions initOptions{};
+            if (!JsvmOk(OH_JSVM_Init(&initOptions), "OH_JSVM_Init", nullptr)) {
+                return false;
+            }
+            initialized_ = true;
+        }
 
-        JSVM_CreateVMOptions vmOptions {};
-        Check(OH_JSVM_CreateVM(&vmOptions, &vm_), "OH_JSVM_CreateVM");
-        Check(OH_JSVM_OpenVMScope(vm_, &vmScope_), "OH_JSVM_OpenVMScope");
-        Check(OH_JSVM_CreateEnv(vm_, 0, nullptr, &env_), "OH_JSVM_CreateEnv");
-        Check(OH_JSVM_OpenEnvScope(env_, &envScope_), "OH_JSVM_OpenEnvScope");
+        JSVM_CreateVMOptions vmOptions{};
+        if (!JsvmOk(OH_JSVM_CreateVM(&vmOptions, &vm_), "OH_JSVM_CreateVM", nullptr) ||
+            !JsvmOk(OH_JSVM_OpenVMScope(vm_, &vmScope_), "OH_JSVM_OpenVMScope", nullptr) ||
+            !JsvmOk(OH_JSVM_CreateEnv(vm_, 0, nullptr, &env_), "OH_JSVM_CreateEnv", nullptr) ||
+            !JsvmOk(OH_JSVM_OpenEnvScope(env_, &envScope_), "OH_JSVM_OpenEnvScope", env_) ||
+            !InstallNativeFunctions() || !Run(kFixitRuntimeScript)) {
+            ResetVm();
+            return false;
+        }
 
-        InstallNativeFunctions();
-        Run(kFixitRuntimeScript);
         ready_ = true;
+        return true;
     }
 
-    size_t ExecuteAndInstall(napi_env napiEnv, const std::string& script)
+    size_t ExecuteAndInstall(napi_env napiEnv, const std::string &script)
     {
-        Ensure();
-        Clear(napiEnv);
-        Run(script);
-        try {
-            InstallHooks(napiEnv);
-        } catch (...) {
+        if (!Ensure() || !Clear(napiEnv)) {
+            return 0;
+        }
+        if (!Run(script)) {
+            ClearRegistry();
+            return 0;
+        }
+        if (!InstallHooks(napiEnv)) {
             RestoreHooks();
             ClearRegistry();
-            throw;
+            return 0;
         }
-        return hooks_.size();
+        return hookCount_;
     }
 
-    void Clear(napi_env napiEnv)
+    bool Clear(napi_env napiEnv)
     {
         if (!ready_) {
-            return;
+            return true;
         }
-        if (!hooks_.empty() && hooks_.front()->env != napiEnv) {
-            throw std::runtime_error("OhosPatch must be cleared on the ArkTS VM where it was installed");
+        if (hookCount_ > 0 && hooks_[0]->env != napiEnv) {
+            LogError("OhosPatch must be cleared on the ArkTS VM where it was installed");
+            return false;
         }
-        RestoreHooks();
-        ClearRegistry();
+        bool restored = RestoreHooks();
+        bool cleared = ClearRegistry();
+        return restored && cleared;
     }
 
-    napi_value InvokeHook(
-        napi_env napiEnv, HookRecord* hook, napi_value receiver, size_t argc, const napi_value* argv)
+    napi_value InvokeHook(napi_env napiEnv, HookRecord *hook, napi_value receiver, size_t argc, const napi_value *argv)
     {
-        Ensure();
+        auto callOriginal = [&]() -> napi_value {
+            napi_value result = nullptr;
+            bool exceptionPending = false;
+            if (CallOriginal(napiEnv, hook, receiver, argc, argv, &result, &exceptionPending)) {
+                return result;
+            }
+            return exceptionPending ? nullptr : NapiUndefined(napiEnv);
+        };
+
+        if (!Ensure() || !hook) {
+            LogError("Cannot invoke an unavailable OhosPatch hook");
+            return hook ? callOriginal() : NapiUndefined(napiEnv);
+        }
 
         napi_value argsArray = nullptr;
-        CheckNapi(napi_create_array_with_length(napiEnv, argc, &argsArray), "napi_create_array_with_length");
+        if (!NapiOk(napiEnv, napi_create_array_with_length(napiEnv, argc, &argsArray),
+                    "napi_create_array_with_length")) {
+            return callOriginal();
+        }
         for (size_t index = 0; index < argc; ++index) {
-            CheckNapi(napi_set_element(napiEnv, argsArray, static_cast<uint32_t>(index), argv[index]),
-                "napi_set_element(arguments)");
+            if (!NapiOk(napiEnv, napi_set_element(napiEnv, argsArray, static_cast<uint32_t>(index), argv[index]),
+                        "napi_set_element(arguments)")) {
+                return callOriginal();
+            }
         }
 
-        std::string targetJson = hook->classMethod ? "{}" : NapiJsonStringify(napiEnv, receiver, "{}");
-        std::string argsJson = NapiJsonStringify(napiEnv, argsArray, "[]");
+        std::string targetJson = "{}";
+        std::string argsJson;
+        if ((!hook->classMethod && !NapiJsonStringify(napiEnv, receiver, "{}", &targetJson)) ||
+            !NapiJsonStringify(napiEnv, argsArray, "[]", &argsJson)) {
+            return callOriginal();
+        }
 
+        JSVM_Value targetKeyValue = nullptr;
+        JSVM_Value methodNameValue = nullptr;
+        JSVM_Value classMethodValue = nullptr;
+        JSVM_Value targetValue = nullptr;
+        JSVM_Value argsValue = nullptr;
+        if (!String(hook->targetKey, &targetKeyValue) || !String(hook->methodName, &methodNameValue) ||
+            !Bool(hook->classMethod, &classMethodValue) || !ParseJson(targetJson, &targetValue) ||
+            !ParseJson(argsJson, &argsValue)) {
+            return callOriginal();
+        }
+
+        JSVM_Value patchArgs[] = {targetKeyValue, methodNameValue, classMethodValue, targetValue, argsValue};
         ActiveInvocation previous = activeInvocation_;
-        activeInvocation_ = { napiEnv, hook, receiver };
-        std::string resultJson;
-        try {
-            JSVM_Value result = CallGlobal("__ohospatch_callPatch", {
-                String(hook->targetKey),
-                String(hook->methodName),
-                Bool(hook->classMethod),
-                ParseJson(targetJson),
-                ParseJson(argsJson),
-            });
-            resultJson = StringifyJson(result);
-            activeInvocation_ = previous;
-        } catch (...) {
-            activeInvocation_ = previous;
-            throw;
+        activeInvocation_ = {napiEnv, hook, receiver, false};
+        JSVM_Value patchResult = nullptr;
+        bool called = CallGlobal("__ohospatch_callPatch", patchArgs, std::size(patchArgs), &patchResult);
+        bool originalExceptionPending = activeInvocation_.originalExceptionPending;
+        activeInvocation_ = previous;
+        if (originalExceptionPending) {
+            return nullptr;
+        }
+        if (!called) {
+            return callOriginal();
         }
 
-        napi_value envelope = NapiJsonParse(napiEnv, resultJson);
+        std::string resultJson;
+        if (!StringifyJson(patchResult, &resultJson)) {
+            return callOriginal();
+        }
+        napi_value envelope = nullptr;
+        if (!NapiJsonParse(napiEnv, resultJson, &envelope)) {
+            return callOriginal();
+        }
+
         napi_value handledValue = nullptr;
-        CheckNapi(napi_get_named_property(napiEnv, envelope, "handled", &handledValue),
-            "napi_get_named_property(handled)");
         bool handled = false;
-        CheckNapi(napi_get_value_bool(napiEnv, handledValue, &handled), "napi_get_value_bool(handled)");
+        if (!NapiOk(napiEnv, napi_get_named_property(napiEnv, envelope, "handled", &handledValue),
+                    "napi_get_named_property(handled)") ||
+            !NapiOk(napiEnv, napi_get_value_bool(napiEnv, handledValue, &handled), "napi_get_value_bool(handled)")) {
+            return callOriginal();
+        }
         if (!handled) {
-            return CallOriginal(napiEnv, hook, receiver, argc, argv);
+            return callOriginal();
         }
 
         if (!hook->classMethod) {
             bool hasTarget = false;
-            CheckNapi(napi_has_named_property(napiEnv, envelope, "target", &hasTarget),
-                "napi_has_named_property(target)");
-            if (hasTarget) {
+            if (NapiOk(napiEnv, napi_has_named_property(napiEnv, envelope, "target", &hasTarget),
+                       "napi_has_named_property(target)") &&
+                hasTarget) {
                 napi_value targetPatch = nullptr;
-                CheckNapi(napi_get_named_property(napiEnv, envelope, "target", &targetPatch),
-                    "napi_get_named_property(target)");
-                ApplyTargetPatch(napiEnv, receiver, targetPatch);
+                if (NapiOk(napiEnv, napi_get_named_property(napiEnv, envelope, "target", &targetPatch),
+                           "napi_get_named_property(target)")) {
+                    ApplyTargetPatch(napiEnv, receiver, targetPatch);
+                }
             }
         }
 
         bool hasResult = false;
-        CheckNapi(napi_has_named_property(napiEnv, envelope, "result", &hasResult),
-            "napi_has_named_property(result)");
+        if (!NapiOk(napiEnv, napi_has_named_property(napiEnv, envelope, "result", &hasResult),
+                    "napi_has_named_property(result)")) {
+            return callOriginal();
+        }
         if (!hasResult) {
-            napi_value undefined = nullptr;
-            CheckNapi(napi_get_undefined(napiEnv, &undefined), "napi_get_undefined");
-            return undefined;
+            return NapiUndefined(napiEnv);
         }
 
         napi_value result = nullptr;
-        CheckNapi(napi_get_named_property(napiEnv, envelope, "result", &result),
-            "napi_get_named_property(result)");
+        if (!NapiOk(napiEnv, napi_get_named_property(napiEnv, envelope, "result", &result),
+                    "napi_get_named_property(result)")) {
+            return callOriginal();
+        }
         return result;
     }
 
-private:
+  private:
+    static constexpr size_t kMaxArguments = 64;
+    static constexpr size_t kMaxHooks = 256;
+
     JSVM_VM vm_ = nullptr;
     JSVM_VMScope vmScope_ = nullptr;
     JSVM_Env env_ = nullptr;
     JSVM_EnvScope envScope_ = nullptr;
+    bool initialized_ = false;
     bool ready_ = false;
     ActiveInvocation activeInvocation_;
-    std::vector<std::unique_ptr<HookRecord>> hooks_;
+    std::array<std::unique_ptr<HookRecord>, kMaxHooks> hooks_;
+    size_t hookCount_ = 0;
 
-    static JsvmRuntime* Current(JSVM_Env env)
+    static bool JsvmOk(JSVM_Status status, const char *operation, JSVM_Env env)
     {
-        void* data = nullptr;
-        OH_JSVM_GetInstanceData(env, &data);
-        return static_cast<JsvmRuntime*>(data);
+        if (status == JSVM_OK) {
+            return true;
+        }
+        LogError(operation, static_cast<int>(status));
+        if (env) {
+            bool pending = false;
+            JSVM_Status pendingStatus = OH_JSVM_IsExceptionPending(env, &pending);
+            if (pendingStatus != JSVM_OK) {
+                LogError("OH_JSVM_IsExceptionPending", static_cast<int>(pendingStatus));
+            } else if (pending) {
+                JSVM_Value exception = nullptr;
+                JSVM_Status clearStatus = OH_JSVM_GetAndClearLastException(env, &exception);
+                if (clearStatus != JSVM_OK) {
+                    LogError("OH_JSVM_GetAndClearLastException", static_cast<int>(clearStatus));
+                }
+            }
+        }
+        return false;
+    }
+
+    void ResetVm()
+    {
+        if (env_ && envScope_) {
+            JsvmOk(OH_JSVM_CloseEnvScope(env_, envScope_), "OH_JSVM_CloseEnvScope", env_);
+        }
+        envScope_ = nullptr;
+        if (env_) {
+            JsvmOk(OH_JSVM_DestroyEnv(env_), "OH_JSVM_DestroyEnv", nullptr);
+        }
+        env_ = nullptr;
+        if (vm_ && vmScope_) {
+            JsvmOk(OH_JSVM_CloseVMScope(vm_, vmScope_), "OH_JSVM_CloseVMScope", nullptr);
+        }
+        vmScope_ = nullptr;
+        if (vm_) {
+            JsvmOk(OH_JSVM_DestroyVM(vm_), "OH_JSVM_DestroyVM", nullptr);
+        }
+        vm_ = nullptr;
+        ready_ = false;
+    }
+
+    static JsvmRuntime *Current(JSVM_Env env)
+    {
+        void *data = nullptr;
+        if (!JsvmOk(OH_JSVM_GetInstanceData(env, &data), "OH_JSVM_GetInstanceData", env)) {
+            return nullptr;
+        }
+        return static_cast<JsvmRuntime *>(data);
     }
 
     static JSVM_Value OriginCallback(JSVM_Env env, JSVM_CallbackInfo info)
     {
-        JsvmRuntime* runtime = Current(env);
+        JsvmRuntime *runtime = Current(env);
         if (!runtime || !runtime->activeInvocation_.env || !runtime->activeInvocation_.hook) {
-            OH_JSVM_ThrowError(env, nullptr, "No active ArkTS invocation");
+            LogError("Original method called outside an active OhosPatch invocation");
             return Undefined(env);
         }
 
         size_t argc = kMaxArguments;
-        std::vector<JSVM_Value> argv(kMaxArguments);
-        OH_JSVM_GetCbInfo(env, info, &argc, argv.data(), nullptr, nullptr);
-
-        JSVM_Value argsArray = nullptr;
-        OH_JSVM_CreateArrayWithLength(env, argc, &argsArray);
-        for (size_t index = 0; index < argc; ++index) {
-            OH_JSVM_SetElement(env, argsArray, static_cast<uint32_t>(index), argv[index]);
-        }
-
-        try {
-            std::string argsJson = runtime->StringifyJson(argsArray);
-            ActiveInvocation& active = runtime->activeInvocation_;
-            napi_value napiArgsArray = NapiJsonParse(active.env, argsJson);
-            uint32_t napiArgc = 0;
-            CheckNapi(napi_get_array_length(active.env, napiArgsArray, &napiArgc), "napi_get_array_length(origin args)");
-            std::vector<napi_value> napiArgv(napiArgc);
-            for (uint32_t index = 0; index < napiArgc; ++index) {
-                CheckNapi(napi_get_element(active.env, napiArgsArray, index, &napiArgv[index]),
-                    "napi_get_element(origin args)");
-            }
-
-            napi_value result = CallOriginal(active.env, active.hook, active.receiver, napiArgv.size(), napiArgv.data());
-            napi_valuetype type = napi_undefined;
-            CheckNapi(napi_typeof(active.env, result, &type), "napi_typeof(origin result)");
-            if (type == napi_undefined) {
-                return Undefined(env);
-            }
-            return runtime->ParseJson(NapiJsonStringify(active.env, result, "null"));
-        } catch (const std::exception& error) {
-            OH_JSVM_ThrowError(env, nullptr, error.what());
+        std::array<JSVM_Value, kMaxArguments> argv{};
+        if (!JsvmOk(OH_JSVM_GetCbInfo(env, info, &argc, argv.data(), nullptr, nullptr), "OH_JSVM_GetCbInfo(origin)",
+                    env)) {
             return Undefined(env);
         }
+        if (argc > kMaxArguments) {
+            LogError("Original method arguments were truncated to the OhosPatch limit");
+            argc = kMaxArguments;
+        }
+
+        JSVM_Value argsArray = nullptr;
+        if (!JsvmOk(OH_JSVM_CreateArrayWithLength(env, argc, &argsArray), "OH_JSVM_CreateArrayWithLength", env)) {
+            return Undefined(env);
+        }
+        for (size_t index = 0; index < argc; ++index) {
+            if (!JsvmOk(OH_JSVM_SetElement(env, argsArray, static_cast<uint32_t>(index), argv[index]),
+                        "OH_JSVM_SetElement(origin argument)", env)) {
+                return Undefined(env);
+            }
+        }
+
+        std::string argsJson;
+        if (!runtime->StringifyJson(argsArray, &argsJson)) {
+            return Undefined(env);
+        }
+
+        ActiveInvocation &active = runtime->activeInvocation_;
+        napi_value napiArgsArray = nullptr;
+        if (!NapiJsonParse(active.env, argsJson, &napiArgsArray)) {
+            return Undefined(env);
+        }
+        uint32_t napiArgc = 0;
+        if (!NapiOk(active.env, napi_get_array_length(active.env, napiArgsArray, &napiArgc),
+                    "napi_get_array_length(origin args)")) {
+            return Undefined(env);
+        }
+        if (napiArgc > kMaxArguments) {
+            LogError("Original method argument count exceeds the OhosPatch limit");
+            return Undefined(env);
+        }
+
+        std::array<napi_value, kMaxArguments> napiArgv{};
+        for (uint32_t index = 0; index < napiArgc; ++index) {
+            if (!NapiOk(active.env, napi_get_element(active.env, napiArgsArray, index, &napiArgv[index]),
+                        "napi_get_element(origin args)")) {
+                return Undefined(env);
+            }
+        }
+
+        napi_value result = nullptr;
+        bool exceptionPending = false;
+        if (!CallOriginal(active.env, active.hook, active.receiver, napiArgc, napiArgv.data(), &result,
+                          &exceptionPending)) {
+            active.originalExceptionPending = exceptionPending;
+            return Undefined(env);
+        }
+
+        napi_valuetype type = napi_undefined;
+        if (!NapiOk(active.env, napi_typeof(active.env, result, &type), "napi_typeof(origin result)")) {
+            return Undefined(env);
+        }
+        if (type == napi_undefined) {
+            return Undefined(env);
+        }
+
+        std::string resultJson;
+        JSVM_Value jsvmResult = nullptr;
+        if (!NapiJsonStringify(active.env, result, "null", &resultJson) ||
+            !runtime->ParseJson(resultJson, &jsvmResult)) {
+            return Undefined(env);
+        }
+        return jsvmResult;
     }
 
     static JSVM_Value HiLogCallback(JSVM_Env env, JSVM_CallbackInfo info)
     {
-        JsvmRuntime* runtime = Current(env);
+        JsvmRuntime *runtime = Current(env);
         if (!runtime) {
             return Undefined(env);
         }
 
         size_t argc = 2;
-        JSVM_Value argv[2] = { nullptr, nullptr };
-        OH_JSVM_GetCbInfo(env, info, &argc, argv, nullptr, nullptr);
-        if (argc < 2) {
+        JSVM_Value argv[2] = {nullptr, nullptr};
+        if (!JsvmOk(OH_JSVM_GetCbInfo(env, info, &argc, argv, nullptr, nullptr), "OH_JSVM_GetCbInfo(hilog)", env) ||
+            argc < 2) {
             return Undefined(env);
         }
 
-        std::string level = runtime->JsvmString(argv[0]);
-        std::string message = runtime->JsvmString(argv[1]);
+        std::string level;
+        std::string message;
+        if (!runtime->JsvmString(argv[0], &level) || !runtime->JsvmString(argv[1], &message)) {
+            return Undefined(env);
+        }
         LogLevel logLevel = LOG_INFO;
         if (level == "debug") {
             logLevel = LOG_DEBUG;
@@ -304,318 +508,410 @@ private:
         } else if (level == "error") {
             logLevel = LOG_ERROR;
         }
-        OH_LOG_Print(LOG_APP, logLevel, 0xD003900, "OhosPatch", "%{public}s", message.c_str());
+        OH_LOG_Print(LOG_APP, logLevel, kLogDomain, kLogTag, "%{public}s", message.c_str());
         return Undefined(env);
     }
 
     static napi_value HookCallback(napi_env env, napi_callback_info info)
     {
-        try {
-            size_t argc = kMaxArguments;
-            napi_value receiver = nullptr;
-            void* data = nullptr;
-            std::vector<napi_value> argv(kMaxArguments);
-            CheckNapi(napi_get_cb_info(env, info, &argc, argv.data(), &receiver, &data), "napi_get_cb_info(values)");
-            return Runtime().InvokeHook(env, static_cast<HookRecord*>(data), receiver, argc, argv.data());
-        } catch (const std::exception& error) {
-            napi_throw_error(env, nullptr, error.what());
-            return nullptr;
+        size_t argc = kMaxArguments;
+        napi_value receiver = nullptr;
+        void *data = nullptr;
+        std::array<napi_value, kMaxArguments> argv{};
+        if (!NapiOk(env, napi_get_cb_info(env, info, &argc, argv.data(), &receiver, &data), "napi_get_cb_info(hook)")) {
+            return NapiUndefined(env);
         }
+        if (argc > kMaxArguments) {
+            LogError("Hook arguments were truncated to the OhosPatch limit");
+            argc = kMaxArguments;
+        }
+        if (!data) {
+            LogError("OhosPatch hook callback has no HookRecord");
+            return NapiUndefined(env);
+        }
+        return Runtime().InvokeHook(env, static_cast<HookRecord *>(data), receiver, argc, argv.data());
     }
 
     static JSVM_Value Undefined(JSVM_Env env)
     {
         JSVM_Value value = nullptr;
-        OH_JSVM_GetUndefined(env, &value);
+        if (!JsvmOk(OH_JSVM_GetUndefined(env, &value), "OH_JSVM_GetUndefined", env)) {
+            return nullptr;
+        }
         return value;
     }
 
-    static constexpr size_t kMaxArguments = 64;
-
-    static napi_value CallOriginal(
-        napi_env env, HookRecord* hook, napi_value receiver, size_t argc, const napi_value* argv)
+    static bool CallOriginal(napi_env env, HookRecord *hook, napi_value receiver, size_t argc, const napi_value *argv,
+                             napi_value *result, bool *exceptionPending)
     {
-        napi_value original = nullptr;
-        CheckNapi(napi_get_reference_value(env, hook->original, &original), "napi_get_reference_value(original)");
-        napi_value result = nullptr;
-        napi_status status = napi_call_function(env, receiver, original, argc, argv, &result);
-        if (status == napi_pending_exception) {
-            throw std::runtime_error(LastNapiExceptionMessage(env));
+        if (exceptionPending) {
+            *exceptionPending = false;
         }
-        CheckNapi(status, "napi_call_function(original)");
-        return result;
+        if (!hook || !result) {
+            LogError("CallOriginal received an invalid argument");
+            return false;
+        }
+
+        napi_value original = nullptr;
+        if (!NapiOk(env, napi_get_reference_value(env, hook->original, &original),
+                    "napi_get_reference_value(original)")) {
+            return false;
+        }
+        napi_status status = napi_call_function(env, receiver, original, argc, argv, result);
+        if (status == napi_pending_exception) {
+            LogError("Original ArkTS method threw an exception");
+            if (exceptionPending) {
+                *exceptionPending = true;
+            }
+            return false;
+        }
+        return NapiOk(env, status, "napi_call_function(original)");
     }
 
-    static void ApplyTargetPatch(napi_env env, napi_value target, napi_value patch)
+    static bool ApplyTargetPatch(napi_env env, napi_value target, napi_value patch)
     {
         napi_value keys = nullptr;
-        CheckNapi(napi_get_property_names(env, patch, &keys), "napi_get_property_names(target patch)");
+        if (!NapiOk(env, napi_get_property_names(env, patch, &keys), "napi_get_property_names(target patch)")) {
+            return false;
+        }
         uint32_t length = 0;
-        CheckNapi(napi_get_array_length(env, keys, &length), "napi_get_array_length(target keys)");
+        if (!NapiOk(env, napi_get_array_length(env, keys, &length), "napi_get_array_length(target keys)")) {
+            return false;
+        }
         for (uint32_t index = 0; index < length; ++index) {
             napi_value key = nullptr;
             napi_value value = nullptr;
-            CheckNapi(napi_get_element(env, keys, index, &key), "napi_get_element(target key)");
-            CheckNapi(napi_get_property(env, patch, key, &value), "napi_get_property(target value)");
-            CheckNapi(napi_set_property(env, target, key, value), "napi_set_property(target value)");
+            if (!NapiOk(env, napi_get_element(env, keys, index, &key), "napi_get_element(target key)") ||
+                !NapiOk(env, napi_get_property(env, patch, key, &value), "napi_get_property(target value)") ||
+                !NapiOk(env, napi_set_property(env, target, key, value), "napi_set_property(target value)")) {
+                return false;
+            }
         }
+        return true;
     }
 
-    static void Check(JSVM_Status status, const char* operation)
+    bool InstallNativeFunctions()
     {
-        if (status == JSVM_OK) {
-            return;
+        if (!JsvmOk(OH_JSVM_SetInstanceData(env_, this, nullptr, nullptr), "OH_JSVM_SetInstanceData", env_)) {
+            return false;
         }
-        throw std::runtime_error(std::string(operation) + " failed with status " + std::to_string(status));
-    }
-
-    void InstallNativeFunctions()
-    {
-        Check(OH_JSVM_SetInstanceData(env_, this, nullptr, nullptr), "OH_JSVM_SetInstanceData");
         JSVM_Value global = nullptr;
-        Check(OH_JSVM_GetGlobal(env_, &global), "OH_JSVM_GetGlobal");
+        if (!JsvmOk(OH_JSVM_GetGlobal(env_, &global), "OH_JSVM_GetGlobal", env_)) {
+            return false;
+        }
 
-        JSVM_CallbackStruct originCallback { OriginCallback, nullptr };
+        JSVM_CallbackStruct originCallback{OriginCallback, nullptr};
         JSVM_Value originFunction = nullptr;
-        Check(OH_JSVM_CreateFunction(env_, "__ohospatch_origin", JSVM_AUTO_LENGTH, &originCallback, &originFunction),
-            "OH_JSVM_CreateFunction(origin)");
-        Check(OH_JSVM_SetNamedProperty(env_, global, "__ohospatch_origin", originFunction),
-            "OH_JSVM_SetNamedProperty(origin)");
+        if (!JsvmOk(
+                OH_JSVM_CreateFunction(env_, "__ohospatch_origin", JSVM_AUTO_LENGTH, &originCallback, &originFunction),
+                "OH_JSVM_CreateFunction(origin)", env_) ||
+            !JsvmOk(OH_JSVM_SetNamedProperty(env_, global, "__ohospatch_origin", originFunction),
+                    "OH_JSVM_SetNamedProperty(origin)", env_)) {
+            return false;
+        }
 
-        JSVM_CallbackStruct logCallback { HiLogCallback, nullptr };
+        JSVM_CallbackStruct logCallback{HiLogCallback, nullptr};
         JSVM_Value logFunction = nullptr;
-        Check(OH_JSVM_CreateFunction(env_, "__ohospatch_hilog", JSVM_AUTO_LENGTH, &logCallback, &logFunction),
-            "OH_JSVM_CreateFunction(log)");
-        Check(OH_JSVM_SetNamedProperty(env_, global, "__ohospatch_hilog", logFunction),
-            "OH_JSVM_SetNamedProperty(log)");
+        return JsvmOk(OH_JSVM_CreateFunction(env_, "__ohospatch_hilog", JSVM_AUTO_LENGTH, &logCallback, &logFunction),
+                      "OH_JSVM_CreateFunction(hilog)", env_) &&
+               JsvmOk(OH_JSVM_SetNamedProperty(env_, global, "__ohospatch_hilog", logFunction),
+                      "OH_JSVM_SetNamedProperty(hilog)", env_);
     }
 
-    void Run(const std::string& script)
+    bool Run(const std::string &script)
     {
         JSVM_HandleScope scope = nullptr;
-        Check(OH_JSVM_OpenHandleScope(env_, &scope), "OH_JSVM_OpenHandleScope");
-        try {
-            JSVM_Value source = String(script);
-            JSVM_Script compiled = nullptr;
-            Check(OH_JSVM_CompileScript(env_, source, nullptr, 0, true, nullptr, &compiled), "OH_JSVM_CompileScript");
-            JSVM_Value result = nullptr;
-            Check(OH_JSVM_RunScript(env_, compiled, &result), "OH_JSVM_RunScript");
-            Check(OH_JSVM_CloseHandleScope(env_, scope), "OH_JSVM_CloseHandleScope");
-        } catch (...) {
-            OH_JSVM_CloseHandleScope(env_, scope);
-            throw;
+        if (!JsvmOk(OH_JSVM_OpenHandleScope(env_, &scope), "OH_JSVM_OpenHandleScope", env_)) {
+            return false;
         }
+
+        bool success = false;
+        JSVM_Value source = nullptr;
+        JSVM_Script compiled = nullptr;
+        JSVM_Value result = nullptr;
+        if (String(script, &source) &&
+            JsvmOk(OH_JSVM_CompileScript(env_, source, nullptr, 0, true, nullptr, &compiled), "OH_JSVM_CompileScript",
+                   env_) &&
+            JsvmOk(OH_JSVM_RunScript(env_, compiled, &result), "OH_JSVM_RunScript", env_)) {
+            success = true;
+        }
+        bool closed = JsvmOk(OH_JSVM_CloseHandleScope(env_, scope), "OH_JSVM_CloseHandleScope", env_);
+        return success && closed;
     }
 
-    void InstallHooks(napi_env napiEnv)
+    bool InstallHooks(napi_env napiEnv)
     {
-        std::string specsJson = JsvmString(CallGlobal("__ohospatch_specs", {}));
-        napi_value specs = NapiJsonParse(napiEnv, specsJson);
+        JSVM_Value specsValue = nullptr;
+        std::string specsJson;
+        if (!CallGlobal("__ohospatch_specs", nullptr, 0, &specsValue) || !JsvmString(specsValue, &specsJson)) {
+            return false;
+        }
+
+        napi_value specs = nullptr;
+        if (!NapiJsonParse(napiEnv, specsJson, &specs)) {
+            return false;
+        }
         uint32_t length = 0;
-        CheckNapi(napi_get_array_length(napiEnv, specs, &length), "napi_get_array_length(patch specs)");
+        if (!NapiOk(napiEnv, napi_get_array_length(napiEnv, specs, &length), "napi_get_array_length(patch specs)")) {
+            return false;
+        }
+        if (length > kMaxHooks) {
+            LogError("Patch hook count exceeds the OhosPatch limit");
+            return false;
+        }
 
         for (uint32_t index = 0; index < length; ++index) {
             napi_value spec = nullptr;
-            CheckNapi(napi_get_element(napiEnv, specs, index, &spec), "napi_get_element(patch spec)");
-            InstallHook(napiEnv, spec);
+            if (!NapiOk(napiEnv, napi_get_element(napiEnv, specs, index, &spec), "napi_get_element(patch spec)") ||
+                !InstallHook(napiEnv, spec)) {
+                return false;
+            }
         }
+        return true;
     }
 
-    void InstallHook(napi_env napiEnv, napi_value spec)
+    bool InstallHook(napi_env napiEnv, napi_value spec)
     {
-        auto stringProperty = [napiEnv, spec](const char* name) {
+        auto stringProperty = [napiEnv, spec](const char *name, std::string *output) {
             napi_value value = nullptr;
-            CheckNapi(napi_get_named_property(napiEnv, spec, name, &value), "napi_get_named_property(patch spec)");
-            return NapiString(napiEnv, value);
+            return NapiOk(napiEnv, napi_get_named_property(napiEnv, spec, name, &value),
+                          "napi_get_named_property(patch spec)") &&
+                   NapiString(napiEnv, value, output);
         };
 
-        std::string className = stringProperty("className");
-        std::string modulePath = stringProperty("modulePath");
-        std::string moduleInfo = stringProperty("moduleInfo");
-        std::string exportName = stringProperty("exportName");
-        std::string targetKey = stringProperty("targetKey");
-        std::string methodName = stringProperty("methodName");
+        std::string className;
+        std::string modulePath;
+        std::string moduleInfo;
+        std::string exportName;
+        std::string targetKey;
+        std::string methodName;
+        if (!stringProperty("className", &className) || !stringProperty("modulePath", &modulePath) ||
+            !stringProperty("moduleInfo", &moduleInfo) || !stringProperty("exportName", &exportName) ||
+            !stringProperty("targetKey", &targetKey) || !stringProperty("methodName", &methodName)) {
+            return false;
+        }
+
         napi_value classMethodValue = nullptr;
-        CheckNapi(napi_get_named_property(napiEnv, spec, "classMethod", &classMethodValue),
-            "napi_get_named_property(classMethod)");
         bool classMethod = false;
-        CheckNapi(napi_get_value_bool(napiEnv, classMethodValue, &classMethod), "napi_get_value_bool(classMethod)");
+        if (!NapiOk(napiEnv, napi_get_named_property(napiEnv, spec, "classMethod", &classMethodValue),
+                    "napi_get_named_property(classMethod)") ||
+            !NapiOk(napiEnv, napi_get_value_bool(napiEnv, classMethodValue, &classMethod),
+                    "napi_get_value_bool(classMethod)")) {
+            return false;
+        }
 
         napi_value module = nullptr;
-        napi_status loadStatus = moduleInfo.empty()
-            ? napi_load_module(napiEnv, modulePath.c_str(), &module)
-            : napi_load_module_with_info(napiEnv, modulePath.c_str(), moduleInfo.c_str(), &module);
-        CheckNapi(loadStatus, "napi_load_module_with_info(patch target)");
+        napi_status loadStatus =
+            moduleInfo.empty() ? napi_load_module(napiEnv, modulePath.c_str(), &module)
+                               : napi_load_module_with_info(napiEnv, modulePath.c_str(), moduleInfo.c_str(), &module);
+        if (!NapiOk(napiEnv, loadStatus, "napi_load_module_with_info(patch target)")) {
+            return false;
+        }
+
         napi_value constructor = nullptr;
-        CheckNapi(napi_get_named_property(napiEnv, module, exportName.c_str(), &constructor),
-            "napi_get_named_property(class export)");
+        if (!NapiOk(napiEnv, napi_get_named_property(napiEnv, module, exportName.c_str(), &constructor),
+                    "napi_get_named_property(class export)")) {
+            return false;
+        }
         napi_value holder = constructor;
-        if (!classMethod) {
-            CheckNapi(napi_get_named_property(napiEnv, constructor, "prototype", &holder),
-                "napi_get_named_property(prototype)");
+        if (!classMethod && !NapiOk(napiEnv, napi_get_named_property(napiEnv, constructor, "prototype", &holder),
+                                    "napi_get_named_property(prototype)")) {
+            return false;
         }
 
         napi_value original = nullptr;
-        CheckNapi(napi_get_named_property(napiEnv, holder, methodName.c_str(), &original),
-            "napi_get_named_property(original method)");
         napi_valuetype originalType = napi_undefined;
-        CheckNapi(napi_typeof(napiEnv, original, &originalType), "napi_typeof(original method)");
+        if (!NapiOk(napiEnv, napi_get_named_property(napiEnv, holder, methodName.c_str(), &original),
+                    "napi_get_named_property(original method)") ||
+            !NapiOk(napiEnv, napi_typeof(napiEnv, original, &originalType), "napi_typeof(original method)")) {
+            return false;
+        }
         if (originalType != napi_function) {
-            throw std::runtime_error(className + "." + methodName + " is not a function");
+            LogError(className + "." + methodName + " is not a function");
+            return false;
         }
 
-        auto hook = std::make_unique<HookRecord>();
+        std::unique_ptr<HookRecord> hook(new (std::nothrow) HookRecord());
+        if (!hook) {
+            LogError("Cannot allocate OhosPatch HookRecord");
+            return false;
+        }
         hook->env = napiEnv;
         hook->className = className;
         hook->targetKey = targetKey;
         hook->methodName = methodName;
         hook->classMethod = classMethod;
-        CheckNapi(napi_create_reference(napiEnv, holder, 1, &hook->holder), "napi_create_reference(holder)");
-        CheckNapi(napi_create_reference(napiEnv, original, 1, &hook->original), "napi_create_reference(original)");
+
+        if (!NapiOk(napiEnv, napi_create_reference(napiEnv, holder, 1, &hook->holder),
+                    "napi_create_reference(holder)")) {
+            return false;
+        }
+        if (!NapiOk(napiEnv, napi_create_reference(napiEnv, original, 1, &hook->original),
+                    "napi_create_reference(original)")) {
+            NapiOk(napiEnv, napi_delete_reference(napiEnv, hook->holder), "napi_delete_reference(holder)");
+            return false;
+        }
 
         napi_value trampoline = nullptr;
-        CheckNapi(napi_create_function(napiEnv, methodName.c_str(), methodName.size(), HookCallback, hook.get(), &trampoline),
-            "napi_create_function(trampoline)");
-        CheckNapi(napi_set_named_property(napiEnv, holder, methodName.c_str(), trampoline),
-            "napi_set_named_property(trampoline)");
-        hooks_.push_back(std::move(hook));
+        if (!NapiOk(napiEnv,
+                    napi_create_function(napiEnv, methodName.c_str(), methodName.size(), HookCallback, hook.get(),
+                                         &trampoline),
+                    "napi_create_function(trampoline)") ||
+            !NapiOk(napiEnv, napi_set_named_property(napiEnv, holder, methodName.c_str(), trampoline),
+                    "napi_set_named_property(trampoline)")) {
+            NapiOk(napiEnv, napi_delete_reference(napiEnv, hook->holder), "napi_delete_reference(holder)");
+            NapiOk(napiEnv, napi_delete_reference(napiEnv, hook->original), "napi_delete_reference(original)");
+            return false;
+        }
+
+        hooks_[hookCount_++] = std::move(hook);
+        return true;
     }
 
-    void RestoreHooks()
+    bool RestoreHooks()
     {
-        for (auto iterator = hooks_.rbegin(); iterator != hooks_.rend(); ++iterator) {
-            HookRecord* hook = iterator->get();
+        std::array<std::unique_ptr<HookRecord>, kMaxHooks> retained;
+        size_t retainedCount = 0;
+        bool success = true;
+
+        for (size_t index = hookCount_; index > 0; --index) {
+            std::unique_ptr<HookRecord> hook = std::move(hooks_[index - 1]);
             napi_value holder = nullptr;
             napi_value original = nullptr;
-            napi_get_reference_value(hook->env, hook->holder, &holder);
-            napi_get_reference_value(hook->env, hook->original, &original);
-            napi_set_named_property(hook->env, holder, hook->methodName.c_str(), original);
-            napi_delete_reference(hook->env, hook->holder);
-            napi_delete_reference(hook->env, hook->original);
+            bool restored =
+                NapiOk(hook->env, napi_get_reference_value(hook->env, hook->holder, &holder),
+                       "napi_get_reference_value(holder)") &&
+                NapiOk(hook->env, napi_get_reference_value(hook->env, hook->original, &original),
+                       "napi_get_reference_value(original)") &&
+                NapiOk(hook->env, napi_set_named_property(hook->env, holder, hook->methodName.c_str(), original),
+                       "napi_set_named_property(restore original)");
+            if (!restored) {
+                retained[retainedCount++] = std::move(hook);
+                success = false;
+                continue;
+            }
+            NapiOk(hook->env, napi_delete_reference(hook->env, hook->holder), "napi_delete_reference(holder)");
+            NapiOk(hook->env, napi_delete_reference(hook->env, hook->original), "napi_delete_reference(original)");
         }
-        hooks_.clear();
+
+        hookCount_ = retainedCount;
+        for (size_t index = 0; index < retainedCount; ++index) {
+            hooks_[index] = std::move(retained[index]);
+        }
+        return success;
     }
 
-    void ClearRegistry()
+    bool ClearRegistry()
     {
-        CallGlobal("__ohospatch_clear", {});
+        JSVM_Value ignored = nullptr;
+        return CallGlobal("__ohospatch_clear", nullptr, 0, &ignored);
     }
 
-    JSVM_Value CallGlobal(const char* name, std::initializer_list<JSVM_Value> args)
+    bool CallGlobal(const char *name, const JSVM_Value *args, size_t argc, JSVM_Value *output)
     {
         JSVM_Value global = nullptr;
-        Check(OH_JSVM_GetGlobal(env_, &global), "OH_JSVM_GetGlobal");
         JSVM_Value function = nullptr;
-        Check(OH_JSVM_GetNamedProperty(env_, global, name, &function), "OH_JSVM_GetNamedProperty(global function)");
-        JSVM_Value result = nullptr;
-        Check(OH_JSVM_CallFunction(env_, global, function, args.size(), args.begin(), &result), "OH_JSVM_CallFunction");
-        return result;
+        return JsvmOk(OH_JSVM_GetGlobal(env_, &global), "OH_JSVM_GetGlobal", env_) &&
+               JsvmOk(OH_JSVM_GetNamedProperty(env_, global, name, &function),
+                      "OH_JSVM_GetNamedProperty(global function)", env_) &&
+               JsvmOk(OH_JSVM_CallFunction(env_, global, function, argc, args, output), "OH_JSVM_CallFunction", env_);
     }
 
-    JSVM_Value String(const std::string& value)
+    bool String(const std::string &value, JSVM_Value *output)
     {
-        JSVM_Value result = nullptr;
-        Check(OH_JSVM_CreateStringUtf8(env_, value.c_str(), value.size(), &result), "OH_JSVM_CreateStringUtf8");
-        return result;
+        return JsvmOk(OH_JSVM_CreateStringUtf8(env_, value.c_str(), value.size(), output), "OH_JSVM_CreateStringUtf8",
+                      env_);
     }
 
-    JSVM_Value Bool(bool value)
+    bool Bool(bool value, JSVM_Value *output)
     {
-        JSVM_Value result = nullptr;
-        Check(OH_JSVM_GetBoolean(env_, value, &result), "OH_JSVM_GetBoolean");
-        return result;
+        return JsvmOk(OH_JSVM_GetBoolean(env_, value, output), "OH_JSVM_GetBoolean", env_);
     }
 
-    JSVM_Value ParseJson(const std::string& json)
+    bool ParseJson(const std::string &json, JSVM_Value *output)
     {
         JSVM_Value global = nullptr;
-        Check(OH_JSVM_GetGlobal(env_, &global), "OH_JSVM_GetGlobal");
         JSVM_Value jsonObject = nullptr;
-        Check(OH_JSVM_GetNamedProperty(env_, global, "JSON", &jsonObject), "OH_JSVM_GetNamedProperty(JSON)");
         JSVM_Value parse = nullptr;
-        Check(OH_JSVM_GetNamedProperty(env_, jsonObject, "parse", &parse), "OH_JSVM_GetNamedProperty(parse)");
-        JSVM_Value source = String(json);
-        JSVM_Value result = nullptr;
-        Check(OH_JSVM_CallFunction(env_, jsonObject, parse, 1, &source, &result), "OH_JSVM_CallFunction(JSON.parse)");
-        return result;
+        JSVM_Value source = nullptr;
+        return JsvmOk(OH_JSVM_GetGlobal(env_, &global), "OH_JSVM_GetGlobal", env_) &&
+               JsvmOk(OH_JSVM_GetNamedProperty(env_, global, "JSON", &jsonObject), "OH_JSVM_GetNamedProperty(JSON)",
+                      env_) &&
+               JsvmOk(OH_JSVM_GetNamedProperty(env_, jsonObject, "parse", &parse), "OH_JSVM_GetNamedProperty(parse)",
+                      env_) &&
+               String(json, &source) &&
+               JsvmOk(OH_JSVM_CallFunction(env_, jsonObject, parse, 1, &source, output),
+                      "OH_JSVM_CallFunction(JSON.parse)", env_);
     }
 
-    std::string StringifyJson(JSVM_Value value)
+    bool StringifyJson(JSVM_Value value, std::string *output)
     {
         JSVM_Value global = nullptr;
-        Check(OH_JSVM_GetGlobal(env_, &global), "OH_JSVM_GetGlobal");
         JSVM_Value jsonObject = nullptr;
-        Check(OH_JSVM_GetNamedProperty(env_, global, "JSON", &jsonObject), "OH_JSVM_GetNamedProperty(JSON)");
         JSVM_Value stringify = nullptr;
-        Check(OH_JSVM_GetNamedProperty(env_, jsonObject, "stringify", &stringify),
-            "OH_JSVM_GetNamedProperty(stringify)");
         JSVM_Value result = nullptr;
-        Check(OH_JSVM_CallFunction(env_, jsonObject, stringify, 1, &value, &result),
-            "OH_JSVM_CallFunction(JSON.stringify)");
-        return JsvmString(result);
+        return JsvmOk(OH_JSVM_GetGlobal(env_, &global), "OH_JSVM_GetGlobal", env_) &&
+               JsvmOk(OH_JSVM_GetNamedProperty(env_, global, "JSON", &jsonObject), "OH_JSVM_GetNamedProperty(JSON)",
+                      env_) &&
+               JsvmOk(OH_JSVM_GetNamedProperty(env_, jsonObject, "stringify", &stringify),
+                      "OH_JSVM_GetNamedProperty(stringify)", env_) &&
+               JsvmOk(OH_JSVM_CallFunction(env_, jsonObject, stringify, 1, &value, &result),
+                      "OH_JSVM_CallFunction(JSON.stringify)", env_) &&
+               JsvmString(result, output);
     }
 
-    std::string JsvmString(JSVM_Value value)
+    bool JsvmString(JSVM_Value value, std::string *output)
     {
         size_t length = 0;
-        Check(OH_JSVM_GetValueStringUtf8(env_, value, nullptr, 0, &length), "OH_JSVM_GetValueStringUtf8(length)");
-        std::string output(length + 1, '\0');
-        Check(OH_JSVM_GetValueStringUtf8(env_, value, output.data(), output.size(), &length),
-            "OH_JSVM_GetValueStringUtf8(value)");
-        output.resize(length);
-        return output;
+        if (!JsvmOk(OH_JSVM_GetValueStringUtf8(env_, value, nullptr, 0, &length), "OH_JSVM_GetValueStringUtf8(length)",
+                    env_)) {
+            return false;
+        }
+        std::string text(length + 1, '\0');
+        if (!JsvmOk(OH_JSVM_GetValueStringUtf8(env_, value, text.data(), text.size(), &length),
+                    "OH_JSVM_GetValueStringUtf8(value)", env_)) {
+            return false;
+        }
+        text.resize(length);
+        *output = std::move(text);
+        return true;
     }
 };
 
-JsvmRuntime& Runtime()
+JsvmRuntime &Runtime()
 {
     static JsvmRuntime runtime;
     return runtime;
 }
 
-napi_value Throw(napi_env env, const std::exception& error)
-{
-    napi_throw_error(env, nullptr, error.what());
-    return nullptr;
-}
-
 napi_value InitRuntime(napi_env env, napi_callback_info info)
 {
-    try {
-        Runtime().Ensure();
-        napi_value undefined = nullptr;
-        napi_get_undefined(env, &undefined);
-        return undefined;
-    } catch (const std::exception& error) {
-        return Throw(env, error);
-    }
+    Runtime().Ensure();
+    return NapiUndefined(env);
 }
 
 napi_value ExecuteScript(napi_env env, napi_callback_info info)
 {
     size_t argc = 1;
-    napi_value args[1] = { nullptr };
-    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
-    try {
-        size_t count = Runtime().ExecuteAndInstall(env, NapiString(env, args[0]));
-        napi_value result = nullptr;
-        napi_create_uint32(env, static_cast<uint32_t>(count), &result);
-        return result;
-    } catch (const std::exception& error) {
-        return Throw(env, error);
+    napi_value args[1] = {nullptr};
+    if (!NapiOk(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr), "napi_get_cb_info(executeScript)") ||
+        argc < 1) {
+        LogError("executeScript requires a JavaScript string");
+        return NapiUint32(env, 0);
     }
+
+    std::string script;
+    if (!NapiString(env, args[0], &script)) {
+        return NapiUint32(env, 0);
+    }
+    size_t count = Runtime().ExecuteAndInstall(env, script);
+    return NapiUint32(env, static_cast<uint32_t>(count));
 }
 
 napi_value Clear(napi_env env, napi_callback_info info)
 {
-    try {
-        Runtime().Clear(env);
-        napi_value undefined = nullptr;
-        napi_get_undefined(env, &undefined);
-        return undefined;
-    } catch (const std::exception& error) {
-        return Throw(env, error);
-    }
+    Runtime().Clear(env);
+    return NapiUndefined(env);
 }
 
 } // namespace
@@ -624,11 +920,11 @@ EXTERN_C_START
 static napi_value Init(napi_env env, napi_value exports)
 {
     napi_property_descriptor desc[] = {
-        { "init", nullptr, InitRuntime, nullptr, nullptr, nullptr, napi_default, nullptr },
-        { "clear", nullptr, Clear, nullptr, nullptr, nullptr, napi_default, nullptr },
-        { "executeScript", nullptr, ExecuteScript, nullptr, nullptr, nullptr, napi_default, nullptr },
+        {"init", nullptr, InitRuntime, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"clear", nullptr, Clear, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"executeScript", nullptr, ExecuteScript, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
-    napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
+    NapiOk(env, napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc), "napi_define_properties");
     return exports;
 }
 EXTERN_C_END
@@ -640,10 +936,7 @@ static napi_module g_ohospatchModule = {
     .nm_register_func = Init,
     .nm_modname = "ohospatch",
     .nm_priv = nullptr,
-    .reserved = { 0 },
+    .reserved = {0},
 };
 
-extern "C" __attribute__((constructor)) void RegisterOhosPatchModule(void)
-{
-    napi_module_register(&g_ohospatchModule);
-}
+extern "C" __attribute__((constructor)) void RegisterOhosPatchModule(void) { napi_module_register(&g_ohospatchModule); }

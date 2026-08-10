@@ -55,6 +55,8 @@ HarmonyOS 中，`OH_JSVM_CreateVM` 创建的独立 JSVM 与 ArkTS 主 VM 不共�
 
 独立 JSVM 与 ArkTS 主 VM 不共享对象，因此 `require()` 返回的是类描述符，不是 ArkTS Constructor。安装 Hook 时，Native 根据描述符调用 `napi_load_module_with_info`，在主 ArkTS VM 中加载目标模块并取得导出的类。
 
+Native 使用 `-fno-exceptions` 构建，不使用 C++ `throw/catch`。JSVM/NAPI 桥接失败会输出 `OhosPatch` error 级别 HiLog；patch 执行失败时回退原 ArkTS 方法，Hook 安装失败时回滚已安装的方法，`executeScript` 返回 `0`。参数校验、文件读取及业务原方法自身的异常仍保留在 ArkTS 层，其中原方法异常不会在 C++ 中捕获或转换。
+
 ## HAR 接入
 
 Demo APP 的模块依赖：
