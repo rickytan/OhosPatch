@@ -1,0 +1,11 @@
+{
+  "startupTasks": [
+    {
+      "name": "DemoPatchStartupTask",
+      "srcEntry": "./ets/patch/DemoPatchStartupTask.ets",
+      "runOnThread": "mainThread",
+      "waitOnMainThread": true
+    }
+  ],
+  "configEntry": "./ets/patch/DemoPatchStartupConfig.ets"
+}
