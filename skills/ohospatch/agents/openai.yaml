@@ -1,0 +1,4 @@
+interface:
+  display_name: "OhosPatch"
+  short_description: "Write and verify OhosPatch JavaScript patches"
+  default_prompt: "Use $ohospatch to write a safe OhosPatch JavaScript patch for this HarmonyOS bug."

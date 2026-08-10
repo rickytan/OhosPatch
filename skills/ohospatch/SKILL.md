@@ -1,5 +1,5 @@
 ---
-name: ohospatch-patch-authoring
+name: ohospatch
 description: Write, review, and repair OhosPatch JavaScript patch scripts for HarmonyOS/OpenHarmony applications. Use when an AI agent needs to translate an ArkTS bug fix into Fixit instance/class method hooks, use the invocation-scoped ArkTS Proxy, author declarative Component DSL rules, resolve full OHM target paths, or validate a dynamically delivered patch against OhosPatch runtime constraints.
 ---
 
@@ -9,11 +9,11 @@ Create a standalone JavaScript patch that matches the installed OhosPatch Runtim
 
 ## Gather Context
 
-1. Read `../../../fixit.d.js` completely for the public Patch context API.
+1. Read the target project's `fixit.d.js` completely for the public Patch context API. If it is unavailable, use the installed Skill's `references/fixit.d.js` snapshot.
 2. Read the affected ArkTS class or component and every directly used type. Confirm method names, static/instance ownership, argument order, return shape, and nested property names.
 3. Resolve the exact `bundleName`, HarmonyOS `moduleName`, OH package name, source path, and export name. Prefer the full `require()` path used by the declaration file.
-4. Read `../../../README.md` when the task involves module resolution, Component DSL support, Proxy lifetime, deployment, or current limitations.
-5. Inspect `../../../ohospatch/src/main/cpp/runtime/fixit.js` only when behavior is ambiguous or the declaration and Runtime version differ.
+4. Read the OhosPatch `README.md` when the task involves module resolution, Component DSL support, Proxy lifetime, deployment, or current limitations.
+5. Inspect `ohospatch/src/main/cpp/runtime/fixit.js` in the OhosPatch source tree only when behavior is ambiguous or the declaration and Runtime version differ.
 
 Do not invent business APIs or infer generated ArkUI method names from source syntax alone. Inspect generated ArkTS output when changing Component behavior beyond an established pattern.
 

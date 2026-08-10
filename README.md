@@ -7,7 +7,8 @@ OhosPatch 是 [FIXiT](https://github.com/rickytan/FIXiT) 在 HarmonyOS/OpenHarmo
 ```text
 OhosPatch/
 ├── fixit.d.js                 # Patch JS Context 的 JSDoc/IDE 声明
-├── .agents/skills/            # AI Patch 编写 Skill
+├── skills/ohospatch/          # Codex/Claude Patch 编写 Skill 源码
+├── scripts/install-skill.sh   # 用户级 Skill 安装脚本
 ├── ohospatch/                 # 可复用 HAR 模块
 │   ├── Index.ets              # HAR 对外 API
 │   └── src/main/
@@ -82,7 +83,15 @@ var DemoViewModel = loadClass(
 );
 ```
 
-声明文件只用于开发期语言服务，不需要下发给设备，也不能作为 Patch 执行。其 `@version` 应与 `Fixit.runtimeVersion` 保持一致。仓库还提供项目 Skill `.agents/skills/ohospatch-patch-authoring/SKILL.md`；支持 Skill 的 AI 编程工具可使用 `$ohospatch-patch-authoring` 生成或审查 Patch。
+声明文件只用于开发期语言服务，不需要下发给设备，也不能作为 Patch 执行。其 `@version` 应与 `Fixit.runtimeVersion` 保持一致。
+
+仓库的 `skills/ohospatch/SKILL.md` 提供 Patch 编写与审查流程，并兼容 Codex 和 Claude Code。运行以下脚本会默认安装到两个工具的用户级 Skill 目录：
+
+```shell
+./scripts/install-skill.sh
+```
+
+也可以使用 `--codex` 或 `--claude` 只安装一个工具；已有安装需要更新时传入 `--force`。脚本分别支持 `CODEX_HOME` 和 `CLAUDE_HOME` 自定义配置根目录。安装后在 Codex 中使用 `$ohospatch`，在 Claude Code 中使用 `/ohospatch`。
 
 独立 JSVM 与 ArkTS 主 VM 不共享对象，因此 `require()` 返回的是类描述符，不是 ArkTS Constructor。安装 Hook 时，Native 根据描述符调用 `napi_load_module_with_info`，在主 ArkTS VM 中加载目标模块并取得导出的类。
 

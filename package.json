@@ -9,6 +9,7 @@
   "description": "ArkTS patch dispatch demo inspired by FIXiT.",
   "license": "MIT",
   "scripts": {
+    "install:skill": "./scripts/install-skill.sh",
     "test": "node --test ohospatch/src/test/js/*.test.mjs"
   },
   "dependencies": {
