@@ -52,8 +52,12 @@ HarmonyOS 中，`OH_JSVM_CreateVM` 创建的独立 JSVM 与 ArkTS 主 VM 不共�
 - `require(fullPath)`：解析目标类完整 OHM 源路径，生成 `Fixit.fix` 使用的类描述符。
 - `nil` / `Nil`、`isNil`、`nilToNull`、`nullToNil`。
 - `console.debug/log/info/warn/error`：输出到 HiLog 的 `OhosPatch` tag。
+- `setTimeout` / `clearTimeout`、`setInterval` / `clearInterval`、`setImmediate` / `clearImmediate`。
+- `queueMicrotask(callback)`：将回调加入 JSVM microtask 队列。
 
 独立 JSVM 与 ArkTS 主 VM 不共享对象，因此 `require()` 返回的是类描述符，不是 ArkTS Constructor。安装 Hook 时，Native 根据描述符调用 `napi_load_module_with_info`，在主 ArkTS VM 中加载目标模块并取得导出的类。
+
+Timer callback 和参数保存在 JSVM 内，Native 仅通过宿主 N-API 的 libuv event loop 调度 timer ID。`clear()`、下一次 `executeScript` 替换 patch 或 JSVM 重置时都会取消旧 timer，避免旧 patch 的异步任务继续执行。
 
 Native 使用 `-fno-exceptions` 构建，不使用 C++ `throw/catch`。JSVM/NAPI 桥接失败会输出 `OhosPatch` error 级别 HiLog；patch 执行失败时回退原 ArkTS 方法，Hook 安装失败时回滚已安装的方法，`executeScript` 返回 `0`。参数校验、文件读取及业务原方法自身的异常仍保留在 ArkTS 层，其中原方法异常不会在 C++ 中捕获或转换。
 
@@ -169,11 +173,12 @@ node patch-server/server.mjs
 hdc rport tcp:8080 tcp:8080
 ```
 
-安装并启动 Demo 后，宿主的 AppStartup 任务会下载 patch 字符串并调用 HAR，页面应显示越界访问、实例方法和静态方法均已修复。停止 patch 服务并重新冷启动应用时，页面应恢复为原始异常结果，从而证明 patch 不是本地打包资源。
+安装并启动 Demo 后，宿主的 AppStartup 任务会下载 patch 字符串并调用 HAR，页面应显示越界访问、实例方法和静态方法均已修复。远程 patch 还会执行 `setTimeout`；等待 100 ms 后点击 `Run again`，实例方法结果应包含 `timer=fired`，HiLog 应出现 `OhosPatch setTimeout callback fired`。停止 patch 服务并重新冷启动应用时，页面应恢复为原始异常结果，从而证明 patch 不是本地打包资源。
 
 ## 当前边界
 
 - prototype hook 不覆盖构造函数、实例字段形式的箭头函数、私有实现或不经过属性查找的调用点。
 - ArkTS 与 JSVM 当前使用 JSON 数据桥，不能保留任意对象身份、循环引用、函数或 Native 对象。
+- 单个 runtime 最多同时存在 256 个 timer；`setInterval(..., 0)` 会按 1 ms 调度。
 - 生产宿主必须在调用 HAR 前完成非对称签名校验、版本和设备匹配、灰度、缓存、回滚、超时与熔断。
 - HAR 不决定下载方式和启动时机，宿主可以在 AppStartup、业务初始化或其他受控阶段调用。

@@ -9,6 +9,8 @@ const runtimeSource = await readFile(runtimeUrl, 'utf8');
 function createRuntime() {
   const logs = [];
   const origins = [];
+  const scheduledTimers = [];
+  const cancelledTimers = [];
   const context = vm.createContext({
     __ohospatch_hilog(level, message) {
       logs.push({ level, message });
@@ -16,10 +18,18 @@ function createRuntime() {
     __ohospatch_origin(...args) {
       origins.push({ receiver: this, args });
       return 'origin-result';
+    },
+    __ohospatch_scheduleTimer(id, delay, repeating) {
+      scheduledTimers.push({ id, delay, repeating });
+      return true;
+    },
+    __ohospatch_cancelTimer(id) {
+      cancelledTimers.push(id);
+      return true;
     }
   });
   vm.runInContext(runtimeSource, context, { filename: 'fixit.js' });
-  return { context, logs, origins };
+  return { context, logs, origins, scheduledTimers, cancelledTimers };
 }
 
 function plain(value) {
@@ -30,7 +40,7 @@ test('installs Fixit and common globals', () => {
   const { context, logs } = createRuntime();
 
   assert.equal(typeof context.Fixit, 'function');
-  assert.equal(context.Fixit.runtimeVersion, '1.1.0');
+  assert.equal(context.Fixit.runtimeVersion, '1.2.0');
   assert.equal(context.nil, null);
   assert.equal(context.Nil, null);
   assert.equal(context.YES, undefined);
@@ -42,6 +52,42 @@ test('installs Fixit and common globals', () => {
   assert.equal(context.nullToNil(null), null);
   context.console.warn('patch', { count: 2 });
   assert.deepEqual(logs, [{ level: 'warn', message: 'patch {"count":2}' }]);
+});
+
+test('provides timeout, interval, immediate, and microtask globals', async () => {
+  const { context, scheduledTimers, cancelledTimers } = createRuntime();
+  const calls = [];
+
+  const timeoutId = context.setTimeout((...args) => calls.push(['timeout', ...args]), 12.9, 'a', 2);
+  assert.deepEqual(scheduledTimers[0], { id: timeoutId, delay: 12, repeating: false });
+  context.__ohospatch_fireTimer(timeoutId);
+  context.__ohospatch_fireTimer(timeoutId);
+  assert.deepEqual(calls, [['timeout', 'a', 2]]);
+
+  const intervalId = context.setInterval(() => calls.push(['interval']), 0);
+  assert.deepEqual(scheduledTimers[1], { id: intervalId, delay: 1, repeating: true });
+  context.__ohospatch_fireTimer(intervalId);
+  context.__ohospatch_fireTimer(intervalId);
+  context.clearInterval(intervalId);
+  assert.deepEqual(cancelledTimers, [intervalId]);
+  assert.deepEqual(calls.slice(1), [['interval'], ['interval']]);
+
+  const immediateId = context.setImmediate((value) => calls.push(['immediate', value]), 3);
+  assert.deepEqual(scheduledTimers[2], { id: immediateId, delay: 0, repeating: false });
+  context.clearImmediate(immediateId);
+  assert.deepEqual(cancelledTimers, [intervalId, immediateId]);
+
+  const staleId = context.setTimeout(() => calls.push(['stale']), 100);
+  context.__ohospatch_clear();
+  context.__ohospatch_fireTimer(staleId);
+  assert.deepEqual(cancelledTimers, [intervalId, immediateId, staleId]);
+  assert.equal(calls.some((call) => call[0] === 'stale'), false);
+
+  context.queueMicrotask(() => calls.push(['microtask']));
+  await Promise.resolve();
+  assert.deepEqual(calls.at(-1), ['microtask']);
+  assert.throws(() => context.setTimeout('not a function', 0), /must be a function/);
+  assert.throws(() => context.queueMicrotask(null), /must be a function/);
 });
 
 test('require parses a full OHM source path into a target descriptor', () => {

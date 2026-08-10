@@ -2,6 +2,7 @@
 #include "fixit_runtime.h"
 #include "hilog/log.h"
 #include "napi/native_api.h"
+#include "uv.h"
 
 #include <array>
 #include <memory>
@@ -22,6 +23,12 @@ void LogError(const char *operation, int status)
 void LogError(const std::string &message)
 {
     OH_LOG_Print(LOG_APP, LOG_ERROR, kLogDomain, kLogTag, "%{public}s", message.c_str());
+}
+
+void LogUvError(const char *operation, int status)
+{
+    OH_LOG_Print(LOG_APP, LOG_ERROR, kLogDomain, kLogTag, "%{public}s failed: %{public}s (%{public}d)", operation,
+                 uv_strerror(status), status);
 }
 
 void ClearPendingNapiException(napi_env env)
@@ -158,6 +165,14 @@ struct ActiveInvocation {
 };
 
 class JsvmRuntime;
+
+struct TimerRecord {
+    uv_timer_t handle{};
+    JsvmRuntime *runtime = nullptr;
+    uint32_t id = 0;
+    bool repeating = false;
+};
+
 JsvmRuntime &Runtime();
 
 class JsvmRuntime
@@ -193,7 +208,7 @@ class JsvmRuntime
 
     size_t ExecuteAndInstall(napi_env napiEnv, const std::string &script)
     {
-        if (!Ensure() || !Clear(napiEnv)) {
+        if (!Ensure() || !BindEventLoop(napiEnv) || !Clear(napiEnv)) {
             return 0;
         }
         if (!Run(script)) {
@@ -213,7 +228,7 @@ class JsvmRuntime
         if (!ready_) {
             return true;
         }
-        if (hookCount_ > 0 && hooks_[0]->env != napiEnv) {
+        if ((hookCount_ > 0 && hooks_[0]->env != napiEnv) || (HasTimers() && hostEnv_ != napiEnv)) {
             LogError("OhosPatch must be cleared on the ArkTS VM where it was installed");
             return false;
         }
@@ -335,6 +350,7 @@ class JsvmRuntime
   private:
     static constexpr size_t kMaxArguments = 64;
     static constexpr size_t kMaxHooks = 256;
+    static constexpr size_t kMaxTimers = 256;
 
     JSVM_VM vm_ = nullptr;
     JSVM_VMScope vmScope_ = nullptr;
@@ -342,9 +358,42 @@ class JsvmRuntime
     JSVM_EnvScope envScope_ = nullptr;
     bool initialized_ = false;
     bool ready_ = false;
+    napi_env hostEnv_ = nullptr;
+    uv_loop_t *eventLoop_ = nullptr;
     ActiveInvocation activeInvocation_;
     std::array<std::unique_ptr<HookRecord>, kMaxHooks> hooks_;
     size_t hookCount_ = 0;
+    std::array<TimerRecord *, kMaxTimers> timers_{};
+
+    bool BindEventLoop(napi_env napiEnv)
+    {
+        if (hostEnv_ == napiEnv && eventLoop_) {
+            return true;
+        }
+        if (hostEnv_ && hostEnv_ != napiEnv && (hookCount_ > 0 || HasTimers())) {
+            LogError("OhosPatch cannot switch event loops while hooks or timers are active");
+            return false;
+        }
+
+        uv_loop_t *loop = nullptr;
+        if (!NapiOk(napiEnv, napi_get_uv_event_loop(napiEnv, &loop), "napi_get_uv_event_loop") || !loop) {
+            LogError("OhosPatch could not obtain the host event loop");
+            return false;
+        }
+        hostEnv_ = napiEnv;
+        eventLoop_ = loop;
+        return true;
+    }
+
+    bool HasTimers() const
+    {
+        for (TimerRecord *timer : timers_) {
+            if (timer) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     static bool JsvmOk(JSVM_Status status, const char *operation, JSVM_Env env)
     {
@@ -370,6 +419,7 @@ class JsvmRuntime
 
     void ResetVm()
     {
+        CancelAllTimers();
         if (env_ && envScope_) {
             JsvmOk(OH_JSVM_CloseEnvScope(env_, envScope_), "OH_JSVM_CloseEnvScope", env_);
         }
@@ -386,6 +436,8 @@ class JsvmRuntime
             JsvmOk(OH_JSVM_DestroyVM(vm_), "OH_JSVM_DestroyVM", nullptr);
         }
         vm_ = nullptr;
+        hostEnv_ = nullptr;
+        eventLoop_ = nullptr;
         ready_ = false;
     }
 
@@ -396,6 +448,140 @@ class JsvmRuntime
             return nullptr;
         }
         return static_cast<JsvmRuntime *>(data);
+    }
+
+    static void CloseTimerCallback(uv_handle_t *handle)
+    {
+        if (!handle) {
+            return;
+        }
+        delete static_cast<TimerRecord *>(handle->data);
+    }
+
+    static void TimerCallback(uv_timer_t *handle)
+    {
+        if (!handle || !handle->data) {
+            LogError("OhosPatch received an invalid timer callback");
+            return;
+        }
+        TimerRecord *timer = static_cast<TimerRecord *>(handle->data);
+        JsvmRuntime *runtime = timer->runtime;
+        uint32_t id = timer->id;
+        bool oneShot = !timer->repeating;
+        if (runtime) {
+            runtime->FireTimer(id);
+            if (oneShot) {
+                runtime->CancelTimer(id);
+            }
+        }
+    }
+
+    bool ScheduleTimer(uint32_t id, uint32_t delay, bool repeating)
+    {
+        if (!eventLoop_) {
+            LogError("OhosPatch timer requested without a host event loop");
+            return false;
+        }
+
+        size_t slot = kMaxTimers;
+        for (size_t index = 0; index < kMaxTimers; ++index) {
+            if (timers_[index] && timers_[index]->id == id) {
+                LogError("OhosPatch timer ID is already active");
+                return false;
+            }
+            if (!timers_[index] && slot == kMaxTimers) {
+                slot = index;
+            }
+        }
+        if (slot == kMaxTimers) {
+            LogError("OhosPatch native timer limit reached");
+            return false;
+        }
+
+        TimerRecord *timer = new (std::nothrow) TimerRecord();
+        if (!timer) {
+            LogError("Cannot allocate OhosPatch TimerRecord");
+            return false;
+        }
+        timer->runtime = this;
+        timer->id = id;
+        timer->repeating = repeating;
+        timer->handle.data = timer;
+
+        int status = uv_timer_init(eventLoop_, &timer->handle);
+        if (status != 0) {
+            LogUvError("uv_timer_init", status);
+            delete timer;
+            return false;
+        }
+        timers_[slot] = timer;
+        uint64_t repeat = repeating ? static_cast<uint64_t>(delay) : 0;
+        status = uv_timer_start(&timer->handle, TimerCallback, delay, repeat);
+        if (status != 0) {
+            LogUvError("uv_timer_start", status);
+            timers_[slot] = nullptr;
+            uv_close(reinterpret_cast<uv_handle_t *>(&timer->handle), CloseTimerCallback);
+            return false;
+        }
+        uv_unref(reinterpret_cast<uv_handle_t *>(&timer->handle));
+        return true;
+    }
+
+    bool CancelTimer(uint32_t id)
+    {
+        for (size_t index = 0; index < kMaxTimers; ++index) {
+            TimerRecord *timer = timers_[index];
+            if (!timer || timer->id != id) {
+                continue;
+            }
+            timers_[index] = nullptr;
+            int status = uv_timer_stop(&timer->handle);
+            if (status != 0) {
+                LogUvError("uv_timer_stop", status);
+            }
+            uv_handle_t *handle = reinterpret_cast<uv_handle_t *>(&timer->handle);
+            if (!uv_is_closing(handle)) {
+                uv_close(handle, CloseTimerCallback);
+            }
+            return status == 0;
+        }
+        return true;
+    }
+
+    bool CancelAllTimers()
+    {
+        bool success = true;
+        for (size_t index = 0; index < kMaxTimers; ++index) {
+            if (timers_[index] && !CancelTimer(timers_[index]->id)) {
+                success = false;
+            }
+        }
+        return success;
+    }
+
+    bool FireTimer(uint32_t id)
+    {
+        if (!ready_) {
+            LogError("OhosPatch timer fired after JSVM shutdown");
+            return false;
+        }
+
+        JSVM_HandleScope scope = nullptr;
+        if (!JsvmOk(OH_JSVM_OpenHandleScope(env_, &scope), "OH_JSVM_OpenHandleScope(timer)", env_)) {
+            return false;
+        }
+
+        JSVM_Value timerId = nullptr;
+        JSVM_Value ignored = nullptr;
+        bool success = JsvmOk(OH_JSVM_CreateUint32(env_, id, &timerId), "OH_JSVM_CreateUint32(timer ID)", env_) &&
+                       CallGlobal("__ohospatch_fireTimer", &timerId, 1, &ignored);
+        if (!JsvmOk(OH_JSVM_PerformMicrotaskCheckpoint(vm_), "OH_JSVM_PerformMicrotaskCheckpoint", env_)) {
+            success = false;
+        }
+        if (!JsvmOk(OH_JSVM_CloseHandleScope(env_, scope), "OH_JSVM_CloseHandleScope(timer)", env_)) {
+            success = false;
+        }
+        return success;
     }
 
     static JSVM_Value OriginCallback(JSVM_Env env, JSVM_CallbackInfo info)
@@ -512,6 +698,66 @@ class JsvmRuntime
         return Undefined(env);
     }
 
+    static JSVM_Value ScheduleTimerCallback(JSVM_Env env, JSVM_CallbackInfo info)
+    {
+        JsvmRuntime *runtime = Current(env);
+        if (!runtime) {
+            return Undefined(env);
+        }
+
+        size_t argc = 3;
+        JSVM_Value argv[3] = {nullptr, nullptr, nullptr};
+        if (!JsvmOk(OH_JSVM_GetCbInfo(env, info, &argc, argv, nullptr, nullptr), "OH_JSVM_GetCbInfo(schedule timer)",
+                    env) ||
+            argc < 3) {
+            LogError("OhosPatch schedule timer requires id, delay, and repeating arguments");
+            return Undefined(env);
+        }
+
+        uint32_t id = 0;
+        uint32_t delay = 0;
+        bool repeating = false;
+        if (!JsvmOk(OH_JSVM_GetValueUint32(env, argv[0], &id), "OH_JSVM_GetValueUint32(timer ID)", env) ||
+            !JsvmOk(OH_JSVM_GetValueUint32(env, argv[1], &delay), "OH_JSVM_GetValueUint32(timer delay)", env) ||
+            !JsvmOk(OH_JSVM_GetValueBool(env, argv[2], &repeating), "OH_JSVM_GetValueBool(timer repeating)", env)) {
+            return Undefined(env);
+        }
+
+        JSVM_Value result = nullptr;
+        if (!runtime->Bool(runtime->ScheduleTimer(id, delay, repeating), &result)) {
+            return Undefined(env);
+        }
+        return result;
+    }
+
+    static JSVM_Value CancelTimerCallback(JSVM_Env env, JSVM_CallbackInfo info)
+    {
+        JsvmRuntime *runtime = Current(env);
+        if (!runtime) {
+            return Undefined(env);
+        }
+
+        size_t argc = 1;
+        JSVM_Value argument = nullptr;
+        if (!JsvmOk(OH_JSVM_GetCbInfo(env, info, &argc, &argument, nullptr, nullptr), "OH_JSVM_GetCbInfo(cancel timer)",
+                    env) ||
+            argc < 1) {
+            LogError("OhosPatch cancel timer requires a timer ID");
+            return Undefined(env);
+        }
+
+        uint32_t id = 0;
+        if (!JsvmOk(OH_JSVM_GetValueUint32(env, argument, &id), "OH_JSVM_GetValueUint32(cancel timer ID)", env)) {
+            return Undefined(env);
+        }
+
+        JSVM_Value result = nullptr;
+        if (!runtime->Bool(runtime->CancelTimer(id), &result)) {
+            return Undefined(env);
+        }
+        return result;
+    }
+
     static napi_value HookCallback(napi_env env, napi_callback_info info)
     {
         size_t argc = kMaxArguments;
@@ -612,10 +858,30 @@ class JsvmRuntime
 
         JSVM_CallbackStruct logCallback{HiLogCallback, nullptr};
         JSVM_Value logFunction = nullptr;
-        return JsvmOk(OH_JSVM_CreateFunction(env_, "__ohospatch_hilog", JSVM_AUTO_LENGTH, &logCallback, &logFunction),
-                      "OH_JSVM_CreateFunction(hilog)", env_) &&
-               JsvmOk(OH_JSVM_SetNamedProperty(env_, global, "__ohospatch_hilog", logFunction),
-                      "OH_JSVM_SetNamedProperty(hilog)", env_);
+        if (!JsvmOk(OH_JSVM_CreateFunction(env_, "__ohospatch_hilog", JSVM_AUTO_LENGTH, &logCallback, &logFunction),
+                    "OH_JSVM_CreateFunction(hilog)", env_) ||
+            !JsvmOk(OH_JSVM_SetNamedProperty(env_, global, "__ohospatch_hilog", logFunction),
+                    "OH_JSVM_SetNamedProperty(hilog)", env_)) {
+            return false;
+        }
+
+        JSVM_CallbackStruct scheduleTimerCallback{ScheduleTimerCallback, nullptr};
+        JSVM_Value scheduleTimerFunction = nullptr;
+        if (!JsvmOk(OH_JSVM_CreateFunction(env_, "__ohospatch_scheduleTimer", JSVM_AUTO_LENGTH, &scheduleTimerCallback,
+                                           &scheduleTimerFunction),
+                    "OH_JSVM_CreateFunction(schedule timer)", env_) ||
+            !JsvmOk(OH_JSVM_SetNamedProperty(env_, global, "__ohospatch_scheduleTimer", scheduleTimerFunction),
+                    "OH_JSVM_SetNamedProperty(schedule timer)", env_)) {
+            return false;
+        }
+
+        JSVM_CallbackStruct cancelTimerCallback{CancelTimerCallback, nullptr};
+        JSVM_Value cancelTimerFunction = nullptr;
+        return JsvmOk(OH_JSVM_CreateFunction(env_, "__ohospatch_cancelTimer", JSVM_AUTO_LENGTH, &cancelTimerCallback,
+                                             &cancelTimerFunction),
+                      "OH_JSVM_CreateFunction(cancel timer)", env_) &&
+               JsvmOk(OH_JSVM_SetNamedProperty(env_, global, "__ohospatch_cancelTimer", cancelTimerFunction),
+                      "OH_JSVM_SetNamedProperty(cancel timer)", env_);
     }
 
     bool Run(const std::string &script)
@@ -803,8 +1069,10 @@ class JsvmRuntime
 
     bool ClearRegistry()
     {
+        bool timersCleared = CancelAllTimers();
         JSVM_Value ignored = nullptr;
-        return CallGlobal("__ohospatch_clear", nullptr, 0, &ignored);
+        bool registryCleared = CallGlobal("__ohospatch_clear", nullptr, 0, &ignored);
+        return timersCleared && registryCleared;
     }
 
     bool CallGlobal(const char *name, const JSVM_Value *args, size_t argc, JSVM_Value *output)

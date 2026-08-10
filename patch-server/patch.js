@@ -3,6 +3,12 @@
     'com.rickytan.ohospatch/entry/src/main/ets/demo/DemoViewModel#DemoViewModel'
   );
   var fix = Fixit.fix(DemoViewModel);
+  var timerState = 'pending';
+
+  setTimeout(function () {
+    timerState = 'fired';
+    console.info('OhosPatch setTimeout callback fired');
+  }, 100);
 
   var originLocation = fix.instanceMethod('locationOf', function (locations, index, point) {
     if (index < 0 || index >= locations.length) {
@@ -17,7 +23,7 @@
   });
 
   fix.instanceMethod('crashIt', function () {
-    return 'Instance method fixed by remote JSVM patch';
+    return 'Instance method fixed by remote JSVM patch; timer=' + timerState;
   });
 
   fix.classMethod('crash', function () {

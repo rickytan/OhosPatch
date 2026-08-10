@@ -7,6 +7,8 @@
   };
   var specs = [];
   var targets = Object.create(null);
+  var timers = Object.create(null);
+  var nextTimerId = 1;
 
   function own(object, property) {
     return Object.prototype.hasOwnProperty.call(object, property);
@@ -184,9 +186,64 @@
   };
 
   Object.defineProperty(Fixit, 'runtimeVersion', {
-    value: '1.1.0',
+    value: '1.2.0',
     enumerable: true
   });
+
+  function normalizeDelay(value, repeating) {
+    var delay = Number(value);
+    if (!isFinite(delay) || delay < 0) {
+      delay = 0;
+    }
+    delay = Math.min(Math.floor(delay), 2147483647);
+    return repeating && delay === 0 ? 1 : delay;
+  }
+
+  function allocateTimerId() {
+    var start = nextTimerId;
+    do {
+      var id = nextTimerId;
+      nextTimerId = nextTimerId >= 2147483647 ? 1 : nextTimerId + 1;
+      if (!own(timers, id)) {
+        return id;
+      }
+    } while (nextTimerId !== start);
+    throw new Error('OhosPatch timer limit reached');
+  }
+
+  function scheduleTimer(callback, delay, repeating, args) {
+    if (typeof callback !== 'function') {
+      throw new TypeError('Timer callback must be a function');
+    }
+    var id = allocateTimerId();
+    var normalizedDelay = normalizeDelay(delay, repeating);
+    timers[id] = {
+      callback: callback,
+      args: args,
+      repeating: repeating
+    };
+    if (!global.__ohospatch_scheduleTimer(id, normalizedDelay, repeating)) {
+      delete timers[id];
+      throw new Error('Unable to schedule OhosPatch timer');
+    }
+    return id;
+  }
+
+  function clearTimer(id) {
+    var timerId = Number(id);
+    if (!own(timers, timerId)) {
+      return;
+    }
+    delete timers[timerId];
+    global.__ohospatch_cancelTimer(timerId);
+  }
+
+  function clearAllTimers() {
+    Object.keys(timers).forEach(function (id) {
+      global.__ohospatch_cancelTimer(Number(id));
+    });
+    timers = Object.create(null);
+  }
 
   function formatLogValue(value) {
     if (typeof value === 'string') {
@@ -218,6 +275,24 @@
     return value === null || value === undefined;
   };
   global.require = parseRequiredTarget;
+  global.setTimeout = function (callback, delay) {
+    return scheduleTimer(callback, delay, false, Array.prototype.slice.call(arguments, 2));
+  };
+  global.clearTimeout = clearTimer;
+  global.setInterval = function (callback, delay) {
+    return scheduleTimer(callback, delay, true, Array.prototype.slice.call(arguments, 2));
+  };
+  global.clearInterval = clearTimer;
+  global.setImmediate = function (callback) {
+    return scheduleTimer(callback, 0, false, Array.prototype.slice.call(arguments, 1));
+  };
+  global.clearImmediate = clearTimer;
+  global.queueMicrotask = function (callback) {
+    if (typeof callback !== 'function') {
+      throw new TypeError('Microtask callback must be a function');
+    }
+    Promise.resolve().then(callback);
+  };
   global.console = {
     debug: function () { log('debug', arguments); },
     log: function () { log('info', arguments); },
@@ -231,10 +306,22 @@
   };
 
   global.__ohospatch_clear = function () {
+    clearAllTimers();
     registry.instance = Object.create(null);
     registry.klass = Object.create(null);
     specs = [];
     targets = Object.create(null);
+  };
+
+  global.__ohospatch_fireTimer = function (id) {
+    var timer = timers[id];
+    if (!timer) {
+      return;
+    }
+    if (!timer.repeating) {
+      delete timers[id];
+    }
+    timer.callback.apply(global, timer.args);
   };
 
   global.__ohospatch_callPatch = function (identity, methodName, isClassMethod, target, args) {

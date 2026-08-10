@@ -24,4 +24,4 @@ configure_file(
 add_library(ohospatch SHARED ohospatch.cpp)
 target_include_directories(ohospatch PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_compile_options(ohospatch PRIVATE -fno-exceptions)
-target_link_libraries(ohospatch PUBLIC libace_napi.z.so libhilog_ndk.z.so libjsvm.so)
+target_link_libraries(ohospatch PUBLIC libace_napi.z.so libhilog_ndk.z.so libjsvm.so libuv.so)
