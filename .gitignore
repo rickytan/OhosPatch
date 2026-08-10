@@ -10,3 +10,7 @@ oh_modules/
 *.hap
 *.hsp
 *.har
+.idea
+.DS_Store
+.clang-tidy
+.clangd
