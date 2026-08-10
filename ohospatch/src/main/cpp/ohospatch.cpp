@@ -5,6 +5,7 @@
 #include "uv.h"
 
 #include <array>
+#include <cstdint>
 #include <memory>
 #include <new>
 #include <string>
@@ -193,6 +194,12 @@ struct ActiveInvocation {
     size_t proxyValueCount = 0;
 };
 
+struct ImportedValue {
+    napi_ref reference = nullptr;
+    napi_valuetype type = napi_undefined;
+    uint32_t handle = 0;
+};
+
 enum class UiRuleKind {
     PARAM,
     STATE,
@@ -335,11 +342,13 @@ class JsvmRuntime
         }
         if (!Run(script)) {
             ClearRegistry();
+            ClearImportedValues();
             return 0;
         }
         JSVM_HandleScope scope = nullptr;
         if (!JsvmOk(OH_JSVM_OpenHandleScope(env_, &scope), "OH_JSVM_OpenHandleScope(patch install)", env_)) {
             ClearRegistry();
+            ClearImportedValues();
             return 0;
         }
         bool hooksInstalled = InstallHooks(napiEnv);
@@ -351,6 +360,7 @@ class JsvmRuntime
             ClearUiRules();
             RestoreHooks();
             ClearRegistry();
+            ClearImportedValues();
             return 0;
         }
         return hookCount_ + uiRuleCount_;
@@ -363,7 +373,7 @@ class JsvmRuntime
         }
         if ((hookCount_ > 0 && hooks_[0]->env != napiEnv) ||
             (uiComponentHookCount_ > 0 && uiComponentHooks_[0]->env != napiEnv) ||
-            (HasTimers() && hostEnv_ != napiEnv)) {
+            ((HasTimers() || importedValueCount_ > 0) && hostEnv_ != napiEnv)) {
             LogError("OhosPatch must be cleared on the ArkTS VM where it was installed");
             return false;
         }
@@ -371,7 +381,8 @@ class JsvmRuntime
         ClearUiRules();
         bool restored = RestoreHooks();
         bool cleared = ClearRegistry();
-        return uiRestored && restored && cleared;
+        bool importsCleared = ClearImportedValues();
+        return uiRestored && restored && cleared && importsCleared;
     }
 
     napi_value InvokeHook(napi_env napiEnv, HookRecord *hook, napi_value receiver, size_t argc, const napi_value *argv)
@@ -514,6 +525,18 @@ class JsvmRuntime
             restoreInvocation();
             return result;
         }
+        if (resultKind == "imported") {
+            uint32_t handle = 0;
+            napi_value result = nullptr;
+            if (!NapiNamedUint32(napiEnv, resultWire, "handle", &handle) ||
+                !GetImportedValue(handle, &result)) {
+                LogError("OhosPatch patch returned an invalid imported handle");
+                restoreInvocation();
+                return callOriginal();
+            }
+            restoreInvocation();
+            return result;
+        }
         if (resultKind != "wire") {
             LogError("OhosPatch patch returned an unknown result kind");
             restoreInvocation();
@@ -524,7 +547,7 @@ class JsvmRuntime
         napi_value result = nullptr;
         if (!NapiOk(napiEnv, napi_get_named_property(napiEnv, resultWire, "value", &encodedResult),
                     "napi_get_named_property(result value)") ||
-            !ResolveProxyWireValue(activeInvocation_, encodedResult, 0, &result)) {
+            !ResolveBridgeWireValue(napiEnv, encodedResult, 0, &result)) {
             restoreInvocation();
             return callOriginal();
         }
@@ -536,6 +559,7 @@ class JsvmRuntime
     static constexpr size_t kMaxArguments = 64;
     static constexpr size_t kMaxHooks = 256;
     static constexpr size_t kMaxTimers = 256;
+    static constexpr size_t kMaxImportedValues = 512;
     static constexpr size_t kMaxUiRules = 256;
     static constexpr size_t kMaxUiComponentHooks = 64;
     static constexpr size_t kMaxUiRenderDepth = 16;
@@ -552,6 +576,9 @@ class JsvmRuntime
     std::array<std::unique_ptr<HookRecord>, kMaxHooks> hooks_;
     size_t hookCount_ = 0;
     std::array<TimerRecord *, kMaxTimers> timers_{};
+    std::array<ImportedValue, kMaxImportedValues> importedValues_{};
+    size_t importedValueCount_ = 0;
+    uint32_t nextImportedHandle_ = 1;
     std::array<std::unique_ptr<UiRule>, kMaxUiRules> uiRules_;
     size_t uiRuleCount_ = 0;
     std::array<std::unique_ptr<UiComponentHook>, kMaxUiComponentHooks> uiComponentHooks_;
@@ -564,7 +591,7 @@ class JsvmRuntime
         if (hostEnv_ == napiEnv && eventLoop_) {
             return true;
         }
-        if (hostEnv_ && hostEnv_ != napiEnv && (hookCount_ > 0 || HasTimers())) {
+        if (hostEnv_ && hostEnv_ != napiEnv && (hookCount_ > 0 || HasTimers() || importedValueCount_ > 0)) {
             LogError("OhosPatch cannot switch event loops while hooks or timers are active");
             return false;
         }
@@ -755,13 +782,19 @@ class JsvmRuntime
 
     bool FireTimer(uint32_t id)
     {
-        if (!ready_) {
+        if (!ready_ || !hostEnv_) {
             LogError("OhosPatch timer fired after JSVM shutdown");
             return false;
         }
 
+        napi_handle_scope napiScope = nullptr;
+        if (!NapiOk(hostEnv_, napi_open_handle_scope(hostEnv_, &napiScope),
+                    "napi_open_handle_scope(timer)")) {
+            return false;
+        }
         JSVM_HandleScope scope = nullptr;
         if (!JsvmOk(OH_JSVM_OpenHandleScope(env_, &scope), "OH_JSVM_OpenHandleScope(timer)", env_)) {
+            NapiOk(hostEnv_, napi_close_handle_scope(hostEnv_, napiScope), "napi_close_handle_scope(timer)");
             return false;
         }
 
@@ -773,6 +806,9 @@ class JsvmRuntime
             success = false;
         }
         if (!JsvmOk(OH_JSVM_CloseHandleScope(env_, scope), "OH_JSVM_CloseHandleScope(timer)", env_)) {
+            success = false;
+        }
+        if (!NapiOk(hostEnv_, napi_close_handle_scope(hostEnv_, napiScope), "napi_close_handle_scope(timer)")) {
             success = false;
         }
         return success;
@@ -1152,14 +1188,180 @@ class JsvmRuntime
         return ProxyResponse("value", payload);
     }
 
-    static bool ResolveProxyWireValue(ActiveInvocation &active, napi_value encoded, size_t depth, napi_value *output)
+    bool GetImportedValue(uint32_t handle, napi_value *output)
+    {
+        if (!output || !hostEnv_ || handle == 0) {
+            LogError("OhosPatch received an invalid imported value handle");
+            return false;
+        }
+        for (size_t index = 0; index < importedValueCount_; ++index) {
+            ImportedValue &record = importedValues_[index];
+            if (record.handle == handle && record.reference) {
+                return NapiOk(hostEnv_, napi_get_reference_value(hostEnv_, record.reference, output),
+                              "napi_get_reference_value(imported value)");
+            }
+        }
+        LogError("OhosPatch imported value handle is stale or unavailable");
+        return false;
+    }
+
+    uint32_t AllocateImportedHandle()
+    {
+        uint32_t start = nextImportedHandle_;
+        do {
+            uint32_t candidate = nextImportedHandle_;
+            nextImportedHandle_ = nextImportedHandle_ == UINT32_MAX ? 1 : nextImportedHandle_ + 1;
+            bool used = false;
+            for (size_t index = 0; index < importedValueCount_; ++index) {
+                if (importedValues_[index].handle == candidate) {
+                    used = true;
+                    break;
+                }
+            }
+            if (!used) {
+                return candidate;
+            }
+        } while (nextImportedHandle_ != start);
+        LogError("OhosPatch could not allocate an imported value handle");
+        return 0;
+    }
+
+    bool FindOrAddImportedValue(napi_value value, napi_valuetype type, uint32_t *handle)
+    {
+        if (!hostEnv_ || !value || !handle) {
+            LogError("FindOrAddImportedValue received an invalid argument");
+            return false;
+        }
+        for (size_t index = 0; index < importedValueCount_; ++index) {
+            napi_value retained = nullptr;
+            bool equal = false;
+            ImportedValue &record = importedValues_[index];
+            if (!NapiOk(hostEnv_, napi_get_reference_value(hostEnv_, record.reference, &retained),
+                        "napi_get_reference_value(imported value for identity)") ||
+                !NapiOk(hostEnv_, napi_strict_equals(hostEnv_, retained, value, &equal),
+                        "napi_strict_equals(imported value)")) {
+                return false;
+            }
+            if (equal) {
+                *handle = record.handle;
+                return true;
+            }
+        }
+        if (importedValueCount_ >= kMaxImportedValues) {
+            LogError("OhosPatch imported value handle limit exceeded");
+            return false;
+        }
+
+        ImportedValue &record = importedValues_[importedValueCount_];
+        record.handle = AllocateImportedHandle();
+        if (record.handle == 0) {
+            return false;
+        }
+        if (!NapiOk(hostEnv_, napi_create_reference(hostEnv_, value, 1, &record.reference),
+                    "napi_create_reference(imported value)")) {
+            record = {};
+            return false;
+        }
+        record.type = type;
+        *handle = record.handle;
+        ++importedValueCount_;
+        return true;
+    }
+
+    JSVM_Value ImportedNapiValue(napi_value value)
+    {
+        if (!hostEnv_ || !value) {
+            return ProxyError("OhosPatch could not access an imported value");
+        }
+        napi_valuetype type = napi_undefined;
+        if (!NapiOk(hostEnv_, napi_typeof(hostEnv_, value, &type), "napi_typeof(imported value)")) {
+            return ProxyError("OhosPatch could not inspect an imported value");
+        }
+        if (type == napi_undefined) {
+            return ProxyResponse("undefined", nullptr);
+        }
+        if (type == napi_object || type == napi_function) {
+            uint32_t handle = 0;
+            if (!FindOrAddImportedValue(value, type, &handle)) {
+                return ProxyError("OhosPatch could not retain an imported value");
+            }
+            JSVM_Value handleValue = nullptr;
+            if (!JsvmOk(OH_JSVM_CreateUint32(env_, handle, &handleValue),
+                        "OH_JSVM_CreateUint32(imported handle)", env_)) {
+                return ProxyError("OhosPatch could not create an imported value handle");
+            }
+            return ProxyResponse(type == napi_function ? "function" : "object", handleValue);
+        }
+        if (type == napi_symbol || type == napi_external || type == napi_bigint) {
+            return ProxyError("OhosPatch does not support this imported value type");
+        }
+
+        std::string json;
+        JSVM_Value payload = nullptr;
+        if (!NapiJsonStringify(hostEnv_, value, "null", &json) || !ParseJson(json, &payload)) {
+            return ProxyError("OhosPatch could not serialize an imported value");
+        }
+        return ProxyResponse("value", payload);
+    }
+
+    bool DecodeImportedArguments(const std::string &wire, std::array<napi_value, kMaxArguments> *arguments,
+                                 uint32_t *argumentCount)
+    {
+        if (!hostEnv_ || !arguments || !argumentCount) {
+            LogError("DecodeImportedArguments received an invalid argument");
+            return false;
+        }
+        napi_value encoded = nullptr;
+        napi_value resolved = nullptr;
+        if (!NapiJsonParse(hostEnv_, wire, &encoded) ||
+            !ResolveBridgeWireValue(hostEnv_, encoded, 0, &resolved) ||
+            !NapiOk(hostEnv_, napi_get_array_length(hostEnv_, resolved, argumentCount),
+                    "napi_get_array_length(imported arguments)")) {
+            return false;
+        }
+        if (*argumentCount > kMaxArguments) {
+            LogError("OhosPatch imported argument count exceeds the limit");
+            return false;
+        }
+        for (uint32_t index = 0; index < *argumentCount; ++index) {
+            if (!NapiOk(hostEnv_, napi_get_element(hostEnv_, resolved, index, &(*arguments)[index]),
+                        "napi_get_element(imported argument)")) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool ClearImportedValues()
+    {
+        bool success = true;
+        for (size_t index = 0; index < importedValueCount_; ++index) {
+            ImportedValue &record = importedValues_[index];
+            if (record.reference && hostEnv_) {
+                napi_status status = napi_delete_reference(hostEnv_, record.reference);
+                if (status != napi_ok) {
+                    LogError("napi_delete_reference(imported value)", static_cast<int>(status));
+                    ClearPendingNapiException(hostEnv_);
+                    success = false;
+                }
+            } else if (record.reference) {
+                LogError("OhosPatch cannot release an imported value without its ArkTS environment");
+                success = false;
+            }
+            record = {};
+        }
+        importedValueCount_ = 0;
+        return success;
+    }
+
+    bool ResolveBridgeWireValue(napi_env napiEnv, napi_value encoded, size_t depth, napi_value *output)
     {
         if (!output || !encoded || depth > 32) {
             LogError("OhosPatch proxy wire value exceeds the supported depth");
             return false;
         }
         napi_valuetype type = napi_undefined;
-        if (!NapiOk(active.env, napi_typeof(active.env, encoded, &type), "napi_typeof(proxy wire value)")) {
+        if (!NapiOk(napiEnv, napi_typeof(napiEnv, encoded, &type), "napi_typeof(proxy wire value)")) {
             return false;
         }
         if (type != napi_object) {
@@ -1168,38 +1370,54 @@ class JsvmRuntime
         }
 
         bool hasRemoteHandle = false;
-        if (!NapiOk(active.env,
-                    napi_has_named_property(active.env, encoded, "__ohospatch_proxy_handle__", &hasRemoteHandle),
+        if (!NapiOk(napiEnv,
+                    napi_has_named_property(napiEnv, encoded, "__ohospatch_proxy_handle__", &hasRemoteHandle),
                     "napi_has_named_property(proxy handle)")) {
             return false;
         }
         if (hasRemoteHandle) {
             uint32_t handle = 0;
-            if (!NapiNamedUint32(active.env, encoded, "__ohospatch_proxy_handle__", &handle) ||
-                handle >= active.proxyValueCount) {
+            if (!NapiNamedUint32(napiEnv, encoded, "__ohospatch_proxy_handle__", &handle) ||
+                activeInvocation_.env != napiEnv || handle >= activeInvocation_.proxyValueCount) {
                 LogError("OhosPatch received an invalid proxy handle");
                 return false;
             }
-            *output = active.proxyValues[handle];
+            *output = activeInvocation_.proxyValues[handle];
+            return true;
+        }
+
+        bool hasImportHandle = false;
+        if (!NapiOk(napiEnv,
+                    napi_has_named_property(napiEnv, encoded, "__ohospatch_import_handle__", &hasImportHandle),
+                    "napi_has_named_property(import handle)")) {
+            return false;
+        }
+        if (hasImportHandle) {
+            uint32_t handle = 0;
+            if (!NapiNamedUint32(napiEnv, encoded, "__ohospatch_import_handle__", &handle) ||
+                !GetImportedValue(handle, output)) {
+                LogError("OhosPatch received an invalid import handle");
+                return false;
+            }
             return true;
         }
 
         bool hasUndefinedMarker = false;
-        if (!NapiOk(active.env,
-                    napi_has_named_property(active.env, encoded, "__ohospatch_proxy_undefined__", &hasUndefinedMarker),
+        if (!NapiOk(napiEnv,
+                    napi_has_named_property(napiEnv, encoded, "__ohospatch_proxy_undefined__", &hasUndefinedMarker),
                     "napi_has_named_property(proxy undefined)")) {
             return false;
         }
         if (hasUndefinedMarker) {
-            *output = NapiUndefined(active.env);
+            *output = NapiUndefined(napiEnv);
             return *output != nullptr;
         }
 
         napi_value keys = nullptr;
         uint32_t length = 0;
-        if (!NapiOk(active.env, napi_get_property_names(active.env, encoded, &keys),
+        if (!NapiOk(napiEnv, napi_get_property_names(napiEnv, encoded, &keys),
                     "napi_get_property_names(proxy wire value)") ||
-            !NapiOk(active.env, napi_get_array_length(active.env, keys, &length),
+            !NapiOk(napiEnv, napi_get_array_length(napiEnv, keys, &length),
                     "napi_get_array_length(proxy wire keys)")) {
             return false;
         }
@@ -1211,12 +1429,12 @@ class JsvmRuntime
             napi_value key = nullptr;
             napi_value child = nullptr;
             napi_value resolved = nullptr;
-            if (!NapiOk(active.env, napi_get_element(active.env, keys, index, &key),
+            if (!NapiOk(napiEnv, napi_get_element(napiEnv, keys, index, &key),
                         "napi_get_element(proxy wire key)") ||
-                !NapiOk(active.env, napi_get_property(active.env, encoded, key, &child),
+                !NapiOk(napiEnv, napi_get_property(napiEnv, encoded, key, &child),
                         "napi_get_property(proxy wire child)") ||
-                !ResolveProxyWireValue(active, child, depth + 1, &resolved) ||
-                !NapiOk(active.env, napi_set_property(active.env, encoded, key, resolved),
+                !ResolveBridgeWireValue(napiEnv, child, depth + 1, &resolved) ||
+                !NapiOk(napiEnv, napi_set_property(napiEnv, encoded, key, resolved),
                         "napi_set_property(proxy wire child)")) {
                 return false;
             }
@@ -1277,7 +1495,8 @@ class JsvmRuntime
         napi_value encoded = nullptr;
         napi_value value = nullptr;
         napi_value key = nullptr;
-        if (!NapiJsonParse(active.env, wire, &encoded) || !ResolveProxyWireValue(active, encoded, 0, &value) ||
+        if (!NapiJsonParse(active.env, wire, &encoded) ||
+            !runtime->ResolveBridgeWireValue(active.env, encoded, 0, &value) ||
             !NapiOk(active.env, napi_create_string_utf8(active.env, property.c_str(), property.size(), &key),
                     "napi_create_string_utf8(proxy set property)") ||
             !NapiOk(active.env, napi_set_property(active.env, active.proxyValues[handle], key, value),
@@ -1316,7 +1535,7 @@ class JsvmRuntime
         napi_value resolvedArgs = nullptr;
         uint32_t argumentCount = 0;
         if (!NapiJsonParse(active.env, wire, &encodedArgs) ||
-            !ResolveProxyWireValue(active, encodedArgs, 0, &resolvedArgs) ||
+            !runtime->ResolveBridgeWireValue(active.env, encodedArgs, 0, &resolvedArgs) ||
             !NapiOk(active.env, napi_get_array_length(active.env, resolvedArgs, &argumentCount),
                     "napi_get_array_length(proxy call args)")) {
             return runtime->ProxyError("OhosPatch could not decode proxied method arguments");
@@ -1341,6 +1560,204 @@ class JsvmRuntime
         return runtime->ProxyNapiValue(active, result);
     }
 
+    static JSVM_Value ImportCallback(JSVM_Env env, JSVM_CallbackInfo info)
+    {
+        JsvmRuntime *runtime = Current(env);
+        if (!runtime || !runtime->hostEnv_) {
+            return runtime ? runtime->ProxyError("OhosPatch import requires an active ArkTS environment")
+                           : Undefined(env);
+        }
+
+        size_t argc = 1;
+        JSVM_Value argument = nullptr;
+        std::string descriptorJson;
+        if (!JsvmOk(OH_JSVM_GetCbInfo(env, info, &argc, &argument, nullptr, nullptr),
+                    "OH_JSVM_GetCbInfo(import)", env) ||
+            argc < 1 || !runtime->JsvmString(argument, &descriptorJson)) {
+            return runtime->ProxyError("Fixit.import requires an encoded target descriptor");
+        }
+
+        napi_env napiEnv = runtime->hostEnv_;
+        napi_value target = nullptr;
+        std::string modulePath;
+        std::string moduleInfo;
+        std::string exportName;
+        if (!NapiJsonParse(napiEnv, descriptorJson, &target) ||
+            !NapiNamedString(napiEnv, target, "modulePath", &modulePath) ||
+            !NapiNamedString(napiEnv, target, "moduleInfo", &moduleInfo) ||
+            !NapiNamedString(napiEnv, target, "exportName", &exportName)) {
+            return runtime->ProxyError("Fixit.import received an invalid target descriptor");
+        }
+
+        napi_value module = nullptr;
+        napi_status loadStatus = moduleInfo.empty()
+                                     ? napi_load_module(napiEnv, modulePath.c_str(), &module)
+                                     : napi_load_module_with_info(napiEnv, modulePath.c_str(), moduleInfo.c_str(),
+                                                                  &module);
+        if (!NapiOk(napiEnv, loadStatus, "napi_load_module_with_info(import target)")) {
+            return runtime->ProxyError("Fixit.import could not load the target module");
+        }
+
+        napi_value imported = nullptr;
+        napi_valuetype importedType = napi_undefined;
+        if (!NapiOk(napiEnv, napi_get_named_property(napiEnv, module, exportName.c_str(), &imported),
+                    "napi_get_named_property(import export)") ||
+            !NapiOk(napiEnv, napi_typeof(napiEnv, imported, &importedType), "napi_typeof(import export)")) {
+            return runtime->ProxyError("Fixit.import could not resolve the exported class");
+        }
+        if (importedType != napi_function) {
+            LogError("Fixit.import target is not a class or callable export: " + exportName);
+            return runtime->ProxyError("Fixit.import target must be a class or callable export");
+        }
+        return runtime->ImportedNapiValue(imported);
+    }
+
+    static JSVM_Value ImportGetCallback(JSVM_Env env, JSVM_CallbackInfo info)
+    {
+        JsvmRuntime *runtime = Current(env);
+        if (!runtime || !runtime->hostEnv_) {
+            return runtime ? runtime->ProxyError("OhosPatch imported read requires an active ArkTS environment")
+                           : Undefined(env);
+        }
+        size_t argc = 2;
+        JSVM_Value argv[2] = {nullptr, nullptr};
+        uint32_t handle = 0;
+        std::string property;
+        napi_value target = nullptr;
+        if (!JsvmOk(OH_JSVM_GetCbInfo(env, info, &argc, argv, nullptr, nullptr),
+                    "OH_JSVM_GetCbInfo(import get)", env) ||
+            argc < 2 ||
+            !JsvmOk(OH_JSVM_GetValueUint32(env, argv[0], &handle),
+                    "OH_JSVM_GetValueUint32(import get handle)", env) ||
+            !runtime->JsvmString(argv[1], &property) || !runtime->GetImportedValue(handle, &target)) {
+            return runtime->ProxyError("OhosPatch imported read received invalid arguments");
+        }
+
+        napi_env napiEnv = runtime->hostEnv_;
+        napi_value key = nullptr;
+        napi_value value = nullptr;
+        if (!NapiOk(napiEnv, napi_create_string_utf8(napiEnv, property.c_str(), property.size(), &key),
+                    "napi_create_string_utf8(import property)") ||
+            !NapiOk(napiEnv, napi_get_property(napiEnv, target, key, &value),
+                    "napi_get_property(imported value)")) {
+            return runtime->ProxyError("OhosPatch could not read an imported property");
+        }
+        return runtime->ImportedNapiValue(value);
+    }
+
+    static JSVM_Value ImportSetCallback(JSVM_Env env, JSVM_CallbackInfo info)
+    {
+        JsvmRuntime *runtime = Current(env);
+        if (!runtime || !runtime->hostEnv_) {
+            return runtime ? runtime->ProxyError("OhosPatch imported write requires an active ArkTS environment")
+                           : Undefined(env);
+        }
+        size_t argc = 3;
+        JSVM_Value argv[3] = {nullptr, nullptr, nullptr};
+        uint32_t handle = 0;
+        std::string property;
+        std::string wire;
+        napi_value target = nullptr;
+        if (!JsvmOk(OH_JSVM_GetCbInfo(env, info, &argc, argv, nullptr, nullptr),
+                    "OH_JSVM_GetCbInfo(import set)", env) ||
+            argc < 3 ||
+            !JsvmOk(OH_JSVM_GetValueUint32(env, argv[0], &handle),
+                    "OH_JSVM_GetValueUint32(import set handle)", env) ||
+            !runtime->JsvmString(argv[1], &property) || !runtime->JsvmString(argv[2], &wire) ||
+            !runtime->GetImportedValue(handle, &target)) {
+            return runtime->ProxyError("OhosPatch imported write received invalid arguments");
+        }
+
+        napi_env napiEnv = runtime->hostEnv_;
+        napi_value encoded = nullptr;
+        napi_value value = nullptr;
+        napi_value key = nullptr;
+        if (!NapiJsonParse(napiEnv, wire, &encoded) ||
+            !runtime->ResolveBridgeWireValue(napiEnv, encoded, 0, &value) ||
+            !NapiOk(napiEnv, napi_create_string_utf8(napiEnv, property.c_str(), property.size(), &key),
+                    "napi_create_string_utf8(import set property)") ||
+            !NapiOk(napiEnv, napi_set_property(napiEnv, target, key, value),
+                    "napi_set_property(imported value)")) {
+            return runtime->ProxyError("OhosPatch could not write an imported property");
+        }
+        return runtime->ProxyResponse("ok", nullptr);
+    }
+
+    static JSVM_Value ImportCallCallback(JSVM_Env env, JSVM_CallbackInfo info)
+    {
+        JsvmRuntime *runtime = Current(env);
+        if (!runtime || !runtime->hostEnv_) {
+            return runtime ? runtime->ProxyError("OhosPatch imported call requires an active ArkTS environment")
+                           : Undefined(env);
+        }
+        size_t argc = 3;
+        JSVM_Value argv[3] = {nullptr, nullptr, nullptr};
+        uint32_t functionHandle = 0;
+        uint32_t receiverHandle = 0;
+        std::string wire;
+        napi_value function = nullptr;
+        napi_value receiver = nullptr;
+        if (!JsvmOk(OH_JSVM_GetCbInfo(env, info, &argc, argv, nullptr, nullptr),
+                    "OH_JSVM_GetCbInfo(import call)", env) ||
+            argc < 3 ||
+            !JsvmOk(OH_JSVM_GetValueUint32(env, argv[0], &functionHandle),
+                    "OH_JSVM_GetValueUint32(import function handle)", env) ||
+            !JsvmOk(OH_JSVM_GetValueUint32(env, argv[1], &receiverHandle),
+                    "OH_JSVM_GetValueUint32(import receiver handle)", env) ||
+            !runtime->JsvmString(argv[2], &wire) || !runtime->GetImportedValue(functionHandle, &function) ||
+            !runtime->GetImportedValue(receiverHandle, &receiver)) {
+            return runtime->ProxyError("OhosPatch imported call received invalid arguments");
+        }
+
+        std::array<napi_value, kMaxArguments> arguments{};
+        uint32_t argumentCount = 0;
+        if (!runtime->DecodeImportedArguments(wire, &arguments, &argumentCount)) {
+            return runtime->ProxyError("OhosPatch could not decode imported method arguments");
+        }
+        napi_value result = nullptr;
+        if (!NapiOk(runtime->hostEnv_,
+                    napi_call_function(runtime->hostEnv_, receiver, function, argumentCount, arguments.data(), &result),
+                    "napi_call_function(imported method)")) {
+            return runtime->ProxyError("OhosPatch imported method call failed");
+        }
+        return runtime->ImportedNapiValue(result);
+    }
+
+    static JSVM_Value ImportConstructCallback(JSVM_Env env, JSVM_CallbackInfo info)
+    {
+        JsvmRuntime *runtime = Current(env);
+        if (!runtime || !runtime->hostEnv_) {
+            return runtime ? runtime->ProxyError("OhosPatch imported constructor requires an active ArkTS environment")
+                           : Undefined(env);
+        }
+        size_t argc = 2;
+        JSVM_Value argv[2] = {nullptr, nullptr};
+        uint32_t constructorHandle = 0;
+        std::string wire;
+        napi_value constructor = nullptr;
+        if (!JsvmOk(OH_JSVM_GetCbInfo(env, info, &argc, argv, nullptr, nullptr),
+                    "OH_JSVM_GetCbInfo(import construct)", env) ||
+            argc < 2 ||
+            !JsvmOk(OH_JSVM_GetValueUint32(env, argv[0], &constructorHandle),
+                    "OH_JSVM_GetValueUint32(import constructor handle)", env) ||
+            !runtime->JsvmString(argv[1], &wire) || !runtime->GetImportedValue(constructorHandle, &constructor)) {
+            return runtime->ProxyError("OhosPatch imported constructor received invalid arguments");
+        }
+
+        std::array<napi_value, kMaxArguments> arguments{};
+        uint32_t argumentCount = 0;
+        if (!runtime->DecodeImportedArguments(wire, &arguments, &argumentCount)) {
+            return runtime->ProxyError("OhosPatch could not decode imported constructor arguments");
+        }
+        napi_value instance = nullptr;
+        if (!NapiOk(runtime->hostEnv_,
+                    napi_new_instance(runtime->hostEnv_, constructor, argumentCount, arguments.data(), &instance),
+                    "napi_new_instance(imported class)")) {
+            return runtime->ProxyError("OhosPatch imported class construction failed");
+        }
+        return runtime->ImportedNapiValue(instance);
+    }
+
     static JSVM_Value OriginCallback(JSVM_Env env, JSVM_CallbackInfo info)
     {
         JsvmRuntime *runtime = Current(env);
@@ -1361,7 +1778,7 @@ class JsvmRuntime
         napi_value encodedArgs = nullptr;
         napi_value napiArgsArray = nullptr;
         if (!NapiJsonParse(active.env, argsJson, &encodedArgs) ||
-            !ResolveProxyWireValue(active, encodedArgs, 0, &napiArgsArray)) {
+            !runtime->ResolveBridgeWireValue(active.env, encodedArgs, 0, &napiArgsArray)) {
             return runtime->ProxyError("Original method arguments could not be decoded");
         }
         uint32_t napiArgc = 0;
@@ -2359,6 +2776,15 @@ class JsvmRuntime
         }
     }
 
+    bool InstallNativeFunction(JSVM_Value global, const char *name, JSVM_CallbackStruct *callback)
+    {
+        JSVM_Value function = nullptr;
+        return JsvmOk(OH_JSVM_CreateFunction(env_, name, JSVM_AUTO_LENGTH, callback, &function),
+                      "OH_JSVM_CreateFunction", env_) &&
+               JsvmOk(OH_JSVM_SetNamedProperty(env_, global, name, function),
+                      "OH_JSVM_SetNamedProperty(native function)", env_);
+    }
+
     bool InstallNativeFunctions()
     {
         if (!JsvmOk(OH_JSVM_SetInstanceData(env_, this, nullptr, nullptr), "OH_JSVM_SetInstanceData", env_)) {
@@ -2400,6 +2826,19 @@ class JsvmRuntime
                     "OH_JSVM_CreateFunction(proxy call)", env_) ||
             !JsvmOk(OH_JSVM_SetNamedProperty(env_, global, "__ohospatch_proxyCall", proxyCallFunction),
                     "OH_JSVM_SetNamedProperty(proxy call)", env_)) {
+            return false;
+        }
+
+        static JSVM_CallbackStruct importCallback{ImportCallback, nullptr};
+        static JSVM_CallbackStruct importGetCallback{ImportGetCallback, nullptr};
+        static JSVM_CallbackStruct importSetCallback{ImportSetCallback, nullptr};
+        static JSVM_CallbackStruct importCallCallback{ImportCallCallback, nullptr};
+        static JSVM_CallbackStruct importConstructCallback{ImportConstructCallback, nullptr};
+        if (!InstallNativeFunction(global, "__ohospatch_import", &importCallback) ||
+            !InstallNativeFunction(global, "__ohospatch_importGet", &importGetCallback) ||
+            !InstallNativeFunction(global, "__ohospatch_importSet", &importSetCallback) ||
+            !InstallNativeFunction(global, "__ohospatch_importCall", &importCallCallback) ||
+            !InstallNativeFunction(global, "__ohospatch_importConstruct", &importConstructCallback)) {
             return false;
         }
 

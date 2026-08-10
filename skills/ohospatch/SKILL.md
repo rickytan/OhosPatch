@@ -47,6 +47,8 @@ Use a plain script with no imports or package loader assumptions:
 - Use the Proxy only during the synchronous handler or `origin` call. Never retain it in globals, timers, promises, or microtasks.
 - Treat ordinary handler arguments and newly created JS objects as JSON wire values. Do not depend on functions, symbols, BigInt, cycles, controllers, or arbitrary native objects crossing as ordinary values.
 - Return a value compatible with the original ArkTS method contract.
+- Use `Fixit.import(fullPath)` when the Patch must construct another exported ArkTS class or call its static/instance methods. The imported class and every object it returns are synchronous host-VM Proxies; do not use JavaScript `import()` syntax.
+- Imported Proxies remain valid until `OhosPatch.clear()` or the next Patch installation. They can cross the bridge as method arguments, property values, and Patch results, but newly created plain JS values still follow the JSON wire rules.
 
 ## Author Component Patches
 

@@ -16,8 +16,11 @@
   var nextTimerId = 1;
   var nativeProxyMetadata = new WeakMap();
   var nativeProxyCache = Object.create(null);
+  var importedProxyMetadata = new WeakMap();
+  var importedProxyCache = Object.create(null);
 
   var REMOTE_HANDLE_KEY = '__ohospatch_proxy_handle__';
+  var IMPORT_HANDLE_KEY = '__ohospatch_import_handle__';
   var UNDEFINED_VALUE_KEY = '__ohospatch_proxy_undefined__';
 
   function own(object, property) {
@@ -39,6 +42,12 @@
         var reference = {};
         reference[REMOTE_HANDLE_KEY] = metadata.handle;
         return reference;
+      }
+      metadata = importedProxyMetadata.get(value);
+      if (metadata) {
+        var importedReference = {};
+        importedReference[IMPORT_HANDLE_KEY] = metadata.handle;
+        return importedReference;
       }
     }
     if (value === undefined) {
@@ -164,12 +173,118 @@
     return proxy;
   }
 
+  function decodeImportedResponse(response, receiverHandle) {
+    if (!Array.isArray(response) || typeof response[0] !== 'string') {
+      throw new Error('Invalid OhosPatch imported proxy response');
+    }
+    if (response[0] === 'value') {
+      return response[1];
+    }
+    if (response[0] === 'undefined') {
+      return undefined;
+    }
+    if (response[0] === 'object') {
+      return makeImportedProxy(response[1], false, response[1]);
+    }
+    if (response[0] === 'function') {
+      return makeImportedProxy(response[1], true, receiverHandle);
+    }
+    if (response[0] === 'ok') {
+      return true;
+    }
+    throw new Error(response[1] || 'OhosPatch imported proxy operation failed');
+  }
+
+  function makeImportedProxy(handle, callable, receiverHandle) {
+    var cacheKey = callable ? 'f:' + handle + ':' + receiverHandle : 'o:' + handle;
+    if (own(importedProxyCache, cacheKey)) {
+      return importedProxyCache[cacheKey];
+    }
+
+    var target = callable ? function () {} : {};
+    var proxy = new Proxy(target, {
+      get: function (localTarget, property) {
+        if (typeof property === 'symbol') {
+          if (property === Symbol.toStringTag) {
+            return 'OhosPatchImportedProxy';
+          }
+          if (property === Symbol.iterator) {
+            return function () {
+              var index = 0;
+              return {
+                next: function () {
+                  var length = proxy.length;
+                  return index < length ? { value: proxy[index++], done: false } : { done: true };
+                }
+              };
+            };
+          }
+          return undefined;
+        }
+        var descriptor = Object.getOwnPropertyDescriptor(localTarget, property);
+        if (descriptor && descriptor.configurable === false) {
+          return localTarget[property];
+        }
+        return decodeImportedResponse(global.__ohospatch_importGet(handle, String(property)), handle);
+      },
+      set: function (_localTarget, property, value) {
+        if (typeof property === 'symbol') {
+          throw new TypeError('OhosPatch cannot assign a symbol property');
+        }
+        var wire;
+        try {
+          wire = encodeNativeWire(value);
+        } catch (_) {
+          throw new TypeError('OhosPatch imported proxy assignment must be bridge-serializable');
+        }
+        return decodeImportedResponse(global.__ohospatch_importSet(handle, String(property), wire), handle);
+      },
+      apply: function () {
+        var args = Array.prototype.slice.call(arguments[2]);
+        var wire;
+        try {
+          wire = encodeNativeWire(args);
+        } catch (_) {
+          throw new TypeError('OhosPatch imported method arguments must be bridge-serializable');
+        }
+        return decodeImportedResponse(
+          global.__ohospatch_importCall(handle, receiverHandle, wire),
+          receiverHandle
+        );
+      },
+      construct: function () {
+        var args = Array.prototype.slice.call(arguments[1]);
+        var wire;
+        try {
+          wire = encodeNativeWire(args);
+        } catch (_) {
+          throw new TypeError('OhosPatch imported constructor arguments must be bridge-serializable');
+        }
+        return decodeImportedResponse(global.__ohospatch_importConstruct(handle, wire), handle);
+      }
+    });
+    importedProxyMetadata.set(proxy, { handle: handle, receiverHandle: receiverHandle, callable: callable });
+    importedProxyCache[cacheKey] = proxy;
+    return proxy;
+  }
+
+  function importTarget(fullPath) {
+    var target = parseRequiredTarget(fullPath);
+    return decodeImportedResponse(global.__ohospatch_import(JSON.stringify(target)), 0);
+  }
+
   function encodePatchResult(value) {
     var metadata = ((typeof value === 'object' && value !== null) || typeof value === 'function')
       ? nativeProxyMetadata.get(value)
       : null;
     if (metadata) {
       return { kind: 'remote', handle: metadata.handle };
+    }
+    metadata = ((typeof value === 'object' && value !== null) || typeof value === 'function')
+      ? importedProxyMetadata.get(value)
+      : null;
+    if (metadata) {
+      return { kind: 'imported', handle: metadata.handle };
     }
     if (value === undefined) {
       return { kind: 'undefined' };
@@ -521,6 +636,8 @@
     return new ComponentFix(target, modulePath, exportName);
   };
 
+  Fixit.import = importTarget;
+
   Fixit.registerTarget = function (className, target) {
     if (typeof className !== 'string' || className.length === 0) {
       throw new TypeError('Fixit.registerTarget requires a class name');
@@ -539,7 +656,7 @@
   };
 
   Object.defineProperty(Fixit, 'runtimeVersion', {
-    value: '1.4.0',
+    value: '1.5.0',
     enumerable: true
   });
 
@@ -673,6 +790,7 @@
     uiRuleKeys = Object.create(null);
     nextUiRuleId = 1;
     targets = Object.create(null);
+    importedProxyCache = Object.create(null);
   };
 
   global.__ohospatch_fireTimer = function (id) {
@@ -691,6 +809,7 @@
     if (!handler) {
       return { handled: false };
     }
+    nativeProxyMetadata = new WeakMap();
     nativeProxyCache = Object.create(null);
     try {
       var target = makeNativeProxy(targetHandle, false, targetHandle);
@@ -699,6 +818,7 @@
         result: encodePatchResult(handler.apply(target, args))
       };
     } finally {
+      nativeProxyMetadata = new WeakMap();
       nativeProxyCache = Object.create(null);
     }
   };

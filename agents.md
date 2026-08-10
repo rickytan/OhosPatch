@@ -35,6 +35,7 @@ The embedded runtime is `ohospatch/src/main/cpp/runtime/fixit.js`.
 - `skills/ohospatch/` is the portable Codex/Claude authoring Skill source. Keep it and `scripts/install-skill.sh` aligned with `fixit.d.js`, README limitations, and demonstrated Runtime behavior.
 
 - `Fixit.fix(target)`
+- `Fixit.import(fullPath)` synchronously loads an exported ArkTS class and returns a persistent host-VM Proxy supporting static calls, `new`, instance calls, properties, arguments, and Patch results. References are released by `clear()` or Patch replacement.
 - `Fixit.registerTarget(className, descriptor)`
 - `instanceMethod(name, handler)` / `classMethod(name, handler)`
 - `require(fullPath)` parses `bundleName/moduleName/[packageName/]src/main/ets/File#ExportName`.

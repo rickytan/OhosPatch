@@ -12,6 +12,8 @@ function createRuntime() {
   const scheduledTimers = [];
   const cancelledTimers = [];
   const handles = [{}];
+  const importedHandles = [];
+  const importedClasses = new Map();
 
   function retain(value) {
     const existing = handles.indexOf(value);
@@ -32,12 +34,34 @@ function createRuntime() {
     return ['value', value];
   }
 
+  function retainImported(value) {
+    const existing = importedHandles.indexOf(value);
+    if (existing !== -1) {
+      return existing;
+    }
+    importedHandles.push(value);
+    return importedHandles.length - 1;
+  }
+
+  function importedResponse(value) {
+    if (value === undefined) {
+      return ['undefined'];
+    }
+    if ((typeof value === 'object' && value !== null) || typeof value === 'function') {
+      return [typeof value === 'function' ? 'function' : 'object', retainImported(value)];
+    }
+    return ['value', value];
+  }
+
   function decodeWire(value) {
     if (!value || typeof value !== 'object') {
       return value;
     }
     if (Object.hasOwn(value, '__ohospatch_proxy_handle__')) {
       return handles[value.__ohospatch_proxy_handle__];
+    }
+    if (Object.hasOwn(value, '__ohospatch_import_handle__')) {
+      return importedHandles[value.__ohospatch_import_handle__];
     }
     if (Object.hasOwn(value, '__ohospatch_proxy_undefined__')) {
       return undefined;
@@ -68,6 +92,30 @@ function createRuntime() {
       const args = decodeWire(JSON.parse(wire));
       return response(handles[functionHandle].apply(handles[receiverHandle], args));
     },
+    __ohospatch_import(targetJson) {
+      const target = JSON.parse(targetJson);
+      const imported = importedClasses.get(
+        `${target.moduleInfo}|${target.modulePath}#${target.exportName}`
+      );
+      return imported === undefined
+        ? ['error', `Missing import ${target.exportName}`]
+        : importedResponse(imported);
+    },
+    __ohospatch_importGet(handle, property) {
+      return importedResponse(importedHandles[handle][property]);
+    },
+    __ohospatch_importSet(handle, property, wire) {
+      importedHandles[handle][property] = decodeWire(JSON.parse(wire));
+      return ['ok'];
+    },
+    __ohospatch_importCall(functionHandle, receiverHandle, wire) {
+      const args = decodeWire(JSON.parse(wire));
+      return importedResponse(importedHandles[functionHandle].apply(importedHandles[receiverHandle], args));
+    },
+    __ohospatch_importConstruct(constructorHandle, wire) {
+      const args = decodeWire(JSON.parse(wire));
+      return importedResponse(Reflect.construct(importedHandles[constructorHandle], args));
+    },
     __ohospatch_scheduleTimer(id, delay, repeating) {
       scheduledTimers.push({ id, delay, repeating });
       return true;
@@ -84,6 +132,10 @@ function createRuntime() {
     origins,
     scheduledTimers,
     cancelledTimers,
+    registerImport(fullPath, value) {
+      const target = context.require(fullPath);
+      importedClasses.set(`${target.moduleInfo}|${target.modulePath}#${target.exportName}`, value);
+    },
     setProxyRoot(value) {
       handles.length = 1;
       handles[0] = value;
@@ -99,7 +151,7 @@ test('installs Fixit and common globals', () => {
   const { context, logs } = createRuntime();
 
   assert.equal(typeof context.Fixit, 'function');
-  assert.equal(context.Fixit.runtimeVersion, '1.4.0');
+  assert.equal(context.Fixit.runtimeVersion, '1.5.0');
   assert.equal(context.nil, null);
   assert.equal(context.Nil, null);
   assert.equal(context.YES, undefined);
@@ -181,6 +233,51 @@ test('require parses a full OHM source path into a target descriptor', () => {
     () => context.require('com.example/entry/src/main/ets/Test#invalid-name'),
     /export name is invalid/
   );
+});
+
+test('imports ArkTS classes and calls static and instance methods through persistent proxies', () => {
+  const { context, registerImport, setProxyRoot } = createRuntime();
+
+  class Point {
+    constructor(x, y) {
+      this.x = x;
+      this.y = y;
+    }
+
+    toText() {
+      return `(${this.x}, ${this.y})`;
+    }
+
+    static textOf(point) {
+      return point.toText();
+    }
+  }
+
+  const pointPath = 'com.example.app/entry/src/main/ets/model/Point#Point';
+  registerImport(pointPath, Point);
+  const ImportedPoint = context.Fixit.import(pointPath);
+  const point = new ImportedPoint(1.25, 2.5);
+
+  assert.equal(point.toText(), '(1.25, 2.5)');
+  assert.equal(ImportedPoint.textOf(point), '(1.25, 2.5)');
+  point.x = 3;
+  assert.equal(point.x, 3);
+
+  const fix = context.Fixit.fix(context.require(
+    'com.example.app/entry/src/main/ets/model/ViewModel#ViewModel'
+  ));
+  fix.instanceMethod('makePoint', function () {
+    this.point = point;
+    return point;
+  });
+  const target = { point: null };
+  setProxyRoot(target);
+  const spec = JSON.parse(context.__ohospatch_specs())[0];
+  const result = context.__ohospatch_callPatch(spec.targetKey, 'makePoint', false, 0, []);
+
+  assert.ok(target.point instanceof Point);
+  assert.equal(target.point.x, 3);
+  assert.deepEqual(plain(result.result), { kind: 'imported', handle: 1 });
 });
 
 test('registers declarative component value, attribute, and event rules', () => {

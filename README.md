@@ -35,12 +35,12 @@ HarmonyOS 中，`OH_JSVM_CreateVM` 创建的独立 JSVM 与 ArkTS 主 VM 不共�
 1. 宿主将已验证的 JavaScript 字符串或本地绝对路径传给 HAR。
 2. HAR 的 Native 模块创建独立 JSVM 并执行 JavaScript。
 3. patch 注册目标类、模块、方法和 JS handler。
-4. Native 使用 `napi_load_module_with_info` 从 ArkTS 主 VM 加载目标模块。
+4. Native 使用 `napi_load_module_with_info` 从 ArkTS 主 VM 加载目标模块；`Fixit.import()` 额外为导出的类建立持久 Proxy。
 5. 实例方法替换 `constructor.prototype[methodName]`，静态方法替换 `constructor[methodName]`。
 6. 原函数保存为 `napi_ref`，新函数使用 Native trampoline 转入 JSVM。
 7. 每次调用建立临时 ArkTS 对象句柄表，JSVM 中的 `this` 是 `Proxy`；属性读取、写入和方法调用同步转发到原 ArkTS 实例。
 8. JS 中调用 `origin.apply(...)` 时，通过保存的 `napi_ref` 回调原 ArkTS 方法，并保留对象返回值的身份。
-9. `clear()` 恢复原型上的原函数并释放引用。
+9. `clear()` 恢复原型上的原函数，并释放 Hook、组件和动态导入引用。
 
 普通 public 方法调用会经过对象属性和原型查找，因此已创建的业务实例也会在替换后进入 patch。
 
@@ -54,6 +54,7 @@ HarmonyOS 中，`OH_JSVM_CreateVM` 创建的独立 JSVM 与 ArkTS 主 VM 不共�
 
 - `Fixit.fix(target)`：创建目标类的 patch 对象。
 - `Fixit.component(target)`：创建声明式组件 patch 对象。
+- `Fixit.import(fullPath)`：同步导入 ArkTS 主 VM 中的导出类，支持静态调用、`new`、实例属性和实例方法。
 - `component.param(name)` / `component.state(name)`：转换或替换组件参数与状态。
 - `component.node({ type, occurrence })`：按 ArkUI 节点类型和同类型出现序号选择节点。
 - `node.attr(name, ...args)` / `node.attrs({...})`：覆盖节点属性。
@@ -68,7 +69,7 @@ HarmonyOS 中，`OH_JSVM_CreateVM` 创建的独立 JSVM 与 ArkTS 主 VM 不共�
 
 ### 编辑器补全
 
-仓库根目录的 `fixit.d.js` 声明 Patch JS Context 中的 `Fixit`、目标描述符、原方法代理、Component DSL、事件上下文、`require`、nil helpers、timer、microtask 和 HiLog console API。Patch 文件首行按相对路径引用声明后，VS Code、WebStorm 等支持 JavaScript/JSDoc 的编辑器即可提供类型提示和自动补全：
+仓库根目录的 `fixit.d.js` 声明 Patch JS Context 中的 `Fixit`、动态导入类代理、目标描述符、原方法代理、Component DSL、事件上下文、`require`、nil helpers、timer、microtask 和 HiLog console API。Patch 文件首行按相对路径引用声明后，VS Code、WebStorm 等支持 JavaScript/JSDoc 的编辑器即可提供类型提示和自动补全：
 
 ```js
 /// <reference path="./fixit.d.js" />
@@ -94,6 +95,19 @@ var DemoViewModel = loadClass(
 也可以使用 `--codex` 或 `--claude` 只安装一个工具；已有安装需要更新时传入 `--force`。脚本分别支持 `CODEX_HOME` 和 `CLAUDE_HOME` 自定义配置根目录。安装后在 Codex 中使用 `$ohospatch`，在 Claude Code 中使用 `/ohospatch`。
 
 独立 JSVM 与 ArkTS 主 VM 不共享对象，因此 `require()` 返回的是类描述符，不是 ArkTS Constructor。安装 Hook 时，Native 根据描述符调用 `napi_load_module_with_info`，在主 ArkTS VM 中加载目标模块并取得导出的类。
+
+需要在 Patch 中主动使用其他业务类时，调用 `Fixit.import(fullPath)`。它返回同步的类 Proxy，可调用静态方法、通过 `new` 创建实例并继续用点语法访问实例属性和方法：
+
+```js
+var Point = Fixit.import(
+  'com.rickytan.ohospatch/entry/src/main/ets/demo/Point#Point'
+);
+var point = new Point(7, 9);
+console.info(Point.textOf(point));
+console.info(point.toText());
+```
+
+JavaScript 的 `import()` 是异步模块语法，不能覆写为普通全局函数，因此 Patch API 明确使用 `Fixit.import()`。导入的类和实例由 Native `napi_ref` 持有，在当前 Patch 生命周期内可用于同步 handler 或 timer，也可以作为属性值、方法参数和 Patch 返回值跨桥传递；`clear()` 或下一次 Patch 安装会使旧 Proxy 失效并释放引用。
 
 实例方法和静态方法的 handler 可以使用普通点语法访问原对象，包括多层属性、赋值和方法调用，例如 `this.profile.badge.text`、`this.profile.badge.text = 'fixed'` 和 `this.profile.badge.advance(1)`。嵌套对象不会被复制成 JSON 快照；Native 为其分配本次调用内的句柄，JSVM 返回对应 Proxy。Proxy 只能在当前同步 handler 或 `origin` 调用期间使用，不能保存到 timer、Promise 或全局变量后异步访问。普通参数仍按 JSON 值传入；Proxy 参数和 Proxy 返回值使用句柄 wire 格式保留原 ArkTS 对象身份。
 
@@ -167,6 +181,16 @@ var DemoViewModel = require(
   'com.rickytan.ohospatch/entry/src/main/ets/demo/DemoViewModel#DemoViewModel'
 );
 var fix = Fixit.fix(DemoViewModel);
+```
+
+`require()` 只解析 Hook 目标，不加载可调用类。需要主动调用类时使用 `Fixit.import()`：
+
+```js
+var Point = Fixit.import(
+  'com.rickytan.ohospatch/entry/src/main/ets/demo/Point#Point'
+);
+var point = new Point(7, 9);
+var text = Point.textOf(point) + ' / ' + point.toText();
 ```
 
 完整路径格式为 `bundleName/moduleName/[packageName/]src/main/ets/File#ExportName`，也接受 `@bundle:` 前缀和 `.ets` / `.ts` 后缀。启用 `useNormalizedOHMUrl` 且 `oh-package.json5` 的 `name` 与 `moduleName` 不同时，需要提供 `packageName`；两者相同时可省略。`ExportName` 省略时默认使用文件名。以上示例自动解析为：
@@ -265,9 +289,10 @@ hdc rport tcp:8080 tcp:8080
 ## 当前边界
 
 - prototype hook 不覆盖构造函数、实例字段形式的箭头函数、私有实现或不经过属性查找的调用点。
-- Patch handler 的 `this` 通过同步 Proxy 桥接，可保留原实例、嵌套对象、方法和循环对象身份；普通方法参数及新建 JS 对象仍受 JSON wire 类型限制，Proxy 不可跨越当前同步调用生命周期。
+- Patch handler 的 `this` 通过调用期 Proxy 桥接，可保留原实例、嵌套对象、方法和循环对象身份，但不可跨越当前同步调用生命周期。`Fixit.import()` 返回的持久 Proxy 可保留到 Patch 被清理或替换，并支持静态调用、构造和实例调用；普通方法参数及新建 JS 对象仍受 JSON wire 类型限制。
 - 声明式组件 DSL 首版只支持 API 20 状态管理 V1、业务模块导出的自定义组件、`type + occurrence` 节点选择器、JSON 属性参数和同步事件替换。
 - 非导出的 `@Entry` 页面、状态管理 V2、层级/ID 选择器、资源与控制器类型、已挂载组件的主动刷新，以及 `before/after/around/origin` 事件模式尚未支持。
 - 单个 runtime 最多同时存在 256 个 timer；`setInterval(..., 0)` 会按 1 ms 调度。
+- 单个 Patch 最多保留 512 个去重后的动态导入类、实例、方法或嵌套对象句柄。
 - 生产宿主必须在调用 HAR 前完成非对称签名校验、版本和设备匹配、灰度、缓存、回滚、超时与熔断。
 - HAR 不决定下载方式和启动时机，宿主可以在 AppStartup、业务初始化或其他受控阶段调用。

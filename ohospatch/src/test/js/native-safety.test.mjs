@@ -26,6 +26,7 @@ test('native timer bridge uses the host event loop', async () => {
   ]);
 
   assert.match(source, /napi_get_uv_event_loop/);
+  assert.match(source, /napi_open_handle_scope\(hostEnv_, &napiScope\)/);
   assert.match(source, /__ohospatch_scheduleTimer/);
   assert.match(source, /__ohospatch_cancelTimer/);
   assert.match(source, /OH_JSVM_PerformMicrotaskCheckpoint/);
@@ -51,9 +52,23 @@ test('native proxy bridge resolves live ArkTS values without target snapshot wri
   assert.match(source, /__ohospatch_proxyGet/);
   assert.match(source, /__ohospatch_proxySet/);
   assert.match(source, /__ohospatch_proxyCall/);
-  assert.match(source, /ResolveProxyWireValue/);
+  assert.match(source, /ResolveBridgeWireValue/);
   assert.match(source, /proxyValues\[0\] = receiver/);
   assert.doesNotMatch(source, /targetJson/);
+});
+
+test('native import bridge retains classes and supports property, call, and construct operations', async () => {
+  const source = await readFile(cppUrl, 'utf8');
+
+  assert.match(source, /__ohospatch_import/);
+  assert.match(source, /__ohospatch_importGet/);
+  assert.match(source, /__ohospatch_importSet/);
+  assert.match(source, /__ohospatch_importCall/);
+  assert.match(source, /__ohospatch_importConstruct/);
+  assert.match(source, /napi_load_module_with_info\(napiEnv/);
+  assert.match(source, /napi_new_instance/);
+  assert.match(source, /napi_create_reference\(hostEnv_, value, 1/);
+  assert.match(source, /ClearImportedValues/);
 });
 
 test('native component adapter covers values, node builders, attributes, and events', async () => {

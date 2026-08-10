@@ -5,6 +5,9 @@
   var DemoViewModel = loadClass(
     'com.rickytan.ohospatch/entry/src/main/ets/demo/DemoViewModel#DemoViewModel'
   );
+  var Point = Fixit.import(
+    'com.rickytan.ohospatch/entry/src/main/ets/demo/Point#Point'
+  );
   var fix = Fixit.fix(DemoViewModel);
   var PatchablePanel = loadClass(
     'com.rickytan.ohospatch/entry/src/main/ets/demo/PatchablePanel#PatchablePanel'
@@ -55,6 +58,8 @@
   });
 
   fix.classMethod('crash', function () {
-    return 'Class method fixed by remote JSVM patch';
+    var point = new Point(7, 9);
+    return 'Class method fixed by remote JSVM patch; static=' + Point.textOf(point) +
+      ', instance=' + point.toText();
   });
 })(Fixit, require);

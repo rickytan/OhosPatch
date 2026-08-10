@@ -8,7 +8,7 @@
  *
  *   /// <reference path="./fixit.d.js" />
  *
- * @version 1.4.0
+ * @version 1.5.0
  */
 
 /**
@@ -46,6 +46,13 @@
  * ArkTS object results remain proxied.
  *
  * @typedef {(this: any, ...args: any[]) => any} OhosPatchOriginalMethod
+ */
+
+/**
+ * A callable and constructable ArkTS class Proxy returned by `Fixit.import()`.
+ * Its concrete static and instance members depend on the imported business class.
+ *
+ * @typedef {any} OhosPatchImportedClass
  */
 
 /**
@@ -114,7 +121,7 @@ class Fixit {
   }
 
   /** @readonly @type {string} */
-  static runtimeVersion = '1.4.0';
+  static runtimeVersion = '1.5.0';
 
   /**
    * @param {string | OhosPatchTarget} target
@@ -133,6 +140,19 @@ class Fixit {
    * @returns {OhosPatchComponentFix}
    */
   static component(target, modulePath, exportName) {
+    return /** @type {any} */ (undefined);
+  }
+
+  /**
+   * Synchronously load an exported ArkTS class in the host VM. The returned
+   * Proxy supports static members, construction, instance members, and nested
+   * object results. Imported Proxies remain valid until `OhosPatch.clear()` or
+   * the next Patch installation.
+   *
+   * @param {string} fullPath
+   * @returns {OhosPatchImportedClass}
+   */
+  static import(fullPath) {
     return /** @type {any} */ (undefined);
   }
 
