@@ -836,7 +836,7 @@
     };
   };
 
-  global.__ohospatch_callUiEvent = function (ruleId, event, state) {
+  global.__ohospatch_callUiEvent = function (ruleId, event, state, ownerHandle) {
     var handler = registry.uiEvents[ruleId];
     if (!handler) {
       return { handled: false };
@@ -853,11 +853,17 @@
         });
       }
     };
-    var result = handler(event || {}, context);
-    return {
-      handled: true,
-      result: result,
-      statePatch: statePatch
-    };
+    var owner = typeof ownerHandle === 'number' ? makeNativeProxy(ownerHandle, false, ownerHandle) : undefined;
+    try {
+      var result = handler.apply(owner, [event || {}, context]);
+      return {
+        handled: true,
+        result: result,
+        statePatch: statePatch
+      };
+    } finally {
+      nativeProxyMetadata = new WeakMap();
+      nativeProxyCache = Object.create(null);
+    }
   };
 })(typeof globalThis === 'undefined' ? this : globalThis);

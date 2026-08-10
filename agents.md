@@ -56,7 +56,7 @@ Primary implementation: `ohospatch/src/main/cpp/ohospatch.cpp`.
 - Embedded `fixit.js` is generated into `fixit_runtime.h` by CMake.
 - Patch method registrations are returned from JSVM as JSON specs.
 - Native loads target classes in the ArkTS VM and installs N-API trampolines.
-- Handler arguments still enter JSVM as JSON values. The handler `this`, nested properties, method calls, Proxy arguments, original-method results, and Proxy returns use invocation-scoped Native handles.
+- Handler arguments still enter JSVM as JSON values. Method handler `this`, Component event handler `this`, nested properties, method calls, Proxy arguments, original-method results, and Proxy returns use invocation-scoped Native handles.
 - Runtime `1.4.0` creates a JS `Proxy` for the ArkTS receiver. `get`, `set`, and `apply` synchronously bridge to the original ArkTS object, preserving nested object identity and prototype method dispatch.
 - Proxy handles are valid only during the current synchronous patch invocation and must not escape to timers, promises, or globals. A call can retain at most 256 handles.
 - Hook failures fall back to the original ArkTS method.
@@ -124,6 +124,7 @@ Proposed public concepts:
 - Node selection by `{ type, occurrence }` is implemented with zero-based per-type counting.
 - `attr`, `attrs`, and synchronous `event(..., { mode: 'replace' })` are implemented.
 - Event `capture` and `context.setState()` are implemented; capture is limited to 16 properties.
+- Component event handlers written with normal `function` syntax receive `this` as the current Component instance Proxy. Arrow functions keep lexical `this`.
 - Event bridges retain the original ArkTS callback and fall back to it after `clear()` or a patch handler failure.
 - The Demo target is `entry/src/main/ets/demo/PatchablePanel.ets` and the dynamic script is `patch-server/patch.js`.
 - API 20 generated output was inspected and matches `setInitiallyProvidedValue`, `updateStateVars`, `initialRender`, and `observeComponentCreation2`.

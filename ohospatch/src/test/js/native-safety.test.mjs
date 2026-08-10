@@ -82,4 +82,6 @@ test('native component adapter covers values, node builders, attributes, and eve
   assert.match(source, /PrepareUiEventCaptures/);
   assert.match(source, /ApplyUiAttributes/);
   assert.match(source, /__ohospatch_callUiEvent/);
+  assert.match(source, /CallUiEventHandler\(napiEnv, record->ruleId, event, state, owner/);
+  assert.match(source, /activeInvocation_\.proxyValues\[0\] = owner/);
 });

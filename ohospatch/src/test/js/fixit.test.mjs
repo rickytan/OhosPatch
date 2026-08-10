@@ -348,6 +348,46 @@ test('registers declarative component value, attribute, and event rules', () => 
   assert.deepEqual(plain(context.__ohospatch_callUiValue(specs[0].ruleId, 'old')), { handled: false });
 });
 
+test('binds component event handler this to the current component owner proxy', () => {
+  const { context, setProxyRoot } = createRuntime();
+  const component = context.Fixit.component(
+    'com.example.app/entry/src/main/ets/components/DemoPanel#DemoPanel'
+  );
+  component.node('Button').event('onClick', {
+    capture: ['tapCount'],
+    handler: function (event, componentContext) {
+      this.tapCount = this.tapCount + event.delta;
+      this.profile.title = this.profile.title.toUpperCase();
+      componentContext.setState({ tapCount: this.tapCount });
+      return this.describe(this.profile.title);
+    }
+  });
+
+  const owner = {
+    tapCount: 2,
+    profile: { title: 'patched' },
+    describe(title) {
+      return `${title}:${this.tapCount}`;
+    }
+  };
+  setProxyRoot(owner);
+  const spec = JSON.parse(context.__ohospatch_uiSpecs())[0];
+  const result = context.__ohospatch_callUiEvent(
+    spec.ruleId,
+    { delta: 3 },
+    { tapCount: 2 },
+    0
+  );
+
+  assert.equal(owner.tapCount, 5);
+  assert.equal(owner.profile.title, 'PATCHED');
+  assert.deepEqual(plain(result), {
+    handled: true,
+    result: 'PATCHED:5',
+    statePatch: { tapCount: 5 }
+  });
+});
+
 test('registers instance and class methods and invokes the original method', () => {
   const { context, origins, setProxyRoot } = createRuntime();
   const fix = context.Fixit.fix({

@@ -69,6 +69,7 @@
 
 /**
  * @callback OhosPatchComponentEventHandler
+ * @this {any} Synchronous Proxy for the current declarative Component instance.
  * @param {Record<string, any>} event JSON-safe event data.
  * @param {OhosPatchComponentEventContext} context Component state context.
  * @returns {any}

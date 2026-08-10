@@ -24,8 +24,9 @@
     .event('onClick', {
       mode: 'replace',
       capture: ['tapCount'],
-      handler: function (_event, context) {
-        context.setState({ tapCount: context.state.tapCount + 10 });
+      handler: /** @this {any} */ function (_event, context) {
+        this.tapCount = context.state.tapCount + 10;
+        context.setState({ tapCount: this.tapCount });
       }
     });
 

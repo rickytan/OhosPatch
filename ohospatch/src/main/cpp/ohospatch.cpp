@@ -1069,7 +1069,7 @@ class JsvmRuntime
 
         napi_value envelope = nullptr;
         bool handled = false;
-        if (!CallUiEventHandler(napiEnv, record->ruleId, event, state, &envelope, &handled) || !handled) {
+        if (!CallUiEventHandler(napiEnv, record->ruleId, event, state, owner, &envelope, &handled) || !handled) {
             return CallOriginalUiEvent(napiEnv, record, receiver, argc, argv);
         }
 
@@ -2022,7 +2022,7 @@ class JsvmRuntime
                       "napi_get_value_bool(component value handled)");
     }
 
-    bool CallUiEventHandler(napi_env napiEnv, uint32_t ruleId, napi_value event, napi_value state,
+    bool CallUiEventHandler(napi_env napiEnv, uint32_t ruleId, napi_value event, napi_value state, napi_value owner,
                             napi_value *envelope, bool *handled)
     {
         if (!envelope || !handled) {
@@ -2051,10 +2051,35 @@ class JsvmRuntime
         bool success = JsvmOk(OH_JSVM_CreateUint32(env_, ruleId, &ruleIdValue),
                               "OH_JSVM_CreateUint32(component event rule)", env_) &&
                        ParseJson(eventJson, &eventValue) && ParseJson(stateJson, &stateValue);
+        ActiveInvocation previous = activeInvocation_;
+        if (owner) {
+            activeInvocation_ = {};
+            activeInvocation_.env = napiEnv;
+            activeInvocation_.receiver = owner;
+            activeInvocation_.proxyValues[0] = owner;
+            activeInvocation_.proxyValueCount = 1;
+        }
+
         if (success) {
-            JSVM_Value args[] = {ruleIdValue, eventValue, stateValue};
-            success = CallGlobal("__ohospatch_callUiEvent", args, std::size(args), &result) &&
+            JSVM_Value ownerHandleValue = nullptr;
+            JSVM_Value *args = nullptr;
+            size_t argc = 0;
+            JSVM_Value ownerArgs[4] = {ruleIdValue, eventValue, stateValue, nullptr};
+            JSVM_Value plainArgs[3] = {ruleIdValue, eventValue, stateValue};
+            if (owner && JsvmOk(OH_JSVM_CreateUint32(env_, 0, &ownerHandleValue),
+                                "OH_JSVM_CreateUint32(component event owner)", env_)) {
+                ownerArgs[3] = ownerHandleValue;
+                args = ownerArgs;
+                argc = std::size(ownerArgs);
+            } else {
+                args = plainArgs;
+                argc = std::size(plainArgs);
+            }
+            success = CallGlobal("__ohospatch_callUiEvent", args, argc, &result) &&
                       StringifyJson(result, &resultJson);
+        }
+        if (owner) {
+            activeInvocation_ = previous;
         }
         if (!JsvmOk(OH_JSVM_CloseHandleScope(env_, scope), "OH_JSVM_CloseHandleScope(component event)", env_)) {
             success = false;

@@ -68,7 +68,8 @@ panel.node({ type: 'Button', occurrence: 0 })
     mode: 'replace',
     capture: ['count'],
     handler: function (_event, context) {
-      context.setState({ count: context.state.count + 1 });
+      this.count = context.state.count + 1;
+      context.setState({ count: this.count });
     }
   });
 ```
@@ -77,6 +78,7 @@ panel.node({ type: 'Button', occurrence: 0 })
 - Select nodes only by built-in type plus zero-based occurrence.
 - Keep attribute arguments and replacement values JSON-serializable.
 - Use synchronous event mode `replace`; capture at most 16 properties.
+- Use normal `function` syntax when a Component event patch needs `this`; it is bound to the current Component instance proxy.
 - Do not generate `before`, `after`, `around`, route interception, V2 state, resource/controller values, ID/hierarchy selectors, or forced refresh logic.
 
 ## Validate
