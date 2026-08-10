@@ -13,10 +13,28 @@
   var timerState = 'pending';
 
   panel.param('message').replace('Patched component parameter');
+  panel.param('subtitle').replace('Patched subtitle from remote JavaScript');
   panel.state('tapCount').transform(function (value) {
     return value === 0 ? 40 : value;
   });
-  var originClick = panel.node({ type: 'Button', occurrence: 0 })
+  panel.state('statusText').replace('State replaced while the component was created');
+  panel.state('secondaryCount').transform(function (value) {
+    return value + 20;
+  });
+  panel.state('switchOn').replace(true);
+  panel.state('sliderValue').replace(75);
+
+  panel.node({ type: 'Text', occurrence: 0 })
+    .attrs({
+      fontColor: '#C44736'
+    });
+  panel.node({ type: 'Text', occurrence: 2 })
+    .attrs({
+      backgroundColor: '#E7F7EE',
+      fontColor: '#1F6B46'
+    });
+
+  var originPrimaryClick = panel.node({ type: 'Button', occurrence: 0 })
     .attrs({
       height: 52,
       backgroundColor: '#C44736'
@@ -25,10 +43,27 @@
       mode: 'replace',
       capture: ['tapCount'],
       handler: /** @this {any} */ function (_event, context) {
-        this.tapCount = context.state.tapCount + 10;
+        this.markPrimary(10);
         context.setState({ tapCount: this.tapCount });
-        return originClick.apply(this, arguments);
+        return originPrimaryClick.apply(this, arguments);
       }
+    });
+
+  var originSecondaryClick = panel.node({ type: 'Button', occurrence: 1 })
+    .attrs({
+      height: 52,
+      backgroundColor: '#1F6B46'
+    })
+    .event('onClick', /** @this {any} */ function () {
+      this.statusText = this.markSecondary('patched');
+      return originSecondaryClick.apply(this, arguments);
+    });
+
+  var originToggleChange = panel.node({ type: 'Toggle', occurrence: 0 })
+    .event('onChange', /** @this {any} */ function (isOn) {
+      this.tagText = 'toggle patched before origin';
+      this.statusText = 'Patched toggle received ' + isOn;
+      return originToggleChange.apply(this, arguments);
     });
 
   setTimeout(function () {

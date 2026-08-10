@@ -41,7 +41,8 @@ test('Patch context declaration is valid JavaScript and covers the public API', 
     'OhosPatchComponentValueFix',
     'OhosPatchComponentNodeFix',
     'OhosPatchComponentEventRule',
-    'OhosPatchComponentEventContext'
+    'OhosPatchComponentEventContext',
+    'OhosPatchOriginalEvent'
   ]) {
     assert.ok(declaration.includes(symbol), `missing declaration: ${symbol}`);
   }

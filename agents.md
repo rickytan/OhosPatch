@@ -213,10 +213,10 @@ Expected result: no matches.
 
 ## Demo
 
-- Host startup task downloads `http://127.0.0.1:8080/patch.js`.
+- Demo first screen manually downloads `http://127.0.0.1:8080/patch.js` through the `Load patch` button and clears through `Clear patch`.
 - Start server with `node patch-server/server.mjs`.
 - Use `hdc rport tcp:8080 tcp:8080` for simulator/device access.
-- The current remote patch demonstrates prototype hooks and timer execution.
+- The current remote patch demonstrates component param/state/attrs/events, event `this`, original event callback, prototype hooks, imports, and timer execution.
 - No patch script is bundled into the application package.
 
 ## Working Rules

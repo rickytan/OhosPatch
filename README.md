@@ -147,7 +147,7 @@ const hookCount = OhosPatch.executeFile(absolutePatchPath);
 
 `executeFile` 只接受完整绝对路径，由 HAR 使用 `fileIo.readTextSync` 读取后执行。路径来源、文件权限、下载和签名验证仍由宿主负责。
 
-Demo APP 在自己的 `DemoPatchStartupTask` 中通过 HTTP 下载脚本，并在交给 OhosPatch 前保留宿主验签位置。网络权限、patch URL 和 AppStartup 配置都位于 `entry`。业务类 `DemoViewModel` 和业务调用代码不引用 OhosPatch。
+Demo APP 在首屏通过按钮从 `patch-server` 下载脚本，并在交给 OhosPatch 前保留宿主验签位置。网络权限和 patch URL 都位于 `entry`；业务类 `DemoViewModel`、`PatchablePanel` 和业务调用代码不引用 OhosPatch。
 
 ## Patch 格式
 
@@ -275,7 +275,7 @@ node patch-server/server.mjs
 hdc rport tcp:8080 tcp:8080
 ```
 
-安装并启动 Demo 后，宿主的 AppStartup 任务会下载 patch 字符串并调用 HAR，页面应显示越界访问、实例方法和静态方法均已修复。组件区域应显示 `Patched component parameter | taps=40` 和红色加高按钮；点击 `Component action` 后计数应变为 `50`，证明原来的 `+1` 回调已被替换。远程 patch 还会执行 `setTimeout`；等待 100 ms 后点击 `Run again`，实例方法结果应包含 `timer=fired`，HiLog 应出现 `OhosPatch setTimeout callback fired`。停止 patch 服务并重新冷启动应用时，页面应恢复为原始异常结果，从而证明 patch 不是本地打包资源。
+安装并启动 Demo 后，第一屏提供 `Load patch`、`Clear patch` 和进入第二屏的按钮。先进入第二屏可看到原始组件参数、状态、按钮、Toggle、Slider 以及异常方法结果；返回第一屏点击 `Load patch` 后再次进入第二屏，应看到组件参数、多个状态初值、Text/Button 属性、Button/Toggle 回调、实例方法、静态方法、`Fixit.import()` 和 `setTimeout` 均被 patch 影响。点击 `Clear patch` 后重新进入第二屏，应恢复原始行为。远程 patch 还会执行 `setTimeout`；等待 100 ms 后点击第二屏的 `Run method hook scenario`，实例方法结果应包含 `timer=fired`，HiLog 应出现 `OhosPatch setTimeout callback fired`。
 
 ## 当前边界
 
