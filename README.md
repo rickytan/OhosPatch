@@ -1,6 +1,6 @@
 # OhosPatch
 
-OhosPatch 是 FIXiT 在 HarmonyOS/OpenHarmony 上的原型实现。宿主 APP 负责下载和验证 patch，再将完整 JavaScript 字符串或本地文件绝对路径交给 OhosPatch。OhosPatch 在独立 JSVM 中执行脚本，并通过 ArkTS 主 VM 的对象原型替换业务方法。业务类不需要继承基类、添加装饰器或调用补丁分发 API。
+OhosPatch 是 [FIXiT](https://github.com/rickytan/FIXiT) 在 HarmonyOS/OpenHarmony 上的原型实现。宿主 APP 负责下载和验证 patch，再将完整 JavaScript 字符串或本地文件绝对路径交给 OhosPatch。OhosPatch 在独立 JSVM 中执行脚本，并通过 ArkTS 主 VM 的对象原型替换业务方法。业务类不需要继承基类、添加装饰器或调用补丁分发 API。
 
 ## 工程结构
 
