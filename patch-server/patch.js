@@ -96,4 +96,10 @@
     return 'Class method fixed by remote JSVM patch; static=' + Point.textOf(point) +
       ', instance=' + point.toText();
   });
+  fix.instanceMethod('hiddenNote', function () {
+    return 'hidden-50';
+  });
+  fix.instanceMethod('revealNote', function () {
+    return this.hiddenNote() + ':patched';
+  });
 })(Fixit);

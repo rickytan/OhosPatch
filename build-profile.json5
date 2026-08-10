@@ -30,14 +30,6 @@
     {
       "name": "ohospatch",
       "srcPath": "./ohospatch",
-      "targets": [
-        {
-          "name": "default",
-          "applyToProducts": [
-            "default"
-          ]
-        }
-      ]
     },
     {
       "name": "entry",

@@ -35,6 +35,14 @@ export class DemoViewModel {
     throw new Error('instance crash');
   }
 
+  private hiddenNote(): string {
+    return 'hidden-42';
+  }
+
+  revealNote(): string {
+    return this.hiddenNote();
+  }
+
   static crash(): string {
     throw new Error('class crash');
   }

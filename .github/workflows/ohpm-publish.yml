@@ -1,0 +1,107 @@
+name: OHPM Publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Build and publish HAR to OHPM
+    runs-on:
+      - self-hosted
+      - macOS
+      - ARM64
+      - harmonyos
+    timeout-minutes: 30
+    env:
+      CONFIGURED_DEVECO_HOME: ${{ vars.DEVECO_STUDIO_HOME }}
+      CONFIGURED_OHOS_SDK_HOME: ${{ vars.OHOS_BASE_SDK_HOME }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Verify tag matches module version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          version=$(node -e "const fs=require('fs');const t=fs.readFileSync('ohospatch/oh-package.json5','utf8');const m=t.match(/\"version\"\s*:\s*\"([^\"]+)\"/);if(!m)throw new Error('version not found');console.log(m[1])")
+          if [ "$tag" != "$version" ]; then
+            echo "::error::Tag '$tag' does not match ohospatch version '$version'" >&2
+            exit 1
+          fi
+          echo "Publishing @rickytan/ohospatch $version"
+
+      - name: Configure HarmonyOS toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          deveco_home="${CONFIGURED_DEVECO_HOME:-/Applications/DevEco-Studio.app/Contents}"
+          sdk_home="${CONFIGURED_OHOS_SDK_HOME:-$HOME/Library/OpenHarmony/Sdk}"
+          hvigorw="$deveco_home/tools/hvigor/bin/hvigorw"
+          ohpm="$deveco_home/tools/ohpm/bin/ohpm"
+
+          test -x "$hvigorw"
+          test -x "$ohpm"
+          test -d "$sdk_home/20/native"
+
+          echo "DEVECO_STUDIO_HOME=$deveco_home" >> "$GITHUB_ENV"
+          echo "OHOS_BASE_SDK_HOME=$sdk_home" >> "$GITHUB_ENV"
+          echo "$deveco_home/tools/node/bin" >> "$GITHUB_PATH"
+          echo "$deveco_home/tools/ohpm/bin" >> "$GITHUB_PATH"
+          echo "$deveco_home/tools/hvigor/bin" >> "$GITHUB_PATH"
+
+          "$hvigorw" --version
+          "$ohpm" --version
+
+      - name: Install OHPM dependencies
+        run: ohpm install --all
+
+      - name: Build HAR
+        run: hvigorw --mode module -p module=ohospatch clean assembleHar --no-daemon
+
+      - name: Verify native exception policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          library="ohospatch/build/default/intermediates/cmake/default/obj/arm64-v8a/libohospatch.so"
+          symbols="$($OHOS_BASE_SDK_HOME/20/native/llvm/bin/llvm-nm -D -u "$library")"
+          if grep -Eq '__cxa_(throw|begin_catch|rethrow)|_Unwind_RaiseException' <<< "$symbols"; then
+            echo "C++ exception symbols found in libohospatch.so" >&2
+            exit 1
+          fi
+
+      - name: Configure OHPM publish credentials
+        shell: bash
+        env:
+          OHPM_PUBLISH_ID: ${{ secrets.OHPM_PUBLISH_ID }}
+          OHPM_PRIVATE_KEY: ${{ secrets.OHPM_PRIVATE_KEY }}
+          OHPM_PUBLISH_REGISTRY: ${{ vars.OHPM_PUBLISH_REGISTRY }}
+        run: |
+          set -euo pipefail
+          : "${OHPM_PUBLISH_ID:?OHPM_PUBLISH_ID secret is required}"
+          : "${OHPM_PRIVATE_KEY:?OHPM_PRIVATE_KEY secret is required}"
+
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$OHPM_PRIVATE_KEY" > "$HOME/.ssh/ohpm_ci_key"
+          chmod 600 "$HOME/.ssh/ohpm_ci_key"
+
+          ohpm config set publish_id "$OHPM_PUBLISH_ID"
+          ohpm config set key_path "$HOME/.ssh/ohpm_ci_key"
+          ohpm config set publish_registry "${OHPM_PUBLISH_REGISTRY:-https://ohpm.openharmony.cn/ohpm/}"
+
+      - name: Publish HAR to OHPM
+        run: |
+          set -euo pipefail
+          har="ohospatch/build/default/outputs/default/ohospatch.har"
+          test -f "$har"
+          ohpm publish "$har"
+
+      - name: Cleanup credentials
+        if: always()
+        run: rm -f "$HOME/.ssh/ohpm_ci_key"

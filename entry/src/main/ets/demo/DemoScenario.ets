@@ -44,6 +44,8 @@ export class DemoScenario {
       rows.push(`Class -> ${(err as Error).message}`);
     }
 
+    rows.push(`Private -> ${vm.revealNote()}`);
+
     return new DemoResult('OhosPatch prototype hook', rows);
   }
 }
