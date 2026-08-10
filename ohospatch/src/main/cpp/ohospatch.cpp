@@ -1049,7 +1049,6 @@ class JsvmRuntime
             return NapiUndefined(napiEnv);
         }
 
-        napi_value event = argc > 0 ? argv[0] : NapiUndefined(napiEnv);
         napi_value owner = nullptr;
         NapiOk(napiEnv, napi_get_reference_value(napiEnv, record->owner, &owner),
                "napi_get_reference_value(component event owner)");
@@ -1072,7 +1071,7 @@ class JsvmRuntime
 
         napi_value envelope = nullptr;
         bool handled = false;
-        if (!CallUiEventHandler(napiEnv, record, event, state, owner, &envelope, &handled) || !handled) {
+        if (!CallUiEventHandler(napiEnv, record, argc, argv, state, owner, &envelope, &handled) || !handled) {
             return CallOriginalUiEvent(napiEnv, record, receiver, argc, argv);
         }
 
@@ -2075,8 +2074,8 @@ class JsvmRuntime
                       "napi_get_value_bool(component value handled)");
     }
 
-    bool CallUiEventHandler(napi_env napiEnv, UiEventCallbackRecord *record, napi_value event, napi_value state,
-                            napi_value owner,
+    bool CallUiEventHandler(napi_env napiEnv, UiEventCallbackRecord *record, size_t argc, const napi_value *argv,
+                            napi_value state, napi_value owner,
                             napi_value *envelope, bool *handled)
     {
         if (!envelope || !handled) {
@@ -2085,9 +2084,21 @@ class JsvmRuntime
         }
         *handled = false;
 
-        std::string eventJson;
+        napi_value eventArgs = nullptr;
+        if (!NapiOk(napiEnv, napi_create_array_with_length(napiEnv, argc, &eventArgs),
+                    "napi_create_array_with_length(component event arguments)")) {
+            return false;
+        }
+        for (size_t index = 0; index < argc; ++index) {
+            if (!NapiOk(napiEnv, napi_set_element(napiEnv, eventArgs, static_cast<uint32_t>(index), argv[index]),
+                        "napi_set_element(component event argument)")) {
+                return false;
+            }
+        }
+
+        std::string eventArgsJson;
         std::string stateJson;
-        if (!NapiJsonStringify(napiEnv, event, "{}", &eventJson) ||
+        if (!NapiJsonStringify(napiEnv, eventArgs, "[]", &eventArgsJson) ||
             !NapiJsonStringify(napiEnv, state, "{}", &stateJson)) {
             return false;
         }
@@ -2098,14 +2109,14 @@ class JsvmRuntime
         }
 
         JSVM_Value ruleIdValue = nullptr;
-        JSVM_Value eventValue = nullptr;
+        JSVM_Value eventArgsValue = nullptr;
         JSVM_Value stateValue = nullptr;
         JSVM_Value result = nullptr;
         std::string resultJson;
         bool success = record &&
                        JsvmOk(OH_JSVM_CreateUint32(env_, record->ruleId, &ruleIdValue),
                               "OH_JSVM_CreateUint32(component event rule)", env_) &&
-                       ParseJson(eventJson, &eventValue) && ParseJson(stateJson, &stateValue);
+                       ParseJson(eventArgsJson, &eventArgsValue) && ParseJson(stateJson, &stateValue);
         ActiveInvocation previous = activeInvocation_;
         if (owner) {
             activeInvocation_ = {};
@@ -2120,8 +2131,8 @@ class JsvmRuntime
             JSVM_Value ownerHandleValue = nullptr;
             JSVM_Value *args = nullptr;
             size_t argc = 0;
-            JSVM_Value ownerArgs[4] = {ruleIdValue, eventValue, stateValue, nullptr};
-            JSVM_Value plainArgs[3] = {ruleIdValue, eventValue, stateValue};
+            JSVM_Value ownerArgs[4] = {ruleIdValue, eventArgsValue, stateValue, nullptr};
+            JSVM_Value plainArgs[3] = {ruleIdValue, eventArgsValue, stateValue};
             if (owner && JsvmOk(OH_JSVM_CreateUint32(env_, 0, &ownerHandleValue),
                                 "OH_JSVM_CreateUint32(component event owner)", env_)) {
                 ownerArgs[3] = ownerHandleValue;

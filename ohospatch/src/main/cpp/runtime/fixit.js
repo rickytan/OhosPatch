@@ -848,10 +848,13 @@
     };
   };
 
-  global.__ohospatch_callUiEvent = function (ruleId, event, state, ownerHandle) {
+  global.__ohospatch_callUiEvent = function (ruleId, eventArgs, state, ownerHandle) {
     var handler = registry.uiEvents[ruleId];
     if (!handler) {
       return { handled: false };
+    }
+    if (!Array.isArray(eventArgs)) {
+      eventArgs = [eventArgs || {}];
     }
     var statePatch = Object.create(null);
     var context = {
@@ -868,7 +871,9 @@
     Object.defineProperty(context, UI_EVENT_CONTEXT_KEY, { value: true });
     var owner = typeof ownerHandle === 'number' ? makeNativeProxy(ownerHandle, false, ownerHandle) : undefined;
     try {
-      var result = handler.apply(owner, [event || {}, context]);
+      var args = eventArgs.slice();
+      args.push(context);
+      var result = handler.apply(owner, args);
       return {
         handled: true,
         result: result,

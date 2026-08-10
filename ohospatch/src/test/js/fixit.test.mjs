@@ -398,6 +398,40 @@ test('binds component event handler this to the current component owner proxy', 
   assert.deepEqual(eventOrigins[0].args, [{ delta: 3 }]);
 });
 
+test('passes original component event arguments before the injected context', () => {
+  const { context, eventOrigins, setProxyRoot } = createRuntime();
+  const component = context.Fixit.component(
+    'com.example.app/entry/src/main/ets/components/DemoPanel#DemoPanel'
+  );
+  const origin = component.node('Toggle').event('onChange', {
+    capture: ['switchOn'],
+    handler: function (isOn, componentContext) {
+      this.switchOn = isOn;
+      componentContext.setState({ switchOn: isOn });
+      return origin.apply(this, arguments);
+    }
+  });
+
+  const owner = { switchOn: true };
+  setProxyRoot(owner);
+  const spec = JSON.parse(context.__ohospatch_uiSpecs())[0];
+  const result = context.__ohospatch_callUiEvent(
+    spec.ruleId,
+    [false],
+    { switchOn: true },
+    0
+  );
+
+  assert.equal(owner.switchOn, false);
+  assert.deepEqual(plain(result), {
+    handled: true,
+    result: 'event-origin-result',
+    statePatch: { switchOn: false }
+  });
+  assert.equal(eventOrigins.length, 1);
+  assert.deepEqual(eventOrigins[0].args, [false]);
+});
+
 test('registers instance and class methods and invokes the original method', () => {
   const { context, origins, setProxyRoot } = createRuntime();
   const fix = context.Fixit.fix({

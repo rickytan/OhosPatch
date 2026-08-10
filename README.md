@@ -213,14 +213,14 @@ var originClick = panel.node({ type: 'Button', occurrence: 0 })
     mode: 'replace',
     capture: ['tapCount'],
     handler: function (_event, context) {
-      this.tapCount = context.state.tapCount + 10;
-      context.setState({ tapCount: this.tapCount });
+      this.tagText = 'captured tapCount=' + context.state.tapCount;
+      this.markPrimary(10);
       return originClick.apply(this, arguments);
     }
   });
 ```
 
-`occurrence` 从 `0` 开始，只在同一目标组件、同一节点类型内计数。属性参数必须可 JSON 序列化。事件首版只支持同步 `replace`；`event()` 返回原 ArkUI 事件回调，普通 `function` handler 的 `this` 是当前 Component 实例的同步 Proxy，可用点语法读写实例属性和调用实例方法；箭头函数仍遵循 JS 词法 `this` 规则。`originClick.apply(this, arguments)` 会自动忽略 OhosPatch 注入的 `context` 参数，只把原始事件参数传给业务回调。`capture` 最多读取 16 个组件属性，`context.setState()` 的对象会通过组件访问器写回 ArkTS 主 VM。patch handler 不存在或执行失败时，已安装的事件 trampoline 会回调原业务事件。
+`occurrence` 从 `0` 开始，只在同一目标组件、同一节点类型内计数。属性参数必须可 JSON 序列化。事件首版只支持同步 `replace`；patch handler 会先收到 ArkUI 原始事件参数，最后一个参数是 OhosPatch 注入的 `context`。`event()` 返回原 ArkUI 事件回调，普通 `function` handler 的 `this` 是当前 Component 实例的同步 Proxy，可用点语法读写实例属性和调用实例方法；箭头函数仍遵循 JS 词法 `this` 规则。`originClick.apply(this, arguments)` 会自动忽略 OhosPatch 注入的 `context` 参数，只把原始事件参数传给业务回调。`capture` 最多读取 16 个组件属性，`context.setState()` 的对象会通过组件访问器写回 ArkTS 主 VM。patch handler 不存在或执行失败时，已安装的事件 trampoline 会回调原业务事件。
 
 ## 构建
 

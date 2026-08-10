@@ -69,7 +69,6 @@ var originClick = panel.node({ type: 'Button', occurrence: 0 })
     capture: ['count'],
     handler: function (_event, context) {
       this.count = context.state.count + 1;
-      context.setState({ count: this.count });
       return originClick.apply(this, arguments);
     }
   });
@@ -80,6 +79,7 @@ var originClick = panel.node({ type: 'Button', occurrence: 0 })
 - Keep attribute arguments and replacement values JSON-serializable.
 - Use synchronous event mode `replace`; capture at most 16 properties.
 - Use normal `function` syntax when a Component event patch needs `this`; it is bound to the current Component instance proxy.
+- Component event handlers receive the original ArkUI event arguments first and the OhosPatch context as the final argument.
 - `node.event(...)` returns the original ArkUI event callback proxy; call it with `origin.apply(this, arguments)` when the patch should preserve original event behavior.
 - Do not generate `before`, `after`, `around`, route interception, V2 state, resource/controller values, ID/hierarchy selectors, or forced refresh logic.
 

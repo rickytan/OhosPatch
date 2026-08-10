@@ -43,8 +43,8 @@
       mode: 'replace',
       capture: ['tapCount'],
       handler: /** @this {any} */ function (_event, context) {
+        this.tagText = 'captured tapCount=' + context.state.tapCount;
         this.markPrimary(10);
-        context.setState({ tapCount: this.tapCount });
         return originPrimaryClick.apply(this, arguments);
       }
     });

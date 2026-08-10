@@ -70,8 +70,8 @@
 /**
  * @callback OhosPatchComponentEventHandler
  * @this {any} Synchronous Proxy for the current declarative Component instance.
- * @param {Record<string, any>} event JSON-safe event data.
- * @param {OhosPatchComponentEventContext} context Component state context.
+ * @param {...any} args Original ArkUI event arguments followed by an
+ *   `OhosPatchComponentEventContext` as the final argument.
  * @returns {any}
  */
 
