@@ -88,6 +88,7 @@ struct HookRecord {
     napi_ref holder = nullptr;
     napi_ref original = nullptr;
     std::string className;
+    std::string targetKey;
     std::string methodName;
     bool classMethod = false;
 };
@@ -170,7 +171,7 @@ public:
         std::string resultJson;
         try {
             JSVM_Value result = CallGlobal("__ohospatch_callPatch", {
-                String(hook->className),
+                String(hook->targetKey),
                 String(hook->methodName),
                 Bool(hook->classMethod),
                 ParseJson(targetJson),
@@ -279,7 +280,7 @@ private:
         }
     }
 
-    static JSVM_Value LogCallback(JSVM_Env env, JSVM_CallbackInfo info)
+    static JSVM_Value HiLogCallback(JSVM_Env env, JSVM_CallbackInfo info)
     {
         JsvmRuntime* runtime = Current(env);
         if (!runtime) {
@@ -381,11 +382,11 @@ private:
         Check(OH_JSVM_SetNamedProperty(env_, global, "__ohospatch_origin", originFunction),
             "OH_JSVM_SetNamedProperty(origin)");
 
-        JSVM_CallbackStruct logCallback { LogCallback, nullptr };
+        JSVM_CallbackStruct logCallback { HiLogCallback, nullptr };
         JSVM_Value logFunction = nullptr;
-        Check(OH_JSVM_CreateFunction(env_, "__ohospatch_log", JSVM_AUTO_LENGTH, &logCallback, &logFunction),
+        Check(OH_JSVM_CreateFunction(env_, "__ohospatch_hilog", JSVM_AUTO_LENGTH, &logCallback, &logFunction),
             "OH_JSVM_CreateFunction(log)");
-        Check(OH_JSVM_SetNamedProperty(env_, global, "__ohospatch_log", logFunction),
+        Check(OH_JSVM_SetNamedProperty(env_, global, "__ohospatch_hilog", logFunction),
             "OH_JSVM_SetNamedProperty(log)");
     }
 
@@ -432,6 +433,7 @@ private:
         std::string modulePath = stringProperty("modulePath");
         std::string moduleInfo = stringProperty("moduleInfo");
         std::string exportName = stringProperty("exportName");
+        std::string targetKey = stringProperty("targetKey");
         std::string methodName = stringProperty("methodName");
         napi_value classMethodValue = nullptr;
         CheckNapi(napi_get_named_property(napiEnv, spec, "classMethod", &classMethodValue),
@@ -465,6 +467,7 @@ private:
         auto hook = std::make_unique<HookRecord>();
         hook->env = napiEnv;
         hook->className = className;
+        hook->targetKey = targetKey;
         hook->methodName = methodName;
         hook->classMethod = classMethod;
         CheckNapi(napi_create_reference(napiEnv, holder, 1, &hook->holder), "napi_create_reference(holder)");

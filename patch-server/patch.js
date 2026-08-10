@@ -1,10 +1,8 @@
-!(function (Fixit) {
-  Fixit.registerTarget('DemoViewModel', {
-    modulePath: 'entry/src/main/ets/demo/DemoViewModel',
-    moduleInfo: 'com.rickytan.ohospatch/entry',
-    exportName: 'DemoViewModel'
-  });
-  var fix = Fixit.fix('DemoViewModel');
+!(function (Fixit, require) {
+  var DemoViewModel = require(
+    'com.rickytan.ohospatch/entry/src/main/ets/demo/DemoViewModel#DemoViewModel'
+  );
+  var fix = Fixit.fix(DemoViewModel);
 
   var originLocation = fix.instanceMethod('locationOf', function (locations, index, point) {
     if (index < 0 || index >= locations.length) {
@@ -25,4 +23,4 @@
   fix.classMethod('crash', function () {
     return 'Class method fixed by remote JSVM patch';
   });
-})(Fixit);
+})(Fixit, require);

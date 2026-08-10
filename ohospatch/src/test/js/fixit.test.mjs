@@ -10,7 +10,7 @@ function createRuntime() {
   const logs = [];
   const origins = [];
   const context = vm.createContext({
-    __ohospatch_log(level, message) {
+    __ohospatch_hilog(level, message) {
       logs.push({ level, message });
     },
     __ohospatch_origin(...args) {
@@ -30,29 +30,52 @@ test('installs Fixit and common globals', () => {
   const { context, logs } = createRuntime();
 
   assert.equal(typeof context.Fixit, 'function');
-  assert.equal(context.Fixit.runtimeVersion, '1.0.0');
+  assert.equal(context.Fixit.runtimeVersion, '1.1.0');
   assert.equal(context.nil, null);
   assert.equal(context.Nil, null);
-  assert.equal(context.YES, true);
-  assert.equal(context.NO, false);
+  assert.equal(context.YES, undefined);
+  assert.equal(context.NO, undefined);
   assert.equal(context.isNil(null), true);
   assert.equal(context.isNil(undefined), true);
   assert.equal(context.isNil(0), false);
   assert.equal(context.nilToNull(undefined), null);
   assert.equal(context.nullToNil(null), null);
-  assert.deepEqual(plain(context.CGRectMake(1, 2, 3, 4)), {
-    x: 1,
-    y: 2,
-    width: 3,
-    height: 4
-  });
-  assert.deepEqual(plain(context.CGPointMake(1, 2)), { x: 1, y: 2 });
-  assert.deepEqual(plain(context.CGSizeMake(3, 4)), { width: 3, height: 4 });
-  assert.deepEqual(plain(context.NSMakeRange(5, 6)), { location: 5, length: 6 });
-
   context.console.warn('patch', { count: 2 });
   assert.deepEqual(logs, [{ level: 'warn', message: 'patch {"count":2}' }]);
-  assert.throws(() => context.require('SomeClass'), /isolated JSVM/);
+});
+
+test('require parses a full OHM source path into a target descriptor', () => {
+  const { context } = createRuntime();
+
+  assert.deepEqual(plain(context.require(
+    'com.example.app/feature/src/main/ets/model/FeatureModel'
+  )), {
+    className: 'FeatureModel',
+    modulePath: 'feature/src/main/ets/model/FeatureModel',
+    moduleInfo: 'com.example.app/feature',
+    exportName: 'FeatureModel',
+    bundleName: 'com.example.app',
+    moduleName: 'feature',
+    packageName: 'feature'
+  });
+  assert.deepEqual(plain(context.require(
+    '@bundle:com.example.app/entry/entry_api/src/main/ets/model/DefaultModel.ets#default'
+  )), {
+    className: 'DefaultModel',
+    modulePath: 'entry_api/src/main/ets/model/DefaultModel',
+    moduleInfo: 'com.example.app/entry',
+    exportName: 'default',
+    bundleName: 'com.example.app',
+    moduleName: 'entry',
+    packageName: 'entry_api'
+  });
+
+  assert.throws(() => context.require('entry/src/main/ets/Test'), /must use/);
+  assert.throws(() => context.require('/com.example/entry/src/main/ets/Test'), /must use/);
+  assert.throws(
+    () => context.require('com.example/entry/src/main/ets/Test#invalid-name'),
+    /export name is invalid/
+  );
 });
 
 test('registers instance and class methods and invokes the original method', () => {
@@ -79,7 +102,7 @@ test('registers instance and class methods and invokes the original method', () 
 
   const target = { lastIndex: -1 };
   const handled = context.__ohospatch_callPatch(
-    'DemoViewModel', 'locationOf', false, target, [['zero'], 0]
+    specs[0].targetKey, 'locationOf', false, target, [['zero'], 0]
   );
   assert.deepEqual(plain(handled), {
     handled: true,
@@ -88,16 +111,39 @@ test('registers instance and class methods and invokes the original method', () 
   });
 
   const fallback = context.__ohospatch_callPatch(
-    'DemoViewModel', 'locationOf', false, target, [[], 3]
+    specs[0].targetKey, 'locationOf', false, target, [[], 3]
   );
   assert.equal(fallback.result, 'origin-result');
   assert.equal(origins.length, 1);
   assert.deepEqual(origins[0].args, [[], 3]);
 
   const classResult = context.__ohospatch_callPatch(
-    'DemoViewModel', 'crash', true, {}, []
+    specs[1].targetKey, 'crash', true, {}, []
   );
   assert.equal(classResult.result, 'fixed');
+});
+
+test('keeps same-named classes from different modules isolated', () => {
+  const { context } = createRuntime();
+  const entryTarget = context.require(
+    'com.example.app/entry/src/main/ets/model/ViewModel#ViewModel'
+  );
+  const featureTarget = context.require(
+    'com.example.app/feature/src/main/ets/model/ViewModel#ViewModel'
+  );
+  context.Fixit.fix(entryTarget).instanceMethod('value', function () { return 'entry'; });
+  context.Fixit.fix(featureTarget).instanceMethod('value', function () { return 'feature'; });
+
+  const specs = JSON.parse(context.__ohospatch_specs());
+  assert.notEqual(specs[0].targetKey, specs[1].targetKey);
+  assert.equal(
+    context.__ohospatch_callPatch(specs[0].targetKey, 'value', false, {}, []).result,
+    'entry'
+  );
+  assert.equal(
+    context.__ohospatch_callPatch(specs[1].targetKey, 'value', false, {}, []).result,
+    'feature'
+  );
 });
 
 test('supports class-name aliases and clears registrations', () => {

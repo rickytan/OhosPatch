@@ -49,11 +49,11 @@ HarmonyOS 中，`OH_JSVM_CreateVM` 创建的独立 JSVM 与 ArkTS 主 VM 不共�
 - `Fixit.fix(target)`：创建目标类的 patch 对象。
 - `Fixit.registerTarget(className, descriptor)`：注册类名到 HarmonyOS 模块描述符的映射，使后续可以使用 `Fixit.fix('ClassName')`。
 - `instanceMethod(name, handler)` / `classMethod(name, handler)`：替换实例方法或静态方法，并返回原实现代理。
-- `nil` / `Nil`、`isNil`、`nilToNull`、`nullToNil`、`YES` / `NO`。
-- `CGRectMake`、`CGPointMake`、`CGSizeMake` / `CGSize`、`NSMakeRange`：创建可通过 JSON 桥传递的结构对象。
+- `require(fullPath)`：解析目标类完整 OHM 源路径，生成 `Fixit.fix` 使用的类描述符。
+- `nil` / `Nil`、`isNil`、`nilToNull`、`nullToNil`。
 - `console.debug/log/info/warn/error`：输出到 HiLog 的 `OhosPatch` tag。
 
-iOS 的 `require()` 可以把 Objective-C Class 代理注入 JavaScriptCore。独立 JSVM 与 ArkTS 主 VM 不共享对象，OhosPatch 无法安全提供相同语义；调用 `require()` 会明确报错，目标类必须通过包含 `modulePath` 的描述符定位。
+独立 JSVM 与 ArkTS 主 VM 不共享对象，因此 `require()` 返回的是类描述符，不是 ArkTS Constructor。安装 Hook 时，Native 根据描述符调用 `napi_load_module_with_info`，在主 ArkTS VM 中加载目标模块并取得导出的类。
 
 ## HAR 接入
 
@@ -112,15 +112,21 @@ fix.classMethod('crash', function () {
 });
 ```
 
-也可以先注册映射，再使用接近原 FIXiT 的类名写法：
+推荐使用完整 OHM 源路径加载其他模块中的目标类：
 
 ```js
-Fixit.registerTarget('DemoViewModel', {
-  modulePath: 'entry/src/main/ets/demo/DemoViewModel',
-  moduleInfo: 'com.rickytan.ohospatch/entry'
-});
+var DemoViewModel = require(
+  'com.rickytan.ohospatch/entry/src/main/ets/demo/DemoViewModel#DemoViewModel'
+);
+var fix = Fixit.fix(DemoViewModel);
+```
 
-var fix = Fixit.fix('DemoViewModel');
+完整路径格式为 `bundleName/moduleName/[packageName/]src/main/ets/File#ExportName`，也接受 `@bundle:` 前缀和 `.ets` / `.ts` 后缀。启用 `useNormalizedOHMUrl` 且 `oh-package.json5` 的 `name` 与 `moduleName` 不同时，需要提供 `packageName`；两者相同时可省略。`ExportName` 省略时默认使用文件名。以上示例自动解析为：
+
+```text
+modulePath = entry/src/main/ets/demo/DemoViewModel
+moduleInfo = com.rickytan.ohospatch/entry
+exportName = DemoViewModel
 ```
 
 演示补丁位于 `patch-server/patch.js`，不会打入 HAR 或 HAP。

@@ -12,8 +12,8 @@
     return Object.prototype.hasOwnProperty.call(object, property);
   }
 
-  function key(className, methodName) {
-    return className + '#' + methodName;
+  function key(targetKey, methodName) {
+    return targetKey + '#' + methodName;
   }
 
   function bucket(isClassMethod) {
@@ -25,8 +25,75 @@
       className: target.className,
       modulePath: target.modulePath,
       moduleInfo: target.moduleInfo || '',
-      exportName: target.exportName || target.className
+      exportName: target.exportName || target.className,
+      bundleName: target.bundleName || '',
+      moduleName: target.moduleName || '',
+      packageName: target.packageName || ''
     };
+  }
+
+  function parseRequiredTarget(fullPath) {
+    if (typeof fullPath !== 'string' || fullPath.trim().length === 0) {
+      throw new TypeError('require() expects a non-empty full module path');
+    }
+
+    var path = fullPath.trim();
+    if (path.indexOf('@bundle:') === 0) {
+      path = path.slice('@bundle:'.length);
+    }
+    if (path.indexOf('\\') !== -1 || path.charAt(0) === '/' || path.charAt(path.length - 1) === '/') {
+      throw new Error('require() path must use bundleName/moduleName/[packageName/]src/main/ets/File format');
+    }
+
+    var hashIndex = path.indexOf('#');
+    var exportName = '';
+    if (hashIndex !== -1) {
+      if (path.indexOf('#', hashIndex + 1) !== -1) {
+        throw new Error('require() path can contain only one export separator (#)');
+      }
+      exportName = path.slice(hashIndex + 1);
+      path = path.slice(0, hashIndex);
+    }
+    if (/\.(ets|ts)$/.test(path)) {
+      path = path.replace(/\.(ets|ts)$/, '');
+    }
+
+    var parts = path.split('/');
+    var sourceOffset = parts[2] === 'src' ? 2 : 3;
+    if (parts.length < sourceOffset + 4 ||
+        parts[sourceOffset] !== 'src' ||
+        parts[sourceOffset + 1] !== 'main' ||
+        parts[sourceOffset + 2] !== 'ets') {
+      throw new Error('require() path must use bundleName/moduleName/[packageName/]src/main/ets/File format');
+    }
+    for (var index = 0; index < parts.length; index += 1) {
+      if (!parts[index]) {
+        throw new Error('require() path contains an empty segment');
+      }
+    }
+
+    var bundleName = parts[0];
+    var moduleName = parts[1];
+    var packageName = sourceOffset === 2 ? moduleName : parts[2];
+    var fileName = parts[parts.length - 1];
+    exportName = exportName || fileName;
+    if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(exportName)) {
+      throw new Error('require() export name is invalid: ' + exportName);
+    }
+
+    return {
+      className: exportName === 'default' ? fileName : exportName,
+      modulePath: packageName + '/' + parts.slice(sourceOffset).join('/'),
+      moduleInfo: bundleName + '/' + moduleName,
+      exportName: exportName,
+      bundleName: bundleName,
+      moduleName: moduleName,
+      packageName: packageName
+    };
+  }
+
+  function targetKey(target) {
+    return target.moduleInfo + '|' + target.modulePath + '#' + target.exportName;
   }
 
   function normalizeTarget(target, modulePath, exportName) {
@@ -65,7 +132,8 @@
 
   function register(target, methodName, isClassMethod, handler) {
     validateMethod(methodName, handler);
-    var methodKey = key(target.className, methodName);
+    var identity = targetKey(target);
+    var methodKey = key(identity, methodName);
     var methods = bucket(isClassMethod);
     if (own(methods, methodKey)) {
       throw new Error('Duplicate patch for ' + target.className + '.' + methodName);
@@ -77,6 +145,7 @@
       modulePath: target.modulePath,
       moduleInfo: target.moduleInfo,
       exportName: target.exportName,
+      targetKey: identity,
       methodName: methodName,
       classMethod: isClassMethod
     });
@@ -115,7 +184,7 @@
   };
 
   Object.defineProperty(Fixit, 'runtimeVersion', {
-    value: '1.0.0',
+    value: '1.1.0',
     enumerable: true
   });
 
@@ -133,14 +202,12 @@
 
   function log(level, args) {
     var text = Array.prototype.map.call(args, formatLogValue).join(' ');
-    global.__ohospatch_log(level, text);
+    global.__ohospatch_hilog(level, text);
   }
 
   global.Fixit = Fixit;
   global.nil = null;
   global.Nil = null;
-  global.YES = true;
-  global.NO = false;
   global.nilToNull = function (value) {
     return value == null ? null : value;
   };
@@ -150,24 +217,7 @@
   global.isNil = function (value) {
     return value === null || value === undefined;
   };
-  global.CGRectMake = function (x, y, width, height) {
-    return { x: x, y: y, width: width, height: height };
-  };
-  global.CGPointMake = function (x, y) {
-    return { x: x, y: y };
-  };
-  global.CGSizeMake = function (width, height) {
-    return { width: width, height: height };
-  };
-  global.CGSize = global.CGSizeMake;
-  global.NSMakeRange = function (location, length) {
-    return { location: location, length: length };
-  };
-  global.require = function () {
-    throw new Error(
-      'require() cannot expose ArkTS objects inside an isolated JSVM; use a Fixit target descriptor instead'
-    );
-  };
+  global.require = parseRequiredTarget;
   global.console = {
     debug: function () { log('debug', arguments); },
     log: function () { log('info', arguments); },
@@ -187,8 +237,8 @@
     targets = Object.create(null);
   };
 
-  global.__ohospatch_callPatch = function (className, methodName, isClassMethod, target, args) {
-    var handler = bucket(isClassMethod)[key(className, methodName)];
+  global.__ohospatch_callPatch = function (identity, methodName, isClassMethod, target, args) {
+    var handler = bucket(isClassMethod)[key(identity, methodName)];
     if (!handler) {
       return { handled: false };
     }
