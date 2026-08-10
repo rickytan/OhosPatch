@@ -1,18 +1,15 @@
 /// <reference path="../fixit.d.js" />
 
-(function (Fixit, require) {
-  var loadClass = require;
-  var DemoViewModel = loadClass(
-    'com.rickytan.ohospatch/entry/src/main/ets/demo/DemoViewModel#DemoViewModel'
-  );
+(function (Fixit) {
   var Point = Fixit.import(
     'com.rickytan.ohospatch/entry/src/main/ets/demo/Point#Point'
   );
-  var fix = Fixit.fix(DemoViewModel);
-  var PatchablePanel = loadClass(
+  var fix = Fixit.fix(
+    'com.rickytan.ohospatch/entry/src/main/ets/demo/DemoViewModel#DemoViewModel'
+  );
+  var panel = Fixit.component(
     'com.rickytan.ohospatch/entry/src/main/ets/demo/PatchablePanel#PatchablePanel'
   );
-  var panel = Fixit.component(PatchablePanel);
   var timerState = 'pending';
 
   panel.param('message').replace('Patched component parameter');
@@ -62,4 +59,4 @@
     return 'Class method fixed by remote JSVM patch; static=' + Point.textOf(point) +
       ', instance=' + point.toText();
   });
-})(Fixit, require);
+})(Fixit);

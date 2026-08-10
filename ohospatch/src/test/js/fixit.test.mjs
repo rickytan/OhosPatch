@@ -133,7 +133,7 @@ function createRuntime() {
     scheduledTimers,
     cancelledTimers,
     registerImport(fullPath, value) {
-      const target = context.require(fullPath);
+      const target = context.Fixit.fix(fullPath).target;
       importedClasses.set(`${target.moduleInfo}|${target.modulePath}#${target.exportName}`, value);
     },
     setProxyRoot(value) {
@@ -151,7 +151,8 @@ test('installs Fixit and common globals', () => {
   const { context, logs } = createRuntime();
 
   assert.equal(typeof context.Fixit, 'function');
-  assert.equal(context.Fixit.runtimeVersion, '1.5.0');
+  assert.equal(context.Fixit.runtimeVersion, '1.6.0');
+  assert.equal(context.require, context.Fixit.import);
   assert.equal(context.nil, null);
   assert.equal(context.Nil, null);
   assert.equal(context.YES, undefined);
@@ -201,12 +202,12 @@ test('provides timeout, interval, immediate, and microtask globals', async () =>
   assert.throws(() => context.queueMicrotask(null), /must be a function/);
 });
 
-test('require parses a full OHM source path into a target descriptor', () => {
+test('fix and component parse full OHM source paths internally', () => {
   const { context } = createRuntime();
 
-  assert.deepEqual(plain(context.require(
+  assert.deepEqual(plain(context.Fixit.fix(
     'com.example.app/feature/src/main/ets/model/FeatureModel'
-  )), {
+  ).target), {
     className: 'FeatureModel',
     modulePath: 'feature/src/main/ets/model/FeatureModel',
     moduleInfo: 'com.example.app/feature',
@@ -215,9 +216,9 @@ test('require parses a full OHM source path into a target descriptor', () => {
     moduleName: 'feature',
     packageName: 'feature'
   });
-  assert.deepEqual(plain(context.require(
+  assert.deepEqual(plain(context.Fixit.component(
     '@bundle:com.example.app/entry/entry_api/src/main/ets/model/DefaultModel.ets#default'
-  )), {
+  ).target), {
     className: 'DefaultModel',
     modulePath: 'entry_api/src/main/ets/model/DefaultModel',
     moduleInfo: 'com.example.app/entry',
@@ -227,10 +228,10 @@ test('require parses a full OHM source path into a target descriptor', () => {
     packageName: 'entry_api'
   });
 
-  assert.throws(() => context.require('entry/src/main/ets/Test'), /must use/);
-  assert.throws(() => context.require('/com.example/entry/src/main/ets/Test'), /must use/);
+  assert.throws(() => context.Fixit.fix('entry/src/main/ets/Test'), /must use/);
+  assert.throws(() => context.Fixit.component('/com.example/entry/src/main/ets/Test'), /must use/);
   assert.throws(
-    () => context.require('com.example/entry/src/main/ets/Test#invalid-name'),
+    () => context.Fixit.fix('com.example/entry/src/main/ets/Test#invalid-name'),
     /export name is invalid/
   );
 });
@@ -256,16 +257,18 @@ test('imports ArkTS classes and calls static and instance methods through persis
   const pointPath = 'com.example.app/entry/src/main/ets/model/Point#Point';
   registerImport(pointPath, Point);
   const ImportedPoint = context.Fixit.import(pointPath);
+  const RequiredPoint = context.require(pointPath);
   const point = new ImportedPoint(1.25, 2.5);
 
+  assert.equal(RequiredPoint.textOf(point), '(1.25, 2.5)');
   assert.equal(point.toText(), '(1.25, 2.5)');
   assert.equal(ImportedPoint.textOf(point), '(1.25, 2.5)');
   point.x = 3;
   assert.equal(point.x, 3);
 
-  const fix = context.Fixit.fix(context.require(
+  const fix = context.Fixit.fix(
     'com.example.app/entry/src/main/ets/model/ViewModel#ViewModel'
-  ));
+  );
   fix.instanceMethod('makePoint', function () {
     this.point = point;
     return point;
@@ -282,10 +285,9 @@ test('imports ArkTS classes and calls static and instance methods through persis
 
 test('registers declarative component value, attribute, and event rules', () => {
   const { context } = createRuntime();
-  const target = context.require(
+  const component = context.Fixit.component(
     'com.example.app/entry/src/main/ets/components/DemoPanel#DemoPanel'
   );
-  const component = context.Fixit.component(target);
 
   component.param('title').transform((value) => value || 'patched title');
   component.state('rows').replace([]);
@@ -395,10 +397,9 @@ test('registers instance and class methods and invokes the original method', () 
 
 test('proxies nested instance properties and methods to the original object', () => {
   const { context, setProxyRoot } = createRuntime();
-  const targetDescriptor = context.require(
+  const fix = context.Fixit.fix(
     'com.example.app/entry/src/main/ets/model/ViewModel#ViewModel'
   );
-  const fix = context.Fixit.fix(targetDescriptor);
   fix.instanceMethod('repair', function () {
     const profile = this.account.profile;
     this.account.profile.name = profile.name.toUpperCase();
@@ -435,14 +436,12 @@ test('proxies nested instance properties and methods to the original object', ()
 
 test('keeps same-named classes from different modules isolated', () => {
   const { context, setProxyRoot } = createRuntime();
-  const entryTarget = context.require(
+  context.Fixit.fix(
     'com.example.app/entry/src/main/ets/model/ViewModel#ViewModel'
-  );
-  const featureTarget = context.require(
+  ).instanceMethod('value', function () { return 'entry'; });
+  context.Fixit.fix(
     'com.example.app/feature/src/main/ets/model/ViewModel#ViewModel'
-  );
-  context.Fixit.fix(entryTarget).instanceMethod('value', function () { return 'entry'; });
-  context.Fixit.fix(featureTarget).instanceMethod('value', function () { return 'feature'; });
+  ).instanceMethod('value', function () { return 'feature'; });
 
   const specs = JSON.parse(context.__ohospatch_specs());
   assert.notEqual(specs[0].targetKey, specs[1].targetKey);

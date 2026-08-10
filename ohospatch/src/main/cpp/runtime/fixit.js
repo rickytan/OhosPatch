@@ -269,7 +269,7 @@
   }
 
   function importTarget(fullPath) {
-    var target = parseRequiredTarget(fullPath);
+    var target = parseTargetPath(fullPath);
     return decodeImportedResponse(global.__ohospatch_import(JSON.stringify(target)), 0);
   }
 
@@ -310,9 +310,9 @@
     };
   }
 
-  function parseRequiredTarget(fullPath) {
+  function parseTargetPath(fullPath) {
     if (typeof fullPath !== 'string' || fullPath.trim().length === 0) {
-      throw new TypeError('require() expects a non-empty full module path');
+      throw new TypeError('OhosPatch expects a non-empty full module path');
     }
 
     var path = fullPath.trim();
@@ -320,14 +320,14 @@
       path = path.slice('@bundle:'.length);
     }
     if (path.indexOf('\\') !== -1 || path.charAt(0) === '/' || path.charAt(path.length - 1) === '/') {
-      throw new Error('require() path must use bundleName/moduleName/[packageName/]src/main/ets/File format');
+      throw new Error('OhosPatch path must use bundleName/moduleName/[packageName/]src/main/ets/File format');
     }
 
     var hashIndex = path.indexOf('#');
     var exportName = '';
     if (hashIndex !== -1) {
       if (path.indexOf('#', hashIndex + 1) !== -1) {
-        throw new Error('require() path can contain only one export separator (#)');
+        throw new Error('OhosPatch path can contain only one export separator (#)');
       }
       exportName = path.slice(hashIndex + 1);
       path = path.slice(0, hashIndex);
@@ -342,11 +342,11 @@
         parts[sourceOffset] !== 'src' ||
         parts[sourceOffset + 1] !== 'main' ||
         parts[sourceOffset + 2] !== 'ets') {
-      throw new Error('require() path must use bundleName/moduleName/[packageName/]src/main/ets/File format');
+      throw new Error('OhosPatch path must use bundleName/moduleName/[packageName/]src/main/ets/File format');
     }
     for (var index = 0; index < parts.length; index += 1) {
       if (!parts[index]) {
-        throw new Error('require() path contains an empty segment');
+        throw new Error('OhosPatch path contains an empty segment');
       }
     }
 
@@ -356,7 +356,7 @@
     var fileName = parts[parts.length - 1];
     exportName = exportName || fileName;
     if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(exportName)) {
-      throw new Error('require() export name is invalid: ' + exportName);
+      throw new Error('OhosPatch export name is invalid: ' + exportName);
     }
 
     return {
@@ -379,6 +379,8 @@
     if (typeof target === 'string') {
       if (!modulePath && own(targets, target)) {
         normalized = copyTarget(targets[target]);
+      } else if (!modulePath && (target.indexOf('/') !== -1 || target.indexOf('@bundle:') === 0)) {
+        normalized = parseTargetPath(target);
       } else {
         normalized = {
           className: target,
@@ -656,7 +658,7 @@
   };
 
   Object.defineProperty(Fixit, 'runtimeVersion', {
-    value: '1.5.0',
+    value: '1.6.0',
     enumerable: true
   });
 
@@ -744,7 +746,7 @@
   global.isNil = function (value) {
     return value === null || value === undefined;
   };
-  global.require = parseRequiredTarget;
+  global.require = Fixit.import;
   global.setTimeout = function (callback, delay) {
     return scheduleTimer(callback, delay, false, Array.prototype.slice.call(arguments, 2));
   };

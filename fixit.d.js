@@ -8,7 +8,7 @@
  *
  *   /// <reference path="./fixit.d.js" />
  *
- * @version 1.5.0
+ * @version 1.6.0
  */
 
 /**
@@ -111,7 +111,7 @@
 /** Registers method replacements for one exported ArkTS class. */
 class Fixit {
   /**
-   * @param {string | OhosPatchTarget} target Registered alias or target descriptor.
+   * @param {string | OhosPatchTarget} target Full OHM class path, registered alias, or target descriptor.
    * @param {string=} modulePath Legacy normalized module path when `target` is a class name.
    * @param {string=} exportName Legacy export name.
    */
@@ -121,10 +121,10 @@ class Fixit {
   }
 
   /** @readonly @type {string} */
-  static runtimeVersion = '1.5.0';
+  static runtimeVersion = '1.6.0';
 
   /**
-   * @param {string | OhosPatchTarget} target
+   * @param {string | OhosPatchTarget} target Full OHM class path, registered alias, or target descriptor.
    * @param {string=} modulePath
    * @param {string=} exportName
    * @returns {Fixit}
@@ -134,7 +134,7 @@ class Fixit {
   }
 
   /**
-   * @param {string | OhosPatchTarget} target
+   * @param {string | OhosPatchTarget} target Full OHM component path, registered alias, or target descriptor.
    * @param {string=} modulePath
    * @param {string=} exportName
    * @returns {OhosPatchComponentFix}
@@ -183,14 +183,14 @@ class Fixit {
 }
 
 /**
- * Parse `bundleName/moduleName/[packageName/]src/main/ets/File#ExportName`.
- * The optional `@bundle:` prefix and `.ets`/`.ts` suffix are accepted.
+ * Alias of `Fixit.import()`. Synchronously load an exported ArkTS class from
+ * `bundleName/moduleName/[packageName/]src/main/ets/File#ExportName`.
  *
  * @param {string} fullPath
- * @returns {OhosPatchTarget}
+ * @returns {OhosPatchImportedClass}
  */
 function require(fullPath) {
-  return /** @type {any} */ (undefined);
+  return Fixit.import(fullPath);
 }
 
 /** @type {null} */

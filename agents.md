@@ -34,11 +34,11 @@ The embedded runtime is `ohospatch/src/main/cpp/runtime/fixit.js`.
 - `fixit.d.js` is the editor-only JSDoc declaration for every public Patch context API. Keep its `@version`, signatures, constraints, and globals synchronized with the embedded runtime.
 - `skills/ohospatch/` is the portable Codex/Claude authoring Skill source. Keep it and `scripts/install-skill.sh` aligned with `fixit.d.js`, README limitations, and demonstrated Runtime behavior.
 
-- `Fixit.fix(target)`
+- `Fixit.fix(fullPath)` and `Fixit.component(fullPath)` parse complete OHM paths internally; do not use `require()` to create target descriptors.
 - `Fixit.import(fullPath)` synchronously loads an exported ArkTS class and returns a persistent host-VM Proxy supporting static calls, `new`, instance calls, properties, arguments, and Patch results. References are released by `clear()` or Patch replacement.
 - `Fixit.registerTarget(className, descriptor)`
 - `instanceMethod(name, handler)` / `classMethod(name, handler)`
-- `require(fullPath)` parses `bundleName/moduleName/[packageName/]src/main/ets/File#ExportName`.
+- `require(fullPath)` is a compatibility alias of `Fixit.import(fullPath)` and returns a callable ArkTS class Proxy.
 - `nil`, `Nil`, `isNil`, `nilToNull`, `nullToNil`
 - `console.debug/log/info/warn/error` bridged to HiLog.
 - `setTimeout/clearTimeout`
@@ -107,7 +107,7 @@ The public DSL must not expose generated names such as `initialRender` or `obser
 
 Proposed public concepts:
 
-- `Fixit.component(target)`
+- `Fixit.component(fullPath)` parses the complete OHM target path internally.
 - `component.param(name)` for incoming component parameters.
 - `component.state(name)` for observable component state.
 - `component.node(selector)` for a built-in ArkUI node.

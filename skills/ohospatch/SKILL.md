@@ -11,7 +11,7 @@ Create a standalone JavaScript patch that matches the installed OhosPatch Runtim
 
 1. Read the target project's `fixit.d.js` completely for the public Patch context API. If it is unavailable, use the installed Skill's `references/fixit.d.js` snapshot.
 2. Read the affected ArkTS class or component and every directly used type. Confirm method names, static/instance ownership, argument order, return shape, and nested property names.
-3. Resolve the exact `bundleName`, HarmonyOS `moduleName`, OH package name, source path, and export name. Prefer the full `require()` path used by the declaration file.
+3. Resolve the exact `bundleName`, HarmonyOS `moduleName`, OH package name, source path, and export name. Pass the full OHM path directly to `Fixit.fix()` or `Fixit.component()`.
 4. Read the OhosPatch `README.md` when the task involves module resolution, Component DSL support, Proxy lifetime, deployment, or current limitations.
 5. Inspect `ohospatch/src/main/cpp/runtime/fixit.js` in the OhosPatch source tree only when behavior is ambiguous or the declaration and Runtime version differ.
 
@@ -24,12 +24,10 @@ Use a plain script with no imports or package loader assumptions:
 ```js
 /// <reference path="./fixit.d.js" />
 
-(function (Fixit, require) {
-  var loadClass = require;
-  var Target = loadClass(
+(function (Fixit) {
+  var fix = Fixit.fix(
     'com.example.app/entry/src/main/ets/model/Target#Target'
   );
-  var fix = Fixit.fix(Target);
 
   var origin = fix.instanceMethod('methodName', function (value) {
     if (value == null) {
@@ -38,7 +36,7 @@ Use a plain script with no imports or package loader assumptions:
     }
     return origin.apply(this, arguments);
   });
-})(Fixit, require);
+})(Fixit);
 ```
 
 - Use `instanceMethod` for prototype methods and `classMethod` for static methods.
@@ -48,6 +46,7 @@ Use a plain script with no imports or package loader assumptions:
 - Treat ordinary handler arguments and newly created JS objects as JSON wire values. Do not depend on functions, symbols, BigInt, cycles, controllers, or arbitrary native objects crossing as ordinary values.
 - Return a value compatible with the original ArkTS method contract.
 - Use `Fixit.import(fullPath)` when the Patch must construct another exported ArkTS class or call its static/instance methods. The imported class and every object it returns are synchronous host-VM Proxies; do not use JavaScript `import()` syntax.
+- `require(fullPath)` is only a compatibility alias of `Fixit.import(fullPath)`. Do not use it to obtain Hook target descriptors; pass the path directly to `Fixit.fix()` or `Fixit.component()`.
 - Imported Proxies remain valid until `OhosPatch.clear()` or the next Patch installation. They can cross the bridge as method arguments, property values, and Patch results, but newly created plain JS values still follow the JSON wire rules.
 
 ## Author Component Patches
@@ -55,11 +54,9 @@ Use a plain script with no imports or package loader assumptions:
 Use only currently supported API 20 state-management V1 behavior:
 
 ```js
-var loadClass = require;
-var Panel = loadClass(
+var panel = Fixit.component(
   'com.example.app/entry/src/main/ets/components/Panel#Panel'
 );
-var panel = Fixit.component(Panel);
 
 panel.param('title').replace('fixed');
 panel.state('count').transform(function (value) {

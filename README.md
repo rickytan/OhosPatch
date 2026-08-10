@@ -52,8 +52,8 @@ HarmonyOS 中，`OH_JSVM_CreateVM` 创建的独立 JSVM 与 ArkTS 主 VM 不共�
 
 内置 API：
 
-- `Fixit.fix(target)`：创建目标类的 patch 对象。
-- `Fixit.component(target)`：创建声明式组件 patch 对象。
+- `Fixit.fix(fullPath)`：解析目标类完整 OHM 源路径并创建 patch 对象。
+- `Fixit.component(fullPath)`：解析目标组件完整 OHM 源路径并创建声明式组件 patch 对象。
 - `Fixit.import(fullPath)`：同步导入 ArkTS 主 VM 中的导出类，支持静态调用、`new`、实例属性和实例方法。
 - `component.param(name)` / `component.state(name)`：转换或替换组件参数与状态。
 - `component.node({ type, occurrence })`：按 ArkUI 节点类型和同类型出现序号选择节点。
@@ -61,7 +61,7 @@ HarmonyOS 中，`OH_JSVM_CreateVM` 创建的独立 JSVM 与 ArkTS 主 VM 不共�
 - `node.event(name, rule)`：替换节点事件并按需读取、更新组件状态。
 - `Fixit.registerTarget(className, descriptor)`：注册类名到 HarmonyOS 模块描述符的映射，使后续可以使用 `Fixit.fix('ClassName')`。
 - `instanceMethod(name, handler)` / `classMethod(name, handler)`：替换实例方法或静态方法，并返回原实现代理。
-- `require(fullPath)`：解析目标类完整 OHM 源路径，生成 `Fixit.fix` 使用的类描述符。
+- `require(fullPath)`：`Fixit.import(fullPath)` 的兼容别名，返回可调用、可构造的 ArkTS 类 Proxy。
 - `nil` / `Nil`、`isNil`、`nilToNull`、`nullToNil`。
 - `console.debug/log/info/warn/error`：输出到 HiLog 的 `OhosPatch` tag。
 - `setTimeout` / `clearTimeout`、`setInterval` / `clearInterval`、`setImmediate` / `clearImmediate`。
@@ -75,12 +75,14 @@ HarmonyOS 中，`OH_JSVM_CreateVM` 创建的独立 JSVM 与 ArkTS 主 VM 不共�
 /// <reference path="./fixit.d.js" />
 ```
 
-开启 TypeScript `checkJs` 时，建议先为 Runtime 的 `require` 建立别名，避免编辑器将字符串字面量调用误判成 CommonJS 模块加载：
+Hook API 直接接收完整路径；需要主动调用业务类时使用 `Fixit.import()`：
 
 ```js
-var loadClass = require;
-var DemoViewModel = loadClass(
+var fix = Fixit.fix(
   'com.rickytan.ohospatch/entry/src/main/ets/demo/DemoViewModel#DemoViewModel'
+);
+var Point = Fixit.import(
+  'com.rickytan.ohospatch/entry/src/main/ets/demo/Point#Point'
 );
 ```
 
@@ -94,9 +96,9 @@ var DemoViewModel = loadClass(
 
 也可以使用 `--codex` 或 `--claude` 只安装一个工具；已有安装需要更新时传入 `--force`。脚本分别支持 `CODEX_HOME` 和 `CLAUDE_HOME` 自定义配置根目录。安装后在 Codex 中使用 `$ohospatch`，在 Claude Code 中使用 `/ohospatch`。
 
-独立 JSVM 与 ArkTS 主 VM 不共享对象，因此 `require()` 返回的是类描述符，不是 ArkTS Constructor。安装 Hook 时，Native 根据描述符调用 `napi_load_module_with_info`，在主 ArkTS VM 中加载目标模块并取得导出的类。
+独立 JSVM 与 ArkTS 主 VM 不共享对象。`Fixit.fix(fullPath)` 和 `Fixit.component(fullPath)` 在 Runtime 内将路径解析成 Hook 描述符；安装 Hook 时，Native 根据描述符调用 `napi_load_module_with_info`，在主 ArkTS VM 中加载目标模块并取得导出的类。
 
-需要在 Patch 中主动使用其他业务类时，调用 `Fixit.import(fullPath)`。它返回同步的类 Proxy，可调用静态方法、通过 `new` 创建实例并继续用点语法访问实例属性和方法：
+需要在 Patch 中主动使用其他业务类时，调用 `Fixit.import(fullPath)` 或其兼容别名 `require(fullPath)`。它返回同步的类 Proxy，可调用静态方法、通过 `new` 创建实例并继续用点语法访问实例属性和方法：
 
 ```js
 var Point = Fixit.import(
@@ -149,15 +151,12 @@ Demo APP 在自己的 `DemoPatchStartupTask` 中通过 HTTP 下载脚本，并�
 
 ## Patch 格式
 
-跨模块加载需要提供目标 package 路径和 `bundleName/moduleName`：
+跨模块 Hook 直接传入包含 `bundleName/moduleName` 和目标 package 路径的完整 OHM 源路径：
 
 ```js
-var fix = Fixit.fix({
-  className: 'DemoViewModel',
-  modulePath: 'entry/src/main/ets/demo/DemoViewModel',
-  moduleInfo: 'com.rickytan.ohospatch/entry',
-  exportName: 'DemoViewModel'
-});
+var fix = Fixit.fix(
+  'com.rickytan.ohospatch/entry/src/main/ets/demo/DemoViewModel#DemoViewModel'
+);
 
 var origin = fix.instanceMethod('locationOf', function (locations, index, fallback) {
   if (index < 0 || index >= locations.length) {
@@ -174,16 +173,7 @@ fix.classMethod('crash', function () {
 });
 ```
 
-推荐使用完整 OHM 源路径加载其他模块中的目标类：
-
-```js
-var DemoViewModel = require(
-  'com.rickytan.ohospatch/entry/src/main/ets/demo/DemoViewModel#DemoViewModel'
-);
-var fix = Fixit.fix(DemoViewModel);
-```
-
-`require()` 只解析 Hook 目标，不加载可调用类。需要主动调用类时使用 `Fixit.import()`：
+需要主动调用类时使用 `Fixit.import()`；`require()` 是它的兼容别名：
 
 ```js
 var Point = Fixit.import(
@@ -208,10 +198,9 @@ exportName = DemoViewModel
 目标必须是业务模块导出的 API 20 状态管理 V1 自定义组件。业务组件本身不引用 OhosPatch，也不需要基类、装饰器或转发代码：
 
 ```js
-var PatchablePanel = require(
+var panel = Fixit.component(
   'com.rickytan.ohospatch/entry/src/main/ets/demo/PatchablePanel#PatchablePanel'
 );
-var panel = Fixit.component(PatchablePanel);
 
 panel.param('message').replace('Patched component parameter');
 panel.state('tapCount').transform(function (value) {
