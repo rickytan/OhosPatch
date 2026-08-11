@@ -5,6 +5,7 @@
     instance: Object.create(null),
     klass: Object.create(null),
     uiValues: Object.create(null),
+    uiAttrs: Object.create(null),
     uiEvents: Object.create(null)
   };
   var specs = [];
@@ -557,7 +558,6 @@
     if (args.length === 0) {
       throw new TypeError('Component attribute requires at least one argument');
     }
-    args = copyJsonValue(args, 'Component attribute arguments');
 
     var target = this.component.target;
     var selector = this.selector;
@@ -567,8 +567,15 @@
     rule.nodeType = selector.type;
     rule.occurrence = selector.occurrence;
     rule.attributeName = name;
-    rule.arguments = args;
-    registerUiRule(uniqueKey, rule, null, null);
+
+    if (typeof args[0] === 'function') {
+      rule.attrHandler = true;
+      registerUiRule(uniqueKey, rule, registry.uiAttrs, args[0]);
+    } else {
+      rule.attrHandler = false;
+      rule.arguments = copyJsonValue(args, 'Component attribute arguments');
+      registerUiRule(uniqueKey, rule, null, null);
+    }
     return this;
   };
 
@@ -798,6 +805,7 @@
     registry.instance = Object.create(null);
     registry.klass = Object.create(null);
     registry.uiValues = Object.create(null);
+    registry.uiAttrs = Object.create(null);
     registry.uiEvents = Object.create(null);
     specs = [];
     uiSpecs = [];
@@ -882,6 +890,20 @@
     } finally {
       nativeProxyMetadata = new WeakMap();
       nativeProxyCache = Object.create(null);
+    }
+  };
+
+  global.__ohospatch_callUiAttr = function (ruleId, ownerHandle) {
+    var handler = registry.uiAttrs[ruleId];
+    if (!handler) {
+      return { handled: false };
+    }
+    var owner = typeof ownerHandle === 'number' ? makeNativeProxy(ownerHandle, false, ownerHandle) : undefined;
+    try {
+      return { handled: true, value: handler.call(owner) };
+    } catch (err) {
+      console.error('OhosPatch attribute handler failed: ' + (err && err.message ? err.message : err));
+      return { handled: false };
     }
   };
 })(typeof globalThis === 'undefined' ? this : globalThis);

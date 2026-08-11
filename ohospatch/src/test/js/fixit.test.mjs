@@ -355,6 +355,43 @@ test('registers declarative component value, attribute, and event rules', () => 
   assert.deepEqual(plain(context.__ohospatch_callUiValue(specs[0].ruleId, 'old')), { handled: false });
 });
 
+test('component attribute handler resolves value with this bound to the component instance', () => {
+  const { context, setProxyRoot } = createRuntime();
+  const component = context.Fixit.component(
+    'com.example.app/entry/src/main/ets/components/DemoPanel#DemoPanel'
+  );
+
+  const button = component.node({ type: 'Button', occurrence: 0 });
+  button.attrs({
+    height: function () { return this.count + 10; },
+    backgroundColor: function () { return this.theme.color; }
+  });
+
+  const specs = JSON.parse(context.__ohospatch_uiSpecs());
+  assert.equal(specs.length, 2);
+  assert.equal(specs[0].kind, 'attribute');
+  assert.equal(specs[0].attributeName, 'height');
+  assert.equal(specs[0].attrHandler, true);
+  assert.equal(specs[1].attrHandler, true);
+
+  const owner = { count: 5, theme: { color: '#FF0000' } };
+  setProxyRoot(owner);
+
+  assert.deepEqual(
+    plain(context.__ohospatch_callUiAttr(specs[0].ruleId, 0)),
+    { handled: true, value: 15 }
+  );
+  assert.deepEqual(
+    plain(context.__ohospatch_callUiAttr(specs[1].ruleId, 0)),
+    { handled: true, value: '#FF0000' }
+  );
+
+  const failing = component.node({ type: 'Text', occurrence: 0 });
+  failing.attr('fontColor', function () { throw new Error('boom'); });
+  const failSpec = JSON.parse(context.__ohospatch_uiSpecs()).find((spec) => spec.attributeName === 'fontColor');
+  assert.deepEqual(plain(context.__ohospatch_callUiAttr(failSpec.ruleId, 0)), { handled: false });
+});
+
 test('binds component event handler this to the current component owner proxy', () => {
   const { context, eventOrigins, setProxyRoot } = createRuntime();
   const component = context.Fixit.component(

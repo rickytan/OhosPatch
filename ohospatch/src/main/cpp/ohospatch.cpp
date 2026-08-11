@@ -234,6 +234,7 @@ struct UiRule {
     uint32_t occurrence = 0;
     std::string attributeName;
     std::string argumentsJson;
+    bool hasAttrHandler = false;
     std::string eventName;
     std::array<std::string, kMaxUiCaptureProperties> captureProperties;
     size_t captureCount = 0;
@@ -2162,6 +2163,70 @@ class JsvmRuntime
                       "napi_get_value_bool(component event handled)");
     }
 
+    bool CallUiAttrHandler(napi_env napiEnv, uint32_t ruleId, napi_value owner, napi_value *value)
+    {
+        if (!value) {
+            LogError("CallUiAttrHandler received an invalid argument");
+            return false;
+        }
+        *value = nullptr;
+
+        JSVM_HandleScope scope = nullptr;
+        if (!JsvmOk(OH_JSVM_OpenHandleScope(env_, &scope), "OH_JSVM_OpenHandleScope(component attribute)", env_)) {
+            return false;
+        }
+
+        JSVM_Value ruleIdValue = nullptr;
+        JSVM_Value ownerHandleValue = nullptr;
+        JSVM_Value result = nullptr;
+        std::string resultJson;
+        ActiveInvocation previous = activeInvocation_;
+        if (owner) {
+            activeInvocation_ = {};
+            activeInvocation_.env = napiEnv;
+            activeInvocation_.receiver = owner;
+            activeInvocation_.proxyValues[0] = owner;
+            activeInvocation_.proxyValueCount = 1;
+        }
+
+        bool success = JsvmOk(OH_JSVM_CreateUint32(env_, ruleId, &ruleIdValue),
+                              "OH_JSVM_CreateUint32(component attribute rule)", env_) &&
+                       JsvmOk(OH_JSVM_CreateUint32(env_, 0, &ownerHandleValue),
+                              "OH_JSVM_CreateUint32(component attribute owner)", env_);
+        // ownerHandleValue is always 0 because we store the owner napi_value at
+        // proxyValues[0] above, so makeNativeProxy(0, ...) resolves to the owner
+        // via the activeInvocation_ proxy table.
+        if (success) {
+            JSVM_Value args[] = {ruleIdValue, ownerHandleValue};
+            success = CallGlobal("__ohospatch_callUiAttr", args, std::size(args), &result) &&
+                      StringifyJson(result, &resultJson);
+        }
+        if (owner) {
+            activeInvocation_ = previous;
+        }
+        if (!JsvmOk(OH_JSVM_CloseHandleScope(env_, scope), "OH_JSVM_CloseHandleScope(component attribute)", env_)) {
+            success = false;
+        }
+        if (!success) {
+            return false;
+        }
+
+        napi_value envelope = nullptr;
+        if (!NapiJsonParse(napiEnv, resultJson, &envelope)) {
+            return false;
+        }
+        bool handled = false;
+        napi_value handledValue = nullptr;
+        if (!NapiOk(napiEnv, napi_get_named_property(napiEnv, envelope, "handled", &handledValue),
+                    "napi_get_named_property(component attribute handled)") ||
+            !NapiOk(napiEnv, napi_get_value_bool(napiEnv, handledValue, &handled),
+                    "napi_get_value_bool(component attribute handled)") || !handled) {
+            return false;
+        }
+        return NapiOk(napiEnv, napi_get_named_property(napiEnv, envelope, "value", value),
+                      "napi_get_named_property(component attribute value)");
+    }
+
     static napi_value CallOriginalUiEvent(napi_env env, UiEventCallbackRecord *record, napi_value receiver,
                                           size_t argc, const napi_value *argv)
     {
@@ -2486,6 +2551,35 @@ class JsvmRuntime
                 continue;
             }
 
+            napi_value attribute = nullptr;
+            napi_valuetype attributeType = napi_undefined;
+            if (!NapiOk(napiEnv,
+                        napi_get_named_property(napiEnv, componentApi, rule->attributeName.c_str(), &attribute),
+                        "napi_get_named_property(component attribute)") ||
+                !NapiOk(napiEnv, napi_typeof(napiEnv, attribute, &attributeType),
+                        "napi_typeof(component attribute)") ||
+                attributeType != napi_function) {
+                LogError(rule->nodeType + "." + rule->attributeName + " is not an attribute function");
+                continue;
+            }
+
+            napi_value ignored = nullptr;
+            if (rule->hasAttrHandler) {
+                napi_value owner = nullptr;
+                if (!NapiOk(napiEnv, napi_get_reference_value(napiEnv, record->owner, &owner),
+                            "napi_get_reference_value(component attribute owner)") || !owner) {
+                    LogError("Component attribute owner is unavailable");
+                    continue;
+                }
+                napi_value value = nullptr;
+                if (!CallUiAttrHandler(napiEnv, rule->ruleId, owner, &value) || !value) {
+                    continue;
+                }
+                NapiOk(napiEnv, napi_call_function(napiEnv, componentApi, attribute, 1, &value, &ignored),
+                       "napi_call_function(component attribute handler)");
+                continue;
+            }
+
             napi_value arguments = nullptr;
             uint32_t argc = 0;
             if (!NapiJsonParse(napiEnv, rule->argumentsJson, &arguments) ||
@@ -2509,19 +2603,6 @@ class JsvmRuntime
             if (!argsReady) {
                 continue;
             }
-
-            napi_value attribute = nullptr;
-            napi_valuetype attributeType = napi_undefined;
-            if (!NapiOk(napiEnv,
-                        napi_get_named_property(napiEnv, componentApi, rule->attributeName.c_str(), &attribute),
-                        "napi_get_named_property(component attribute)") ||
-                !NapiOk(napiEnv, napi_typeof(napiEnv, attribute, &attributeType),
-                        "napi_typeof(component attribute)") ||
-                attributeType != napi_function) {
-                LogError(rule->nodeType + "." + rule->attributeName + " is not an attribute function");
-                continue;
-            }
-            napi_value ignored = nullptr;
             NapiOk(napiEnv, napi_call_function(napiEnv, componentApi, attribute, argc, argv.data(), &ignored),
                    "napi_call_function(component attribute)");
         }
@@ -2612,14 +2693,21 @@ class JsvmRuntime
         } else if (kind == "attribute") {
             rule->kind = UiRuleKind::ATTRIBUTE;
             napi_value arguments = nullptr;
+            napi_value attrHandler = nullptr;
+            bool hasAttrHandler = false;
             if (!NapiNamedString(napiEnv, spec, "nodeType", &rule->nodeType) ||
                 !NapiNamedUint32(napiEnv, spec, "occurrence", &rule->occurrence) ||
                 !NapiNamedString(napiEnv, spec, "attributeName", &rule->attributeName) ||
                 !NapiOk(napiEnv, napi_get_named_property(napiEnv, spec, "arguments", &arguments),
                         "napi_get_named_property(component attribute arguments)") ||
-                !NapiJsonStringify(napiEnv, arguments, "[]", &rule->argumentsJson)) {
+                !NapiJsonStringify(napiEnv, arguments, "[]", &rule->argumentsJson) ||
+                !NapiOk(napiEnv, napi_get_named_property(napiEnv, spec, "attrHandler", &attrHandler),
+                        "napi_get_named_property(component attribute handler flag)") ||
+                !NapiOk(napiEnv, napi_get_value_bool(napiEnv, attrHandler, &hasAttrHandler),
+                        "napi_get_value_bool(component attribute handler flag)")) {
                 return false;
             }
+            rule->hasAttrHandler = hasAttrHandler;
         } else if (kind == "event") {
             rule->kind = UiRuleKind::EVENT;
             napi_value capture = nullptr;

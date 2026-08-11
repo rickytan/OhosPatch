@@ -98,11 +98,21 @@
  */
 
 /**
+ * @typedef {(this: any) => OhosPatchJsonValue} OhosPatchAttrHandler
+ *   Attribute resolver invoked on each render with `this` bound to the current component instance
+ *   proxy; the return value is applied as the attribute argument.
+ */
+
+/**
  * @typedef {Object} OhosPatchComponentNodeFix
- * @property {(attributeName: string, ...args: OhosPatchJsonValue[]) => OhosPatchComponentNodeFix} attr
- *   Override one node attribute. At least one argument is required.
- * @property {(attributes: Record<string, OhosPatchJsonValue>) => OhosPatchComponentNodeFix} attrs
- *   Override multiple single-argument attributes.
+ * @property {(attributeName: string, value: OhosPatchJsonValue | OhosPatchAttrHandler,
+ *   ...args: OhosPatchJsonValue[]) => OhosPatchComponentNodeFix} attr
+ *   Override one node attribute. When `value` is a function it is invoked with `this` bound to the
+ *   current component instance on each render and its return value is applied as the single attribute
+ *   argument; otherwise the JSON arguments are applied verbatim. At least one argument is required.
+ * @property {(attributes: Record<string, OhosPatchJsonValue | OhosPatchAttrHandler>) =>
+ *   OhosPatchComponentNodeFix} attrs
+ *   Override multiple single-argument attributes. Each value may be a JSON value or a resolver function.
  * @property {(eventName: string, rule: OhosPatchComponentEventRule | OhosPatchComponentEventHandler) =>
  *   OhosPatchOriginalEvent} event Replace a synchronous node event callback and return the original callback proxy.
  */
