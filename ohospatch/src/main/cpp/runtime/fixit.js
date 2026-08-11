@@ -610,8 +610,14 @@
     return new ComponentValueFix(this, 'param', propertyName);
   };
 
-  ComponentFix.prototype.state = function (propertyName) {
-    return new ComponentValueFix(this, 'state', propertyName);
+  ComponentFix.prototype.state = function (propertyName, replacement) {
+    if (arguments.length !== 2) {
+      throw new TypeError('Component state requires a property name and replacement value or handler');
+    }
+    var stateFix = new ComponentValueFix(this, 'state', propertyName);
+    return typeof replacement === 'function'
+      ? stateFix.transform(replacement)
+      : stateFix.replace(replacement);
   };
 
   ComponentFix.prototype.node = function (selector) {
@@ -653,7 +659,7 @@
   };
 
   Object.defineProperty(Fixit, 'runtimeVersion', {
-    value: '1.8.0',
+    value: '1.9.0',
     enumerable: true
   });
 
@@ -821,15 +827,21 @@
     }
   };
 
-  global.__ohospatch_callUiValue = function (ruleId, value) {
+  global.__ohospatch_callUiValue = function (ruleId, value, ownerHandle) {
     var handler = registry.uiValues[ruleId];
     if (!handler) {
       return { handled: false };
     }
-    return {
-      handled: true,
-      value: handler(value)
-    };
+    var owner = typeof ownerHandle === 'number' ? makeNativeProxy(ownerHandle, false, ownerHandle) : undefined;
+    try {
+      return {
+        handled: true,
+        value: handler.call(owner, value)
+      };
+    } finally {
+      nativeProxyMetadata = new WeakMap();
+      nativeProxyCache = Object.create(null);
+    }
   };
 
   global.__ohospatch_callUiEvent = function (ruleId, eventArgs, ownerHandle) {

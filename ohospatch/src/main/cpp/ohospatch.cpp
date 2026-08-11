@@ -1028,14 +1028,14 @@ class JsvmRuntime
         }
 
         if ((method->kind == UiMethodKind::PARAM_INITIAL || method->kind == UiMethodKind::PARAM_UPDATE) && argc > 0) {
-            ApplyUiValueRules(napiEnv, method->component->targetKey, UiRuleKind::PARAM, argv[0]);
+            ApplyUiValueRules(napiEnv, method->component->targetKey, UiRuleKind::PARAM, argv[0], receiver);
         } else if (method->kind == UiMethodKind::PARAM_NAMED && argc > 1) {
-            ApplyUiNamedParamRule(napiEnv, method->component->targetKey, argv[0], &argv[1]);
+            ApplyUiNamedParamRule(napiEnv, method->component->targetKey, argv[0], &argv[1], receiver);
         }
 
         bool pushedFrame = false;
         if (method->kind == UiMethodKind::INITIAL_RENDER) {
-            ApplyUiValueRules(napiEnv, method->component->targetKey, UiRuleKind::STATE, receiver);
+            ApplyUiValueRules(napiEnv, method->component->targetKey, UiRuleKind::STATE, receiver, receiver);
             pushedFrame = PushUiRenderFrame(method->component->targetKey, receiver);
         } else if (method->kind == UiMethodKind::OBSERVE_CREATION) {
             WrapUiNodeBuilder(napiEnv, method->component->targetKey, argc, argv);
@@ -1046,7 +1046,7 @@ class JsvmRuntime
             (method->kind == UiMethodKind::PARAM_INITIAL || method->kind == UiMethodKind::PARAM_UPDATE) && argc > 0) {
             ApplyUiParamValuesToOwner(napiEnv, method->component->targetKey, argv[0], receiver);
         } else if (result && method->kind == UiMethodKind::STATE_RESET) {
-            ApplyUiValueRules(napiEnv, method->component->targetKey, UiRuleKind::STATE, receiver);
+            ApplyUiValueRules(napiEnv, method->component->targetKey, UiRuleKind::STATE, receiver, receiver);
         }
         if (pushedFrame) {
             PopUiRenderFrame();
@@ -2038,7 +2038,8 @@ class JsvmRuntime
         return NapiOk(env, status, "napi_call_function(original)");
     }
 
-    bool CallUiValueHandler(napi_env napiEnv, uint32_t ruleId, napi_value value, napi_value *envelope, bool *handled)
+    bool CallUiValueHandler(napi_env napiEnv, uint32_t ruleId, napi_value value, napi_value owner,
+                            napi_value *envelope, bool *handled)
     {
         if (!envelope || !handled) {
             LogError("CallUiValueHandler received an invalid argument");
@@ -2063,10 +2064,34 @@ class JsvmRuntime
         bool success = JsvmOk(OH_JSVM_CreateUint32(env_, ruleId, &ruleIdValue),
                               "OH_JSVM_CreateUint32(component value rule)", env_) &&
                        ParseJson(valueJson, &valueValue);
+        ActiveInvocation previous = activeInvocation_;
+        if (owner) {
+            activeInvocation_ = {};
+            activeInvocation_.env = napiEnv;
+            activeInvocation_.receiver = owner;
+            activeInvocation_.proxyValues[0] = owner;
+            activeInvocation_.proxyValueCount = 1;
+        }
         if (success) {
-            JSVM_Value args[] = {ruleIdValue, valueValue};
-            success = CallGlobal("__ohospatch_callUiValue", args, std::size(args), &result) &&
+            JSVM_Value ownerHandleValue = nullptr;
+            JSVM_Value *args = nullptr;
+            size_t argc = 0;
+            JSVM_Value ownerArgs[3] = {ruleIdValue, valueValue, nullptr};
+            JSVM_Value plainArgs[2] = {ruleIdValue, valueValue};
+            if (owner && JsvmOk(OH_JSVM_CreateUint32(env_, 0, &ownerHandleValue),
+                                "OH_JSVM_CreateUint32(component value owner)", env_)) {
+                ownerArgs[2] = ownerHandleValue;
+                args = ownerArgs;
+                argc = std::size(ownerArgs);
+            } else {
+                args = plainArgs;
+                argc = std::size(plainArgs);
+            }
+            success = CallGlobal("__ohospatch_callUiValue", args, argc, &result) &&
                       StringifyJson(result, &resultJson);
+        }
+        if (owner) {
+            activeInvocation_ = previous;
         }
         if (!JsvmOk(OH_JSVM_CloseHandleScope(env_, scope), "OH_JSVM_CloseHandleScope(component value)", env_)) {
             success = false;
@@ -2285,7 +2310,8 @@ class JsvmRuntime
         return NapiOk(env, status, "napi_call_function(original component event for patch)");
     }
 
-    void ApplyUiValueRules(napi_env napiEnv, const std::string &targetKey, UiRuleKind kind, napi_value target)
+    void ApplyUiValueRules(napi_env napiEnv, const std::string &targetKey, UiRuleKind kind, napi_value target,
+                           napi_value owner)
     {
         if (!target) {
             return;
@@ -2303,7 +2329,7 @@ class JsvmRuntime
             }
             napi_value envelope = nullptr;
             bool handled = false;
-            if (!CallUiValueHandler(napiEnv, rule->ruleId, current, &envelope, &handled) || !handled) {
+            if (!CallUiValueHandler(napiEnv, rule->ruleId, current, owner, &envelope, &handled) || !handled) {
                 continue;
             }
             napi_value replacement = nullptr;
@@ -2317,7 +2343,7 @@ class JsvmRuntime
     }
 
     void ApplyUiNamedParamRule(napi_env napiEnv, const std::string &targetKey, napi_value nameValue,
-                               napi_value *value)
+                               napi_value *value, napi_value owner)
     {
         if (!nameValue || !value || !*value) {
             return;
@@ -2338,7 +2364,7 @@ class JsvmRuntime
             }
             napi_value envelope = nullptr;
             bool handled = false;
-            if (!CallUiValueHandler(napiEnv, rule->ruleId, *value, &envelope, &handled) || !handled) {
+            if (!CallUiValueHandler(napiEnv, rule->ruleId, *value, owner, &envelope, &handled) || !handled) {
                 return;
             }
             napi_value replacement = nullptr;

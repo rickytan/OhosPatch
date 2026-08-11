@@ -8,7 +8,7 @@
  *
  *   /// <reference path="./fixit.d.js" />
  *
- * @version 1.8.0
+ * @version 1.9.0
  */
 
 /**
@@ -81,6 +81,13 @@
  */
 
 /**
+ * @callback OhosPatchComponentStateHandler
+ * @this {any} Synchronous Proxy for the current declarative Component instance.
+ * @param {any} originValue Current state value before replacement.
+ * @returns {any} Replacement state value.
+ */
+
+/**
  * @typedef {(this: any) => OhosPatchJsonValue} OhosPatchAttrHandler
  *   Attribute resolver invoked on each render with `this` bound to the current component instance
  *   proxy; the return value is applied as the attribute argument.
@@ -105,7 +112,8 @@
  * @typedef {Object} OhosPatchComponentFix
  * @property {OhosPatchTarget} target
  * @property {(propertyName: string) => OhosPatchComponentValueFix} param Patch an incoming parameter.
- * @property {(propertyName: string) => OhosPatchComponentValueFix} state Patch observable state.
+ * @property {(propertyName: string, replacement: OhosPatchJsonValue | OhosPatchComponentStateHandler) =>
+ *   OhosPatchComponentFix} state Replace observable state with a JSON value or derive it from the current value.
  * @property {(selector: string | OhosPatchNodeSelector) => OhosPatchComponentNodeFix} node Select an ArkUI node.
  */
 
@@ -122,7 +130,7 @@ class Fixit {
   }
 
   /** @readonly @type {string} */
-  static runtimeVersion = '1.8.0';
+  static runtimeVersion = '1.9.0';
 
   /**
    * @param {string | OhosPatchTarget} target Full OHM class path, registered alias, or target descriptor.

@@ -57,7 +57,7 @@ Primary implementation: `ohospatch/src/main/cpp/ohospatch.cpp`.
 - Patch method registrations are returned from JSVM as JSON specs.
 - Native loads target classes in the ArkTS VM and installs N-API trampolines.
 - Handler arguments still enter JSVM as JSON values. Method handler `this`, Component event handler `this`, nested properties, method calls, Proxy arguments, original-method results, and Proxy returns use invocation-scoped Native handles.
-- Runtime `1.8.0` includes a JS `Proxy` for the ArkTS receiver. `get`, `set`, and `apply` synchronously bridge to the original ArkTS object, preserving nested object identity and prototype method dispatch.
+- Runtime `1.9.0` includes a JS `Proxy` for the ArkTS receiver. `get`, `set`, and `apply` synchronously bridge to the original ArkTS object, preserving nested object identity and prototype method dispatch.
 - Proxy handles are valid only during the current synchronous patch invocation and must not escape to timers, promises, or globals. A call can retain at most 256 handles.
 - Hook failures fall back to the original ArkTS method.
 - Installation failure restores hooks that were already installed.
@@ -117,7 +117,7 @@ Proposed public concepts:
 
 - `Fixit.component(fullPath)` parses the complete OHM target path internally.
 - `component.param(name)` for incoming component parameters.
-- `component.state(name)` for observable component state.
+- `component.state(name, valueOrHandler)` for observable component state. Handler form receives the original value with `this` bound to the current Component instance Proxy.
 - `component.node(selector)` for a built-in ArkUI node.
 - `node.attrs({...})` for attribute overrides.
 - `node.event(name, handler)` for synchronous callback replacement.
@@ -125,9 +125,9 @@ Proposed public concepts:
 
 ### Implemented status (2026-08-12)
 
-- Runtime version `1.8.0` implements `Fixit.component` and the invocation-scoped ArkTS object Proxy bridge.
+- Runtime version `1.9.0` implements `Fixit.component` and the invocation-scoped ArkTS object Proxy bridge.
 - API 20 state-management V1 and V2 exported custom components are supported through separate native adapters with the same public DSL.
-- `param().transform/replace` and `state().transform/replace` are implemented.
+- `param().transform/replace` and direct `state(name, valueOrHandler)` are implemented.
 - Node selection by `{ type, occurrence }` is implemented with zero-based per-type counting.
 - `attr`, `attrs`, and synchronous `event(name, handler)` are implemented.
 - Component event handlers written with normal `function` syntax receive `this` as the current Component instance Proxy. Arrow functions keep lexical `this`.

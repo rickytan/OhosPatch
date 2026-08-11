@@ -63,7 +63,7 @@ export default function fixitTest(): void {
           });
       `;
       OhosPatch.executeScript(script);
-      expect(DemoViewModel.crash()).assertEqual('1.8.0|function|true|true|undefined|undefined|true|true|false|true|x|true');
+      expect(DemoViewModel.crash()).assertEqual('1.9.0|function|true|true|undefined|undefined|true|true|false|true|x|true');
     });
 
     it('component event patch accepts direct handler syntax only', 0, () => {
@@ -99,11 +99,18 @@ export default function fixitTest(): void {
             } catch (err) {
               attrExtraRejected = err instanceof TypeError;
             }
-            return typeof direct + '|' + objectRuleRejected + '|' + attrExtraRejected;
+            var legacyStateRejected = false;
+            try {
+              Fixit.component('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/PatchablePanel#PatchablePanel')
+                .state('tapCount').replace(40);
+            } catch (err) {
+              legacyStateRejected = err instanceof TypeError;
+            }
+            return typeof direct + '|' + objectRuleRejected + '|' + attrExtraRejected + '|' + legacyStateRejected;
           });
       `;
       expect(OhosPatch.executeScript(script)).assertLarger(0);
-      expect(DemoViewModel.crash()).assertEqual('function|true|true');
+      expect(DemoViewModel.crash()).assertEqual('function|true|true|true');
     });
 
     it('ComponentV2 supports param state node and event DSL behavior', 0, async () => {
@@ -124,8 +131,10 @@ export default function fixitTest(): void {
           'com.rickytan.ohospatch/entry/src/main/ets/demo/PatchablePanelV2#PatchablePanelV2'
         );
         component.param('message').replace('Patched V2 test parameter');
-        component.state('tapCount').replace(100);
-        component.state('statusText').replace('Patched V2 test state');
+        component.state('tapCount', function (originValue) {
+          this.statusText = 'Patched V2 state callback, origin=' + originValue;
+          return originValue + 100;
+        });
         component.node({ type: 'Text', occurrence: 1 })
           .attr('backgroundColor', '#E7F7EE');
         var origin = component.node({ type: 'Button', occurrence: 0 })
@@ -143,7 +152,9 @@ export default function fixitTest(): void {
       expect(parameter !== undefined).assertTrue();
       const initialState = await driver.waitForComponent(ON.text('tapCount=100'), 5000);
       expect(initialState !== undefined).assertTrue();
-      const initialStatus = await driver.waitForComponent(ON.text('status=Patched V2 test state'), 5000);
+      const initialStatus = await driver.waitForComponent(
+        ON.text('status=Patched V2 state callback, origin=0'), 5000
+      );
       expect(initialStatus !== undefined).assertTrue();
 
       const eventButton = await driver.waitForComponent(ON.text('V2 primary action'), 5000);
@@ -156,7 +167,7 @@ export default function fixitTest(): void {
       const reinstallScript = `
         Fixit.component(
           'com.rickytan.ohospatch/entry/src/main/ets/demo/PatchablePanelV2#PatchablePanelV2'
-        ).state('tapCount').replace(200);
+        ).state('tapCount', 200);
       `;
       expect(OhosPatch.executeScript(reinstallScript)).assertLarger(0);
     });

@@ -42,15 +42,15 @@
   // --- Component value override: param / state ---
   panel.param('message').replace('Patched component parameter');
   panel.param('subtitle').replace('Patched subtitle from remote JavaScript');
-  panel.state('tapCount').transform(function (value) {
+  panel.state('tapCount', function (value) {
     return value === 0 ? 40 : value;
   });
-  panel.state('statusText').replace('State replaced while the component was created');
-  panel.state('secondaryCount').transform(function (value) {
+  panel.state('statusText', 'State replaced while the component was created');
+  panel.state('secondaryCount', function (value) {
     return value + 20;
   });
-  panel.state('switchOn').replace(true);
-  panel.state('sliderValue').replace(75);
+  panel.state('switchOn', true);
+  panel.state('sliderValue', 75);
 
   // --- Component attribute: 静态值 ---
   panel.node({ type: 'Text', occurrence: 0 })
@@ -117,8 +117,10 @@
 
   // --- ComponentV2: 与 ComponentV1 使用相同 DSL ---
   panelV2.param('message').replace('Patched V2 component parameter');
-  panelV2.state('tapCount').replace(100);
-  panelV2.state('statusText').replace('V2 state replaced before initial render');
+  panelV2.state('tapCount', function (originValue) {
+    this.statusText = 'V2 state handler received ' + originValue;
+    return 100;
+  });
   panelV2.node({ type: 'Text', occurrence: 0 })
     .attr('fontColor', '#C44736');
   panelV2.node({ type: 'Text', occurrence: 1 })

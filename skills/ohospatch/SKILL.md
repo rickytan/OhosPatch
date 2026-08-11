@@ -59,8 +59,9 @@ var panel = Fixit.component(
 );
 
 panel.param('title').replace('fixed');
-panel.state('count').transform(function (value) {
-  return value < 0 ? 0 : value;
+panel.state('count', function (originValue) {
+  this.status = 'state patched';
+  return originValue < 0 ? 0 : originValue;
 });
 var originClick = panel.node({ type: 'Button', occurrence: 0 })
   .attrs({ height: 48, backgroundColor: '#1677FF' })
@@ -71,6 +72,7 @@ var originClick = panel.node({ type: 'Button', occurrence: 0 })
 ```
 
 - Target an exported custom component.
+- Register state replacement directly with `state(name, value)` or `state(name, function (originValue) { ... })`. The function form receives the original value and binds `this` to the current Component instance Proxy. Do not use the removed `state(name).replace/transform` chain.
 - Select nodes only by built-in type plus zero-based occurrence.
 - Keep attribute arguments and replacement values JSON-serializable.
 - Use normal `function` syntax when a Component event patch needs `this`; it is bound to the current Component instance proxy.

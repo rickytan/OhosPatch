@@ -263,8 +263,10 @@ var panel = Fixit.component(
 );
 
 panel.param('message').replace('Patched component parameter');
-panel.state('tapCount').transform(function (value) {
-  return value === 0 ? 40 : value;
+panel.state('statusText', 'Patched state');
+panel.state('tapCount', function (originValue) {
+  this.statusText = 'Original count=' + originValue;
+  return originValue === 0 ? 40 : originValue;
 });
 
 var originClick = panel.node({ type: 'Button', occurrence: 0 })
@@ -276,7 +278,7 @@ var originClick = panel.node({ type: 'Button', occurrence: 0 })
   });
 ```
 
-Component DSL 当前支持 API 20 状态管理 V1 与 V2 导出的自定义组件，两者使用完全相同的 DSL。V2 中 `param()` 对应 `@Param`，`state()` 可修复 `@Local` 等可观察实例状态；Runtime 会根据编译产物自动选择 adapter，patch 脚本不需要声明组件版本。
+Component DSL 当前支持 API 20 状态管理 V1 与 V2 导出的自定义组件，两者使用完全相同的 DSL。V2 中 `param()` 对应 `@Param`，`state(name, valueOrHandler)` 可修复 `@Local` 等可观察实例状态；函数形式接收原状态值，普通 `function` 的 `this` 指向当前 Component 实例 Proxy。Runtime 会根据编译产物自动选择 adapter，patch 脚本不需要声明组件版本。
 
 `event(name, handler)` 是同步事件替换；handler 只接收 ArkUI 原始事件参数，普通 `function` 的 `this` 指向当前 Component 实例 Proxy。
 
@@ -291,7 +293,7 @@ Component DSL 当前支持 API 20 状态管理 V1 与 V2 导出的自定义组�
 - `Fixit.import(fullPath)`
 - `Fixit.registerTarget(className, descriptor)`
 - `instanceMethod(name, handler)` / `classMethod(name, handler)`
-- `component.param(name)` / `component.state(name)`
+- `component.param(name)` / `component.state(name, valueOrHandler)`
 - `component.node(selector).attr(...)` / `.attrs(...)` / `.event(...)`
 - `require(fullPath)`
 - `nil` / `Nil`、`isNil`、`nilToNull`、`nullToNil`
