@@ -8,7 +8,7 @@
  *
  *   /// <reference path="./fixit.d.js" />
  *
- * @version 1.10.0
+ * @version 1.12.0
  */
 
 /**
@@ -58,7 +58,7 @@
 /**
  * @typedef {Object} OhosPatchNodeSelector
  * @property {string} type Built-in ArkUI component type, such as `Button`.
- * @property {number=} occurrence Zero-based occurrence; defaults to `0`.
+ * @property {number=} occurrence Zero-based occurrence within the actually executed render path for this built-in node type; defaults to `0`.
  */
 
 /**
@@ -110,42 +110,36 @@
  * @property {(propertyName: string, replacement: OhosPatchJsonValue | OhosPatchComponentValueHandler) =>
  *   OhosPatchComponentFix} state Replace observable state with a JSON value or derive it from the current value.
  * @property {(selector: string | OhosPatchNodeSelector) => OhosPatchComponentNodeFix} node Select an ArkUI node by
- *   built-in type and zero-based occurrence within the target component render.
+ *   built-in type and zero-based occurrence within the target component's actually executed render path.
  */
 
 /** Registers method replacements for one exported ArkTS class. */
 class Fixit {
   /**
-   * @param {string | OhosPatchTarget} target Full OHM class path, registered alias, or target descriptor.
-   * @param {string=} modulePath Legacy normalized module path when `target` is a class name.
-   * @param {string=} exportName Legacy export name.
+   * @param {string} target Full OHM class path.
    */
-  constructor(target, modulePath, exportName) {
+  constructor(target) {
     /** @type {OhosPatchTarget} */
     this.target = /** @type {any} */ (undefined);
   }
 
   /** @readonly @type {string} */
-  static runtimeVersion = '1.10.0';
+  static runtimeVersion = '1.12.0';
 
   /**
-   * @param {string | OhosPatchTarget} target Full OHM class path, registered alias, or target descriptor.
-   * @param {string=} modulePath
-   * @param {string=} exportName
+   * @param {string} target Full OHM class path.
    * @returns {Fixit}
    */
-  static fix(target, modulePath, exportName) {
+  static fix(target) {
     return /** @type {any} */ (undefined);
   }
 
   /**
    * Target an exported API 20 state-management V1 or V2 component. The Runtime selects the adapter automatically.
-   * @param {string | OhosPatchTarget} target Full OHM component path, registered alias, or target descriptor.
-   * @param {string=} modulePath
-   * @param {string=} exportName
+   * @param {string} target Full OHM component path.
    * @returns {OhosPatchComponentFix}
    */
-  static component(target, modulePath, exportName) {
+  static component(target) {
     return /** @type {any} */ (undefined);
   }
 
@@ -161,13 +155,6 @@ class Fixit {
   static import(fullPath) {
     return /** @type {any} */ (undefined);
   }
-
-  /**
-   * @param {string} className
-   * @param {OhosPatchTarget} target
-   * @returns {void}
-   */
-  static registerTarget(className, target) {}
 
   /**
    * @param {string} methodName
@@ -197,27 +184,6 @@ class Fixit {
  */
 function require(fullPath) {
   return Fixit.import(fullPath);
-}
-
-/** @type {null} */
-var nil = null;
-
-/** @type {null} */
-var Nil = null;
-
-/** @param {any} value @returns {boolean} */
-function isNil(value) {
-  return false;
-}
-
-/** @param {any} value @returns {any} */
-function nilToNull(value) {
-  return /** @type {any} */ (undefined);
-}
-
-/** @param {any} value @returns {any} */
-function nullToNil(value) {
-  return /** @type {any} */ (undefined);
 }
 
 /** @typedef {(...args: any[]) => void} OhosPatchTimerCallback */

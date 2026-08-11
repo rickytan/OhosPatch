@@ -53,17 +53,12 @@ OhosPatch/
 ## 架构
 
 ```mermaid
-flowchart LR
-  subgraph Host["宿主 APP"]
-    Loader["下载 / 验签 / 灰度 / 缓存"]
-    Business["ArkTS 业务类与 ArkUI 组件"]
-  end
-
-  subgraph Har["ohospatch HAR"]
-    API["OhosPatch.executeScript / executeFile"]
-    Native["Native N-API Bridge"]
-    JSVM["独立 JSVM + Fixit Runtime"]
-  end
+graph LR
+  Loader["宿主 APP: 下载 / 验签 / 灰度 / 缓存"]
+  Business["宿主 APP: ArkTS 业务类与 ArkUI 组件"]
+  API["ohospatch HAR: OhosPatch.executeScript / executeFile"]
+  JSVM["独立 JSVM + Fixit Runtime"]
+  Native["Native N-API Bridge"]
 
   Loader --> API
   API --> JSVM
@@ -100,11 +95,11 @@ sequenceDiagram
 声明式组件 Hook 调用链：
 
 ```mermaid
-flowchart TD
+graph TD
   A["Fixit.component(fullPath)"] --> B["Native 加载导出的 Component 类"]
   B --> C{"识别生成类模型"}
-  C -->|"V1"| V1["setInitiallyProvidedValue / updateStateVars"]
-  C -->|"V2"| V2["initParam / updateParam / resetParam"]
+  C -->|V1| V1["setInitiallyProvidedValue / updateStateVars"]
+  C -->|V2| V2["initParam / updateParam / resetParam"]
   V1 --> D["包装 initialRender 与 observeComponentCreation2"]
   V2 --> D
   D --> E["原 builder 创建 ArkUI 节点"]
@@ -135,18 +130,18 @@ OhosPatch 使用两层运行时协作：
 OhosPatch 在生产环境中只负责“执行已可信 patch”。建议宿主侧按下面流程接入：
 
 ```mermaid
-flowchart LR
+graph LR
   A["启动或业务初始化"] --> B["读取本地缓存 patch"]
   B --> C{"签名 / 版本 / 设备校验"}
-  C -- 通过 --> D["OhosPatch.executeScript"]
-  C -- 失败 --> E["丢弃并记录"]
+  C -->|通过| D["OhosPatch.executeScript"]
+  C -->|失败| E["丢弃并记录"]
   A --> F["后台请求 patch 配置"]
   F --> G["下载 patch"]
   G --> H["验签、灰度、熔断、缓存"]
   H --> D
   D --> I{"hookCount > 0"}
-  I -- 是 --> J["记录版本和成功状态"]
-  I -- 否 --> K["回滚 / 禁用该 patch"]
+  I -->|是| J["记录版本和成功状态"]
+  I -->|否| K["回滚 / 禁用该 patch"]
 ```
 
 宿主必须负责：
@@ -207,7 +202,7 @@ Patch 脚本可以引用声明文件获得 IDE 补全：
 完整目标路径格式是：
 
 ```text
-bundleName/moduleName/modulePath#exportName
+bundleName/moduleName/[packageName/]src/main/ets/File#ExportName
 ```
 
 例如 Demo 的 `PatchablePanel` 导出自 `entry/src/main/ets/demo/PatchablePanel.ets`，所以目标为：
@@ -346,7 +341,7 @@ fix.classMethod('crash', function () {
 });
 ```
 
-`Fixit.import()` 返回可调用的持久 ArkTS 类 Proxy，支持静态方法、`new`、实例属性和实例方法。`require(fullPath)` 只是它的兼容别名。
+`Fixit.import()` 返回可调用的持久 ArkTS 类 Proxy，支持静态方法、`new`、实例属性和实例方法。`require(fullPath)` 是它的别名。
 
 ### 修复 Component 参数和状态
 
@@ -393,7 +388,7 @@ panel.state('tapCount', function (originValue) {
 });
 ```
 
-`param(name, valueOrHandler)` 和 `state(name, valueOrHandler)` 使用相同形式。普通 `function` 中的 `this` 是当前 Component 实例 Proxy；箭头函数保留 JavaScript 词法 `this`，因此需要访问组件实例时不能使用箭头函数。旧的 `.param(name).replace/transform` 和 `.state(name).replace/transform` 链式写法不再支持。
+`param(name, valueOrHandler)` 和 `state(name, valueOrHandler)` 使用相同形式。普通 `function` 中的 `this` 是当前 Component 实例 Proxy；箭头函数保留 JavaScript 词法 `this`，因此需要访问组件实例时不能使用箭头函数。当前公开 DSL 只支持这种直接传值或 handler 的形式。
 
 状态管理 V2 使用相同 DSL：`param()` 对应 `@Param`，`state()` 可修复 `@Local` 等可观察实例状态。Runtime 根据编译产物自动选择 V1/V2 adapter，Patch 不需要声明版本。
 
@@ -439,7 +434,7 @@ panel.node({ type: 'Text', occurrence: 3 })
   });
 ```
 
-Selector 目前只有字符串和 descriptor 两种输入形态：
+Selector 目前只有字符串和对象两种输入形态：
 
 | 写法 | 含义 |
 | --- | --- |
@@ -447,7 +442,112 @@ Selector 目前只有字符串和 descriptor 两种输入形态：
 | `node({ type: 'Button' })` | 同上，`occurrence` 默认是 `0` |
 | `node({ type: 'Button', occurrence: 2 })` | 当前目标组件渲染中的第三个 Button |
 
-`type` 必须是内置 ArkUI 节点 API 名称，例如 `Text`、`Button`、`Toggle`、`Slider`。`occurrence` 从 `0` 开始，按同一类型节点在目标组件编译后渲染回调中的出现顺序单独计数；`Text occurrence: 2` 不受前面的 Button 或 Row 影响。节点规则在原 builder 执行后写入，因此 Patch 属性是最后写入者。
+`type` 必须是内置 ArkUI 节点 API 名称，例如 `Text`、`Button`、`Toggle`、`Slider`。`occurrence` 从 `0` 开始，按同一类型节点在目标组件当前这次实际执行的渲染路径中单独计数；`Text occurrence: 2` 不受前面的 Button 或 Row 影响。节点规则在原 builder 执行后写入，因此 Patch 属性是最后写入者。
+
+多级嵌套组件时，`occurrence` 只在当前 `Fixit.component(fullPath)` 指向的组件内部计算。父组件中的 `<Child />` 只是父组件渲染路径上的一个自定义组件创建点，不会把 `Child` 内部的 `Text/Button` 计入父组件 selector；要修复子组件内部节点，需要对 `Child` 自己再写一条 `Fixit.component(childFullPath)`。
+
+条件渲染时，只统计当前状态下实际执行到的分支。`if` 分支里第一个 `Button` 是该分支执行时的 `Button occurrence: 0`；切到 `else` 分支后，`else` 分支里实际创建的同类型节点会重新按执行顺序计数。循环和 `ForEach` 也是同一规则：每个实际执行的迭代都会按顺序贡献节点，因此列表长度、排序或过滤条件变化会改变后续同类型节点的 `occurrence`。
+
+更具体地说，编译后的组件渲染会在执行到每个 ArkUI 内置节点 builder 时累加计数；没有执行到的分支不会占位。
+
+同级混排时，不同类型分别计数：
+
+```ts
+build() {
+  Column() {
+    Text('A')      // Text occurrence 0
+    Button('One')  // Button occurrence 0
+    Text('B')      // Text occurrence 1
+    Button('Two')  // Button occurrence 1
+    Text('C')      // Text occurrence 2
+  }
+}
+```
+
+等价地看成执行了下面这些内置节点 builder，OhosPatch 只在同一 `type` 内递增：
+
+```text
+Text.create(...)    -> Text 0
+Button.create...    -> Button 0
+Text.create(...)    -> Text 1
+Button.create...    -> Button 1
+Text.create(...)    -> Text 2
+```
+
+所以 `node({ type: 'Text', occurrence: 2 })` 命中 `Text('C')`，`node({ type: 'Button', occurrence: 1 })` 命中 `Button('Two')`。
+
+嵌套自定义组件时，只算当前目标组件自己的渲染路径：
+
+```ts
+@Component
+export struct ParentPanel {
+  build() {
+    Column() {
+      Text('Parent top')     // ParentPanel: Text occurrence 0
+      ChildPanel()
+      Text('Parent bottom')  // ParentPanel: Text occurrence 1
+    }
+  }
+}
+
+@Component
+export struct ChildPanel {
+  build() {
+    Column() {
+      Text('Child title')    // ChildPanel: Text occurrence 0
+      Button('Child action') // ChildPanel: Button occurrence 0
+    }
+  }
+}
+```
+
+`Fixit.component('.../ParentPanel#ParentPanel').node({ type: 'Text', occurrence: 1 })` 命中 `Parent bottom`。它不会命中 `Child title`，因为 `ChildPanel` 内部节点属于 `Fixit.component('.../ChildPanel#ChildPanel')` 的计数范围。
+
+条件渲染时，当前分支决定计数结果：
+
+```ts
+build() {
+  Column() {
+    Text('Header') // Text occurrence 0
+    if (this.loggedIn) {
+      Text('Profile')   // loggedIn=true: Text occurrence 1
+      Button('Logout')  // loggedIn=true: Button occurrence 0
+    } else {
+      Button('Login')   // loggedIn=false: Button occurrence 0
+      Text('Guest')     // loggedIn=false: Text occurrence 1
+    }
+    Text('Footer') // Text occurrence 2, 两个分支下都一样
+  }
+}
+```
+
+当 `loggedIn=true` 时，`Button occurrence 0` 是 `Logout`；当 `loggedIn=false` 时，同一个 selector 命中 `Login`。这种 selector 适合修复“当前状态下的第一个 Button”，不适合表达“无论哪个分支都命中同一个业务按钮”。如果两个分支需要不同 patch，应分别确认触发状态并绑定准确 App 版本。
+
+循环或列表会把每次实际迭代都计入：
+
+```ts
+build() {
+  Column() {
+    ForEach(this.items, (item: Item) => {
+      Text(item.title)     // 每个 item 贡献一个 Text
+      Button('Open')       // 每个 item 贡献一个 Button
+    })
+    Text('After list')     // occurrence 取决于 items.length
+  }
+}
+```
+
+如果 `items = [A, B]`，执行顺序是：
+
+```text
+Text(A)          -> Text 0
+Button(Open A)   -> Button 0
+Text(B)          -> Text 1
+Button(Open B)   -> Button 1
+Text(After list) -> Text 2
+```
+
+如果 `items = [A, B, C]`，`Text('After list')` 会变成 `Text occurrence 3`。因此列表长度、过滤、排序或分页会影响后续节点的 `occurrence`，生产 patch 应优先选择不受动态列表影响的稳定节点；当前版本还没有 id/hierarchy selector 来表达更精确的定位。
 
 当前不支持 `id`、文本内容、父子层级、样式类或自定义 key selector。发布版本增删或调整同类型节点顺序后，`occurrence` 可能改变，因此宿主必须把 Patch 与准确 APP 版本绑定。
 
@@ -498,12 +598,10 @@ var originSliderChange = panel.node({ type: 'Slider', occurrence: 0 })
 - `Fixit.fix(fullPath)`
 - `Fixit.component(fullPath)`
 - `Fixit.import(fullPath)`
-- `Fixit.registerTarget(className, descriptor)`
 - `instanceMethod(name, handler)` / `classMethod(name, handler)`
 - `component.param(name, valueOrHandler)` / `component.state(name, valueOrHandler)`
 - `component.node(selector).attr(...)` / `.attrs(...)` / `.event(...)`
 - `require(fullPath)`
-- `nil` / `Nil`、`isNil`、`nilToNull`、`nullToNil`
 - `console.debug/log/info/warn/error`
 - `setTimeout` / `clearTimeout`
 - `setInterval` / `clearInterval`

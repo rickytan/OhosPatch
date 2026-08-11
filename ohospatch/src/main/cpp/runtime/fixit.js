@@ -12,7 +12,6 @@
   var uiSpecs = [];
   var uiRuleKeys = Object.create(null);
   var nextUiRuleId = 1;
-  var targets = Object.create(null);
   var timers = Object.create(null);
   var nextTimerId = 1;
   var nativeProxyMetadata = new WeakMap();
@@ -375,31 +374,18 @@
     return target.moduleInfo + '|' + target.modulePath + '#' + target.exportName;
   }
 
-  function normalizeTarget(target, modulePath, exportName) {
-    var normalized;
+  function normalizeTarget(target) {
     if (typeof target === 'string') {
-      if (!modulePath && own(targets, target)) {
-        normalized = copyTarget(targets[target]);
-      } else if (!modulePath && (target.indexOf('/') !== -1 || target.indexOf('@bundle:') === 0)) {
-        normalized = parseTargetPath(target);
-      } else {
-        normalized = {
-          className: target,
-          modulePath: modulePath || '',
-          moduleInfo: '',
-          exportName: exportName || target
-        };
+      if (target.indexOf('/') !== -1 || target.indexOf('@bundle:') === 0) {
+        var normalized = parseTargetPath(target);
+        if (!normalized.className || !normalized.modulePath) {
+          throw new Error('Fixit target requires className and modulePath');
+        }
+        return normalized;
       }
-    } else if (target && typeof target === 'object') {
-      normalized = copyTarget(target);
-    } else {
-      throw new TypeError('Fixit.fix requires a class name or target descriptor');
+      throw new Error('Fixit target must be a full OHM path string');
     }
-
-    if (!normalized.className || !normalized.modulePath) {
-      throw new Error('Fixit target requires className and modulePath');
-    }
-    return normalized;
+    throw new TypeError('Fixit.fix requires a full OHM path string');
   }
 
   function validateMethod(methodName, handler) {
@@ -495,36 +481,33 @@
     return descriptor;
   }
 
-  function ComponentFix(target, modulePath, exportName) {
-    this.target = normalizeTarget(target, modulePath, exportName);
+  function ComponentFix(target) {
+    this.target = normalizeTarget(target);
   }
 
-  function ComponentValueFix(component, kind, propertyName) {
-    this.component = component;
-    this.kind = kind;
-    this.propertyName = validateUiName(propertyName, 'Component property name');
-  }
-
-  ComponentValueFix.prototype.transform = function (handler) {
-    if (typeof handler !== 'function') {
-      throw new TypeError('Component value transform must be a function');
+  function registerComponentValue(component, kind, propertyName, replacement) {
+    var property = validateUiName(propertyName, 'Component property name');
+    var handler;
+    if (typeof replacement === 'function') {
+      handler = replacement;
+    } else {
+      var copiedReplacement = copyJsonValue(replacement, 'Component replacement value');
+      handler = function () {
+        return copiedReplacement;
+      };
     }
-    var target = this.component.target;
-    var uniqueKey = targetKey(target) + '|' + this.kind + '|' + this.propertyName;
+    if (typeof handler !== 'function') {
+      throw new TypeError('Component value replacement must be a JSON value or function');
+    }
+    var target = component.target;
+    var uniqueKey = targetKey(target) + '|' + kind + '|' + property;
     var rule = copyUiTarget(target);
-    rule.kind = this.kind;
-    rule.propertyName = this.propertyName;
+    rule.kind = kind;
+    rule.propertyName = property;
     rule.operation = 'transform';
     registerUiRule(uniqueKey, rule, registry.uiValues, handler);
-    return this.component;
-  };
-
-  ComponentValueFix.prototype.replace = function (value) {
-    var replacement = copyJsonValue(value, 'Component replacement value');
-    return this.transform(function () {
-      return replacement;
-    });
-  };
+    return component;
+  }
 
   function normalizeNodeSelector(selector) {
     var normalized = typeof selector === 'string' ? { type: selector } : selector;
@@ -610,51 +593,36 @@
     if (arguments.length !== 2) {
       throw new TypeError('Component parameter requires a property name and replacement value or handler');
     }
-    var paramFix = new ComponentValueFix(this, 'param', propertyName);
-    return typeof replacement === 'function'
-      ? paramFix.transform(replacement)
-      : paramFix.replace(replacement);
+    return registerComponentValue(this, 'param', propertyName, replacement);
   };
 
   ComponentFix.prototype.state = function (propertyName, replacement) {
     if (arguments.length !== 2) {
       throw new TypeError('Component state requires a property name and replacement value or handler');
     }
-    var stateFix = new ComponentValueFix(this, 'state', propertyName);
-    return typeof replacement === 'function'
-      ? stateFix.transform(replacement)
-      : stateFix.replace(replacement);
+    return registerComponentValue(this, 'state', propertyName, replacement);
   };
 
   ComponentFix.prototype.node = function (selector) {
     return new ComponentNodeFix(this, selector);
   };
 
-  function Fixit(target, modulePath, exportName) {
+  function Fixit(target) {
     if (!(this instanceof Fixit)) {
-      return new Fixit(target, modulePath, exportName);
+      return new Fixit(target);
     }
-    this.target = normalizeTarget(target, modulePath, exportName);
+    this.target = normalizeTarget(target);
   }
 
-  Fixit.fix = function (target, modulePath, exportName) {
-    return new Fixit(target, modulePath, exportName);
+  Fixit.fix = function (target) {
+    return new Fixit(target);
   };
 
-  Fixit.component = function (target, modulePath, exportName) {
-    return new ComponentFix(target, modulePath, exportName);
+  Fixit.component = function (target) {
+    return new ComponentFix(target);
   };
 
   Fixit.import = importTarget;
-
-  Fixit.registerTarget = function (className, target) {
-    if (typeof className !== 'string' || className.length === 0) {
-      throw new TypeError('Fixit.registerTarget requires a class name');
-    }
-    var descriptor = copyTarget(target || {});
-    descriptor.className = descriptor.className || className;
-    targets[className] = normalizeTarget(descriptor);
-  };
 
   Fixit.prototype.instanceMethod = function (methodName, handler) {
     return register(this.target, methodName, false, handler);
@@ -665,7 +633,7 @@
   };
 
   Object.defineProperty(Fixit, 'runtimeVersion', {
-    value: '1.10.0',
+    value: '1.12.0',
     enumerable: true
   });
 
@@ -742,17 +710,6 @@
   }
 
   global.Fixit = Fixit;
-  global.nil = null;
-  global.Nil = null;
-  global.nilToNull = function (value) {
-    return value == null ? null : value;
-  };
-  global.nullToNil = function (value) {
-    return value === null ? global.nil : value;
-  };
-  global.isNil = function (value) {
-    return value === null || value === undefined;
-  };
   global.require = Fixit.import;
   global.setTimeout = function (callback, delay) {
     return scheduleTimer(callback, delay, false, Array.prototype.slice.call(arguments, 2));
@@ -799,7 +756,6 @@
     uiSpecs = [];
     uiRuleKeys = Object.create(null);
     nextUiRuleId = 1;
-    targets = Object.create(null);
     importedProxyCache = Object.create(null);
   };
 

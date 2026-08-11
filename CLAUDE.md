@@ -97,7 +97,7 @@ Do **not** move download, signature, URL, cache, or startup policy into `ohospat
 
 Several files must stay mutually consistent; a change in one usually requires the others:
 
-- `skills/ohospatch/references/fixit.d.js` `@version` **must equal** `Fixit.runtimeVersion` in `ohospatch/src/main/cpp/runtime/fixit.js` (currently `1.10.0`). Signatures, constraints, and globals in the declaration must match the runtime.
+- `skills/ohospatch/references/fixit.d.js` `@version` **must equal** `Fixit.runtimeVersion` in `ohospatch/src/main/cpp/runtime/fixit.js` (currently `1.12.0`). Signatures, constraints, and globals in the declaration must match the runtime.
 - `skills/ohospatch/SKILL.md` + `scripts/install-skill.sh` must track `references/fixit.d.js`, README limitations, and demonstrated runtime behavior.
 - `README.md` "当前边界" (current limitations) must reflect actual runtime capability.
 - Do not add source-scanning tests that pin implementation tokens such as handle-scope names or callback storage identifiers. When safety policy matters, test user-visible failure behavior on device and inspect the compiled binary.
@@ -106,7 +106,7 @@ Several files must stay mutually consistent; a change in one usually requires th
 
 Targets API 20 state-management V1 and V2 **exported** custom components through separate native adapters. `build()` becomes generated `initialRender()` and nodes use `observeComponentCreation2`; V1 params use `setInitiallyProvidedValue`/`updateStateVars`, while V2 params use `initParam`/`updateParam`/`resetParam` and reuse resets through `resetStateVarsOnReuse`. **The public DSL must not expose generated names**. When changing component behavior beyond an established pattern, inspect the generated ArkTS output (`entry/build/.../cache/.../esmodule/.../*.ts`); source syntax alone is insufficient. Fail closed (log error, leave business behavior untouched) when a shape/selector/attribute/event can't be verified.
 
-Parameter and state rules use `param/state(name, value)` or `param/state(name, function (originValue) { ... })`; the function receives the original value and `this` is the synchronous current-component Proxy. The old `param/state(name).replace/transform` chains are unsupported.
+Parameter and state rules use `param/state(name, value)` or `param/state(name, function (originValue) { ... })`; the function receives the original value and `this` is the synchronous current-component Proxy. This is the only public value-replacement DSL.
 
 ## Working rules
 

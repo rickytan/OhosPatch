@@ -49,24 +49,21 @@ export default function fixitTest(): void {
             return [
               Fixit.runtimeVersion,
               typeof require,
-              nil === null,
-              Nil === null,
               typeof YES,
               typeof NO,
-              isNil(null),
-              isNil(undefined),
-              isNil(0),
-              nilToNull(undefined) === null,
-              nilToNull('x'),
-              nullToNil(null) === null
+              typeof nil,
+              typeof Nil,
+              typeof isNil,
+              typeof nilToNull,
+              typeof nullToNil
             ].join('|');
           });
       `;
       OhosPatch.executeScript(script);
-      expect(DemoViewModel.crash()).assertEqual('1.10.0|function|true|true|undefined|undefined|true|true|false|true|x|true');
+      expect(DemoViewModel.crash()).assertEqual('1.12.0|function|undefined|undefined|undefined|undefined|undefined|undefined|undefined');
     });
 
-    it('component DSL rejects removed value chains and unsupported event rules', 0, () => {
+    it('component DSL validates direct value API and unsupported event rules', 0, () => {
       const script = `
         Fixit.fix('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/DemoViewModel#DemoViewModel')
           .classMethod('crash', function () {
@@ -99,22 +96,22 @@ export default function fixitTest(): void {
             } catch (err) {
               attrExtraRejected = err instanceof TypeError;
             }
-            var legacyStateRejected = false;
+            var missingStateReplacementRejected = false;
             try {
               Fixit.component('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/PatchablePanel#PatchablePanel')
-                .state('tapCount').replace(40);
+                .state('tapCount');
             } catch (err) {
-              legacyStateRejected = err instanceof TypeError;
+              missingStateReplacementRejected = err instanceof TypeError;
             }
-            var legacyParamRejected = false;
+            var missingParamReplacementRejected = false;
             try {
               Fixit.component('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/PatchablePanel#PatchablePanel')
-                .param('message').replace('legacy');
+                .param('message');
             } catch (err) {
-              legacyParamRejected = err instanceof TypeError;
+              missingParamReplacementRejected = err instanceof TypeError;
             }
             return typeof direct + '|' + objectRuleRejected + '|' + attrExtraRejected + '|' +
-              legacyStateRejected + '|' + legacyParamRejected;
+              missingStateReplacementRejected + '|' + missingParamReplacementRejected;
           });
       `;
       expect(OhosPatch.executeScript(script)).assertLarger(0);
@@ -329,20 +326,6 @@ export default function fixitTest(): void {
       `;
       const count = OhosPatch.executeScript(script);
       expect(count).assertLarger(0);
-    });
-
-    it('registerTarget alias resolves a short name to a full target', 0, () => {
-      const script = `
-        Fixit.registerTarget('DemoViewModel', {
-          modulePath: 'entry/src/main/ets/demo/DemoViewModel',
-          moduleInfo: 'com.rickytan.ohospatch/entry_test'
-        });
-        Fixit.fix('DemoViewModel')
-          .instanceMethod('crashIt', function () { return 'alias-works'; });
-      `;
-      OhosPatch.executeScript(script);
-      const vm = new DemoViewModel();
-      expect(vm.crashIt()).assertEqual('alias-works');
     });
 
     it('timer callbacks run in the real Patch JSVM and can update later patch results', 0, async () => {
