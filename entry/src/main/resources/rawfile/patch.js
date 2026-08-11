@@ -90,6 +90,21 @@
       return originSecondaryClick.apply(this, arguments);
     });
 
+  var originUnsafeClick = panel.node({ type: 'Button', occurrence: 2 })
+    .attrs({
+      height: 52,
+      backgroundColor: '#1F6B46'
+    })
+    .event('onClick', /** @this {any} */ function () {
+      try {
+        return originUnsafeClick.apply(this, arguments);
+      } catch (err) {
+        var message = err && err.message ? err.message : String(err);
+        this.tagText = 'Recovered Button.onClick crash: ' + message;
+        this.statusText = 'Patched Button.onClick recovered';
+      }
+    });
+
   var originToggleChange = panel.node({ type: 'Toggle', occurrence: 0 })
     .event('onChange', /** @this {any} */ function (isOn) {
       this.tagText = 'toggle patched before origin';

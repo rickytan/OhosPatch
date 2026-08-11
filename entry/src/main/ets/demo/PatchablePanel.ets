@@ -8,6 +8,7 @@ export struct PatchablePanel {
   @State switchOn: boolean = false;
   @State sliderValue: number = 20;
   @State tagText: string = 'original tag';
+  unsafeCallback?: () => string;
 
   markPrimary(delta: number): void {
     this.tapCount += delta;
@@ -67,6 +68,14 @@ export struct PatchablePanel {
           })
       }
       .width('100%')
+
+      Button('Unsafe onClick crash')
+        .width('100%')
+        .height(44)
+        .backgroundColor('#9B2C2C')
+        .onClick(() => {
+          this.tagText = (this.unsafeCallback as () => string)();
+        })
 
       Row({ space: 10 }) {
         Toggle({ type: ToggleType.Switch, isOn: this.switchOn })

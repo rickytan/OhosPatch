@@ -76,6 +76,7 @@ var originClick = panel.node({ type: 'Button', occurrence: 0 })
 - Use normal `function` syntax when a Component event patch needs `this`; it is bound to the current Component instance proxy.
 - Component event handlers receive only the original ArkUI event arguments; read and write component state through `this`.
 - `node.event(...)` returns the original ArkUI event callback proxy; call it with `origin.apply(this, arguments)` when the patch should preserve original event behavior.
+- Wrap `origin.apply(this, arguments)` in `try/catch` when the patch is intended to recover from an original ArkTS exception. OhosPatch converts that explicit origin-call exception into a JSVM `Error`; uncaught origin-call errors fall back to the original ArkTS behavior.
 - Do not generate `before`, `after`, `around`, route interception, V2 state, resource/controller values, ID/hierarchy selectors, or forced refresh logic.
 
 ## Runtime Reference

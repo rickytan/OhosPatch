@@ -110,6 +110,59 @@ bool NapiString(napi_env env, napi_value value, std::string *output)
     return true;
 }
 
+bool NapiValueToString(napi_env env, napi_value value, std::string *output)
+{
+    if (!value || !output) {
+        LogError("NapiValueToString received an invalid argument");
+        return false;
+    }
+    napi_value global = nullptr;
+    napi_value stringFunction = nullptr;
+    napi_value result = nullptr;
+    return NapiOk(env, napi_get_global(env, &global), "napi_get_global(String)") &&
+           NapiOk(env, napi_get_named_property(env, global, "String", &stringFunction),
+                  "napi_get_named_property(String)") &&
+           NapiOk(env, napi_call_function(env, global, stringFunction, 1, &value, &result),
+                  "napi_call_function(String)") &&
+           NapiString(env, result, output);
+}
+
+bool TakePendingNapiExceptionMessage(napi_env env, const char *fallback, std::string *output)
+{
+    if (!output) {
+        LogError("TakePendingNapiExceptionMessage received an invalid argument");
+        return false;
+    }
+    *output = fallback ? fallback : "ArkTS exception";
+
+    bool pending = false;
+    napi_status pendingStatus = napi_is_exception_pending(env, &pending);
+    if (pendingStatus != napi_ok) {
+        LogError("napi_is_exception_pending", static_cast<int>(pendingStatus));
+        return false;
+    }
+    if (!pending) {
+        return false;
+    }
+
+    napi_value exception = nullptr;
+    napi_status clearStatus = napi_get_and_clear_last_exception(env, &exception);
+    if (clearStatus != napi_ok || !exception) {
+        LogError("napi_get_and_clear_last_exception", static_cast<int>(clearStatus));
+        return false;
+    }
+
+    napi_value message = nullptr;
+    napi_valuetype messageType = napi_undefined;
+    if (napi_get_named_property(env, exception, "message", &message) == napi_ok &&
+        napi_typeof(env, message, &messageType) == napi_ok && messageType == napi_string &&
+        NapiString(env, message, output)) {
+        return true;
+    }
+
+    return NapiValueToString(env, exception, output);
+}
+
 bool NapiNamedString(napi_env env, napi_value object, const char *name, std::string *output)
 {
     napi_value value = nullptr;
@@ -192,7 +245,6 @@ struct ActiveInvocation {
     HookRecord *hook = nullptr;
     UiEventCallbackRecord *uiEvent = nullptr;
     napi_value receiver = nullptr;
-    bool originalExceptionPending = false;
     std::array<napi_value, kMaxProxyHandles> proxyValues{};
     size_t proxyValueCount = 0;
 };
@@ -451,12 +503,6 @@ class JsvmRuntime
         };
         JSVM_Value patchResult = nullptr;
         bool called = CallGlobal("__ohospatch_callPatch", patchArgs, std::size(patchArgs), &patchResult);
-        bool originalExceptionPending = activeInvocation_.originalExceptionPending;
-        if (originalExceptionPending) {
-            restoreInvocation();
-            closeScope();
-            return nullptr;
-        }
         if (!called) {
             restoreInvocation();
             closeScope();
@@ -1772,7 +1818,11 @@ class JsvmRuntime
         bool exceptionPending = false;
         if (!CallOriginal(active.env, active.hook, active.receiver, napiArgc, napiArgv.data(), &result,
                           &exceptionPending)) {
-            active.originalExceptionPending = exceptionPending;
+            if (exceptionPending) {
+                std::string message;
+                TakePendingNapiExceptionMessage(active.env, "Original ArkTS method threw an exception", &message);
+                return runtime->ProxyError(message.c_str());
+            }
             return runtime->ProxyError("Original ArkTS method call failed");
         }
         return runtime->ProxyNapiValue(active, result);
@@ -1820,10 +1870,16 @@ class JsvmRuntime
             }
         }
 
-        napi_value result =
-            CallOriginalUiEvent(active.env, active.uiEvent, active.receiver, napiArgc, napiArgv.data());
-        if (!result) {
-            return Undefined(env);
+        napi_value result = nullptr;
+        bool exceptionPending = false;
+        if (!CallOriginalUiEventForPatch(active.env, active.uiEvent, active.receiver, napiArgc, napiArgv.data(),
+                                         &result, &exceptionPending)) {
+            if (exceptionPending) {
+                std::string message;
+                TakePendingNapiExceptionMessage(active.env, "Original component event threw an exception", &message);
+                return runtime->ProxyError(message.c_str());
+            }
+            return runtime->ProxyError("Original component event call failed");
         }
         return runtime->ProxyNapiValue(active, result);
     }
@@ -2188,6 +2244,38 @@ class JsvmRuntime
             return NapiUndefined(env);
         }
         return result;
+    }
+
+    static bool CallOriginalUiEventForPatch(napi_env env, UiEventCallbackRecord *record, napi_value receiver,
+                                            size_t argc, const napi_value *argv, napi_value *result,
+                                            bool *exceptionPending)
+    {
+        if (exceptionPending) {
+            *exceptionPending = false;
+        }
+        if (!result) {
+            LogError("CallOriginalUiEventForPatch received an invalid result pointer");
+            return false;
+        }
+        *result = nullptr;
+        if (!record || !record->originalEvent) {
+            *result = NapiUndefined(env);
+            return true;
+        }
+        napi_value original = nullptr;
+        if (!NapiOk(env, napi_get_reference_value(env, record->originalEvent, &original),
+                    "napi_get_reference_value(original component event for patch)")) {
+            return false;
+        }
+        napi_status status = napi_call_function(env, receiver, original, argc, argv, result);
+        if (status == napi_pending_exception) {
+            LogError("Original component event callback produced a pending exception");
+            if (exceptionPending) {
+                *exceptionPending = true;
+            }
+            return false;
+        }
+        return NapiOk(env, status, "napi_call_function(original component event for patch)");
     }
 
     void ApplyUiValueRules(napi_env napiEnv, const std::string &targetKey, UiRuleKind kind, napi_value target)
@@ -2636,9 +2724,6 @@ class JsvmRuntime
             if (!NapiNamedString(napiEnv, spec, "nodeType", &rule->nodeType) ||
                 !NapiNamedUint32(napiEnv, spec, "occurrence", &rule->occurrence) ||
                 !NapiNamedString(napiEnv, spec, "attributeName", &rule->attributeName) ||
-                !NapiOk(napiEnv, napi_get_named_property(napiEnv, spec, "arguments", &arguments),
-                        "napi_get_named_property(component attribute arguments)") ||
-                !NapiJsonStringify(napiEnv, arguments, "[]", &rule->argumentsJson) ||
                 !NapiOk(napiEnv, napi_get_named_property(napiEnv, spec, "attrHandler", &attrHandler),
                         "napi_get_named_property(component attribute handler flag)") ||
                 !NapiOk(napiEnv, napi_get_value_bool(napiEnv, attrHandler, &hasAttrHandler),
@@ -2646,6 +2731,12 @@ class JsvmRuntime
                 return false;
             }
             rule->hasAttrHandler = hasAttrHandler;
+            if (!hasAttrHandler &&
+                (!NapiOk(napiEnv, napi_get_named_property(napiEnv, spec, "arguments", &arguments),
+                         "napi_get_named_property(component attribute arguments)") ||
+                 !NapiJsonStringify(napiEnv, arguments, "[]", &rule->argumentsJson))) {
+                return false;
+            }
         } else if (kind == "event") {
             rule->kind = UiRuleKind::EVENT;
             if (!NapiNamedString(napiEnv, spec, "nodeType", &rule->nodeType) ||

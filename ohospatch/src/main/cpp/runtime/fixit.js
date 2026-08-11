@@ -564,6 +564,9 @@
     rule.attributeName = name;
 
     if (typeof args[0] === 'function') {
+      if (args.length !== 1) {
+        throw new TypeError('Component attribute handler does not accept extra arguments');
+      }
       rule.attrHandler = true;
       registerUiRule(uniqueKey, rule, registry.uiAttrs, args[0]);
     } else {

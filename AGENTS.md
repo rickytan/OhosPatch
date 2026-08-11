@@ -25,7 +25,7 @@
 - C++ must never throw or catch exceptions. It is compiled with `-fno-exceptions`.
 - C++/JSVM/NAPI errors must be logged with error-level HiLog and must not terminate the process.
 - ArkTS and patch JavaScript may throw.
-- The original ArkTS exception must remain pending and must not be converted or swallowed by C++.
+- Plain fallback calls preserve the original ArkTS pending exception. Explicit Patch `origin.apply(...)` calls convert a pending ArkTS exception into a JSVM `Error` so patch JavaScript can catch and recover; if the JSVM error is not caught, OhosPatch falls back to the original ArkTS implementation and preserves original crash behavior.
 
 ## Current Runtime API
 

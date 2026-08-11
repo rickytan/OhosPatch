@@ -1,125 +1,165 @@
 # OhosPatch
 
-OhosPatch 是 [FIXiT](https://github.com/rickytan/FIXiT) 在 HarmonyOS/OpenHarmony 上的原型实现。宿主 APP 负责下载和验证 patch，再将完整 JavaScript 字符串或本地文件绝对路径交给 OhosPatch。OhosPatch 在独立 JSVM 中执行脚本，并通过 ArkTS 主 VM 的对象原型替换业务方法。业务类不需要继承基类、添加装饰器或调用补丁分发 API。
+OhosPatch 是面向 HarmonyOS/OpenHarmony 的 ArkTS 运行时热修复框架，灵感来自 iOS 的 [FIXiT](https://github.com/rickytan/FIXiT)。它把补丁脚本放在独立 JSVM 中执行，再通过 Native N-API 在 ArkTS 主 VM 中加载目标模块、替换类原型方法和声明式组件渲染入口。
+
+项目当前不是概念验证原型，而是一套可以按生产流程接入的 HAR 能力：宿主 APP 负责下载、验签、灰度、缓存和回滚，OhosPatch 只负责在运行时安装和清理 patch。业务类和业务组件不需要继承基类、加装饰器、注册类表或调用补丁分发 API。
+
+## 背景
+
+HarmonyOS 上的 ArkTS 应用发布后，常见问题包括：
+
+- 线上业务方法抛异常，例如 `undefined is not a function`、数组越界、空值访问。
+- 声明式组件参数、状态、属性或事件回调存在错误。
+- 已发布版本需要小范围止血，但重新发版和审核周期过长。
+
+在 iOS 上，FIXiT 可以依赖 JavaScriptCore 和 Objective-C runtime 动态替换方法。HarmonyOS 的情况不同：目前公开平台能力中没有一套面向 ArkTS 方法和 ArkUI 声明式组件的通用原生热修复方案，也没有类似 Objective-C runtime 的公开方法交换入口。OhosPatch 的目标是在不侵入业务代码的前提下，为 ArkTS 提供可控、可回滚、可观测的运行时 patch 能力。
+
+## 能力概览
+
+- 以 HAR 形式接入，产物是 `ohospatch.har`。
+- Patch 使用普通 JavaScript 编写，在独立 JSVM 中运行。
+- 支持实例方法、静态方法、原方法调用 `origin.apply(...)`。
+- Patch handler 中的 `this` 是当前 ArkTS 实例 Proxy，支持点语法读写多层属性和调用方法。
+- 支持 `Fixit.import(fullPath)` 动态导入其他 ArkTS 类，调用静态方法、构造实例、访问实例方法和属性。
+- 支持声明式 Component DSL：参数、状态、节点属性和同步事件回调。
+- 支持 `console` 到 HiLog、`setTimeout`、`setInterval`、`setImmediate`、`queueMicrotask`。
+- C++ 层以 `-fno-exceptions` 构建，不抛 C++ 异常；错误走 HiLog 并 fail closed。
+- `clear()` 可恢复原方法、清空 JS registry、释放引用并取消 timer。
 
 ## 工程结构
 
 ```text
 OhosPatch/
-├── skills/ohospatch/          # Codex/Claude Patch 编写 Skill 源码
-│   └── references/fixit.d.js  # Patch JS Context 的 JSDoc/IDE 声明
-├── scripts/install-skill.sh   # 用户级 Skill 安装脚本
-├── ohospatch/                 # 可复用 HAR 模块
+├── ohospatch/                 # 可复用 HAR 模块，所有 patch 能力都在这里
 │   ├── Index.ets              # HAR 对外 API
 │   └── src/main/
-│       ├── cpp/               # JSVM、NAPI、prototype hook
+│       ├── cpp/               # JSVM、N-API、Hook、ArkTS Proxy 桥
 │       │   └── runtime/       # 内置 Fixit JS runtime
-│       ├── ets/               # 字符串和本地文件执行 API
-│       └── module.json5       # 无权限、无启动任务的 HAR 清单
-├── entry/                     # Demo APP
+│       ├── ets/               # ArkTS 外观 API
+│       └── module.json5       # 无下载、无验签、无启动任务
+├── entry/                     # Demo APP，只负责演示宿主如何接入 HAR
 │   └── src/main/ets/
-│       ├── demo/              # 未侵入的业务类和验证场景
-│       ├── patch/             # 宿主下载、验签接入点和启动策略
-│       └── pages/             # 验证页面
-└── patch-server/              # 开发期 HTTP 服务，直接服务 rawfile 下的 patch.js
+│       ├── demo/              # 未侵入的业务类和组件
+│       ├── patch/             # 宿主下载、验签接入点和加载策略
+│       └── pages/             # 两级 Navigation Demo 页面
+├── patch-server/              # 开发期 HTTP patch 服务
+├── skills/ohospatch/          # Codex/Claude patch 编写 Skill
+├── scripts/                   # 设备测试和 Skill 安装脚本
+└── docs/images/               # README 效果图
 ```
 
-`ohospatch` 可以独立构建为 `ohospatch.har`。`entry` 没有 Native 或补丁实现源码，只通过 `file:../ohospatch` 依赖接入 HAR。
+`ohospatch` 不包含下载、签名验证、版本匹配、灰度、缓存或启动策略。这些都是宿主 APP 的生产发布系统职责。
 
-## 实现原理
+## 架构
 
-iOS FIXiT 同时依赖 JavaScriptCore 和 Objective-C runtime。JavaScriptCore 负责执行补丁，Objective-C runtime 负责动态替换方法。
+```mermaid
+flowchart LR
+  subgraph Host["宿主 APP"]
+    Loader["下载 / 验签 / 灰度 / 缓存"]
+    Business["ArkTS 业务类与 ArkUI 组件"]
+  end
 
-HarmonyOS 中，`OH_JSVM_CreateVM` 创建的独立 JSVM 与 ArkTS 主 VM 不共享对象堆和原型链。因此，直接在 JSVM 中修改 `DemoViewModel.prototype` 无法影响 ArkTS 业务对象。OhosPatch 使用两层运行时协作：
+  subgraph Har["ohospatch HAR"]
+    API["OhosPatch.executeScript / executeFile"]
+    Native["Native N-API Bridge"]
+    JSVM["独立 JSVM + Fixit Runtime"]
+  end
 
-1. 宿主将已验证的 JavaScript 字符串或本地绝对路径传给 HAR。
-2. HAR 的 Native 模块创建独立 JSVM 并执行 JavaScript。
-3. patch 注册目标类、模块、方法和 JS handler。
-4. Native 使用 `napi_load_module_with_info` 从 ArkTS 主 VM 加载目标模块；`Fixit.import()` 额外为导出的类建立持久 Proxy。
+  Loader --> API
+  API --> JSVM
+  JSVM --> Native
+  Native --> Business
+  Business --> Native
+  Native --> JSVM
+```
+
+方法 Hook 调用链：
+
+```mermaid
+sequenceDiagram
+  participant App as ArkTS 业务调用
+  participant Proto as 被替换的 prototype 方法
+  participant Native as OhosPatch N-API trampoline
+  participant VM as 独立 JSVM
+  participant Origin as 原 ArkTS 方法
+
+  App->>Proto: vm.crashIt()
+  Proto->>Native: trampoline(this, args)
+  Native->>VM: __ohospatch_call(...)
+  VM->>VM: handler.apply(thisProxy, args)
+  alt patch 调用原方法
+    VM->>Native: origin.apply(this, arguments)
+    Native->>Origin: napi_call_function(original)
+    Origin-->>Native: result / exception
+    Native-->>VM: result / throw into JS
+  end
+  VM-->>Native: patch result
+  Native-->>App: ArkTS result
+```
+
+声明式组件 Hook 调用链：
+
+```mermaid
+flowchart TD
+  A["Fixit.component(fullPath)"] --> B["Native 加载导出的 Component 类"]
+  B --> C["包装参数初始化和首次渲染入口"]
+  C --> D["包装 observeComponentCreation2 的节点 builder"]
+  D --> E["原 builder 创建 ArkUI 节点"]
+  E --> F["Patch 写入节点 attrs / event"]
+  F --> G["ArkUI 继续正常渲染"]
+```
+
+## 原理
+
+iOS FIXiT 同时依赖 JavaScriptCore 和 Objective-C runtime。HarmonyOS 上 `OH_JSVM_CreateVM` 创建的 JSVM 与 ArkTS 主 VM 不共享对象堆和原型链，因此在 JSVM 中直接改 `DemoViewModel.prototype` 不会影响 ArkTS 业务对象。
+
+OhosPatch 使用两层运行时协作：
+
+1. 宿主将已验证的完整 JavaScript 字符串或本地绝对路径传给 HAR。
+2. Native 模块创建独立 JSVM，先执行内置 `fixit.js`，再执行宿主 patch。
+3. Patch 通过 `Fixit.fix()`、`Fixit.component()` 和 `Fixit.import()` 注册目标。
+4. Native 使用 `napi_load_module_with_info` 在 ArkTS 主 VM 加载业务模块。
 5. 实例方法替换 `constructor.prototype[methodName]`，静态方法替换 `constructor[methodName]`。
-6. 原函数保存为 `napi_ref`，新函数使用 Native trampoline 转入 JSVM。
-7. 每次调用建立临时 ArkTS 对象句柄表，JSVM 中的 `this` 是 `Proxy`；属性读取、写入和方法调用同步转发到原 ArkTS 实例。
-8. JS 中调用 `origin.apply(...)` 时，通过保存的 `napi_ref` 回调原 ArkTS 方法，并保留对象返回值的身份。
-9. `clear()` 恢复原型上的原函数，并释放 Hook、组件和动态导入引用。
+6. 原方法以 `napi_ref` 保存，新方法进入 Native trampoline。
+7. JSVM handler 中的 `this` 是调用期 Proxy；属性读取、赋值、方法调用同步桥接到原 ArkTS 对象。
+8. `origin.apply(this, arguments)` 通过保存的 `napi_ref` 调回原方法。
+9. `clear()` 恢复原函数并释放 Hook、Component、动态导入对象和 timer。
 
-普通 public 方法调用会经过对象属性和原型查找，因此已创建的业务实例也会在替换后进入 patch。
+已创建的业务实例也会受影响，因为普通 public 方法调用会经过对象属性和原型查找。构造函数、私有实现、实例字段箭头函数和绕过属性查找的调用点不属于当前覆盖范围。
 
-声明式组件使用 API 20 状态管理 V1 适配器。Native 在目标组件原型上包装编译产物的参数初始化、首次渲染和节点创建入口；参数和状态在原渲染前转换，节点 builder 执行后再写入属性并注册事件回调。公开 DSL 不暴露这些编译器生成的方法名。
+## 生产接入模型
 
-## 内置 JS Runtime
+OhosPatch 在生产环境中只负责“执行已可信 patch”。建议宿主侧按下面流程接入：
 
-`ohospatch/src/main/cpp/runtime/fixit.js` 定义 `Fixit` 构造函数和 patch 常用全局函数。CMake 在构建 HAR 时将该文件嵌入 `libohospatch.so`；JSVM 创建后先执行内置 runtime，再执行宿主传入的 patch，因此宿主和 patch 都不需要单独加载它。
-
-内置 API：
-
-- `Fixit.fix(fullPath)`：解析目标类完整 OHM 源路径并创建 patch 对象。
-- `Fixit.component(fullPath)`：解析目标组件完整 OHM 源路径并创建声明式组件 patch 对象。
-- `Fixit.import(fullPath)`：同步导入 ArkTS 主 VM 中的导出类，支持静态调用、`new`、实例属性和实例方法。
-- `component.param(name)` / `component.state(name)`：转换或替换组件参数与状态。
-- `component.node({ type, occurrence })`：按 ArkUI 节点类型和同类型出现序号选择节点。
-- `node.attr(name, ...args)` / `node.attrs({...})`：覆盖节点属性。
-- `node.event(name, rule)`：替换节点事件并按需读取、更新组件状态。
-- `Fixit.registerTarget(className, descriptor)`：注册类名到 HarmonyOS 模块描述符的映射，使后续可以使用 `Fixit.fix('ClassName')`。
-- `instanceMethod(name, handler)` / `classMethod(name, handler)`：替换实例方法或静态方法，并返回原实现代理。
-- `require(fullPath)`：`Fixit.import(fullPath)` 的兼容别名，返回可调用、可构造的 ArkTS 类 Proxy。
-- `nil` / `Nil`、`isNil`、`nilToNull`、`nullToNil`。
-- `console.debug/log/info/warn/error`：输出到 HiLog 的 `OhosPatch` tag。
-- `setTimeout` / `clearTimeout`、`setInterval` / `clearInterval`、`setImmediate` / `clearImmediate`。
-- `queueMicrotask(callback)`：将回调加入 JSVM microtask 队列。
-
-### 编辑器补全
-
-`skills/ohospatch/references/fixit.d.js` 声明 Patch JS Context 中的 `Fixit`、动态导入类代理、目标描述符、原方法代理、Component DSL、事件上下文、`require`、nil helpers、timer、microtask 和 HiLog console API。Patch 文件首行按相对路径引用声明后，VS Code、WebStorm 等支持 JavaScript/JSDoc 的编辑器即可提供类型提示和自动补全：
-
-```js
-/// <reference path="./fixit.d.js" />
+```mermaid
+flowchart LR
+  A["启动或业务初始化"] --> B["读取本地缓存 patch"]
+  B --> C{"签名 / 版本 / 设备校验"}
+  C -- 通过 --> D["OhosPatch.executeScript"]
+  C -- 失败 --> E["丢弃并记录"]
+  A --> F["后台请求 patch 配置"]
+  F --> G["下载 patch"]
+  G --> H["验签、灰度、熔断、缓存"]
+  H --> D
+  D --> I{"hookCount > 0"}
+  I -- 是 --> J["记录版本和成功状态"]
+  I -- 否 --> K["回滚 / 禁用该 patch"]
 ```
 
-Hook API 直接接收完整路径；需要主动调用业务类时使用 `Fixit.import()`：
+宿主必须负责：
 
-```js
-var fix = Fixit.fix(
-  'com.rickytan.ohospatch/entry/src/main/ets/demo/DemoViewModel#DemoViewModel'
-);
-var Point = Fixit.import(
-  'com.rickytan.ohospatch/entry/src/main/ets/demo/Point#Point'
-);
-```
+- Patch 文件下载和 HTTPS 策略。
+- 非对称签名或等价安全校验。
+- App 版本、设备、系统版本、业务版本匹配。
+- 灰度发布、黑白名单、熔断和回滚。
+- Patch 缓存和清理。
+- 启动时机、超时控制和日志上报。
 
-声明文件只用于开发期语言服务，不需要下发给设备，也不能作为 Patch 执行。其 `@version` 应与 `Fixit.runtimeVersion` 保持一致。
+HAR 不声明网络权限，也不会把任何下载或签名逻辑放入 `ohospatch` 模块。
 
-仓库的 `skills/ohospatch/SKILL.md` 提供 Patch 编写与审查流程，并兼容 Codex 和 Claude Code。运行以下脚本会默认安装到两个工具的用户级 Skill 目录：
+## 接入方式
 
-```shell
-./scripts/install-skill.sh
-```
-
-也可以使用 `--codex` 或 `--claude` 只安装一个工具；已有安装需要更新时传入 `--force`。脚本分别支持 `CODEX_HOME` 和 `CLAUDE_HOME` 自定义配置根目录。安装后在 Codex 中使用 `$ohospatch`，在 Claude Code 中使用 `/ohospatch`。
-
-独立 JSVM 与 ArkTS 主 VM 不共享对象。`Fixit.fix(fullPath)` 和 `Fixit.component(fullPath)` 在 Runtime 内将路径解析成 Hook 描述符；安装 Hook 时，Native 根据描述符调用 `napi_load_module_with_info`，在主 ArkTS VM 中加载目标模块并取得导出的类。
-
-需要在 Patch 中主动使用其他业务类时，调用 `Fixit.import(fullPath)` 或其兼容别名 `require(fullPath)`。它返回同步的类 Proxy，可调用静态方法、通过 `new` 创建实例并继续用点语法访问实例属性和方法：
-
-```js
-var Point = Fixit.import(
-  'com.rickytan.ohospatch/entry/src/main/ets/demo/Point#Point'
-);
-var point = new Point(7, 9);
-console.info(Point.textOf(point));
-console.info(point.toText());
-```
-
-JavaScript 的 `import()` 是异步模块语法，不能覆写为普通全局函数，因此 Patch API 明确使用 `Fixit.import()`。导入的类和实例由 Native `napi_ref` 持有，在当前 Patch 生命周期内可用于同步 handler 或 timer，也可以作为属性值、方法参数和 Patch 返回值跨桥传递；`clear()` 或下一次 Patch 安装会使旧 Proxy 失效并释放引用。
-
-实例方法和静态方法的 handler 可以使用普通点语法访问原对象，包括多层属性、赋值和方法调用，例如 `this.profile.badge.text`、`this.profile.badge.text = 'fixed'` 和 `this.profile.badge.advance(1)`。嵌套对象不会被复制成 JSON 快照；Native 为其分配本次调用内的句柄，JSVM 返回对应 Proxy。Proxy 只能在当前同步 handler 或 `origin` 调用期间使用，不能保存到 timer、Promise 或全局变量后异步访问。普通参数仍按 JSON 值传入；Proxy 参数和 Proxy 返回值使用句柄 wire 格式保留原 ArkTS 对象身份。
-
-Timer callback 和参数保存在 JSVM 内，Native 仅通过宿主 N-API 的 libuv event loop 调度 timer ID。`clear()`、下一次 `executeScript` 替换 patch 或 JSVM 重置时都会取消旧 timer，避免旧 patch 的异步任务继续执行。
-
-Native 使用 `-fno-exceptions` 构建，不使用 C++ `throw/catch`。JSVM/NAPI 桥接失败会输出 `OhosPatch` error 级别 HiLog；patch 执行失败时回退原 ArkTS 方法，Hook 安装失败时回滚已安装的方法，`executeScript` 返回 `0`。参数校验、文件读取及业务原方法自身的异常仍保留在 ArkTS 层，其中原方法异常不会在 C++ 中捕获或转换。
-
-## HAR 接入
-
-Demo APP 的模块依赖：
+Demo 的 `entry/oh-package.json5` 使用本地 HAR 依赖：
 
 ```json5
 {
@@ -129,9 +169,7 @@ Demo APP 的模块依赖：
 }
 ```
 
-HAR 不声明 `ohos.permission.INTERNET`，不包含 HTTP 客户端、签名实现、patch URL、缓存或 AppStartup 任务。宿主根据自己的发布系统和启动策略完成这些工作。
-
-执行完整 patch 字符串：
+业务代码不需要任何改动。宿主只在自己的 patch 管理代码里调用：
 
 ```ts
 import { OhosPatch } from '@rickytan/ohospatch';
@@ -139,67 +177,86 @@ import { OhosPatch } from '@rickytan/ohospatch';
 const hookCount = OhosPatch.executeScript(verifiedPatchScript);
 ```
 
-执行本地 patch 文件：
+或者执行已下载到本地的完整文件路径：
 
 ```ts
 const hookCount = OhosPatch.executeFile(absolutePatchPath);
 ```
 
-`executeFile` 只接受完整绝对路径，由 HAR 使用 `fileIo.readTextSync` 读取后执行。路径来源、文件权限、下载和签名验证仍由宿主负责。
+`executeFile` 只读取绝对路径文件并执行；路径来源、文件权限、验签和缓存策略仍由宿主控制。
 
-Demo APP 在首屏通过按钮从 `patch-server` 下载脚本，并在交给 OhosPatch 前保留宿主验签位置。网络权限和 patch URL 都位于 `entry`；业务类 `DemoViewModel`、`PatchablePanel` 和业务调用代码不引用 OhosPatch。
+清除当前 patch：
 
-## Patch 格式
+```ts
+OhosPatch.clear();
+```
 
-跨模块 Hook 直接传入包含 `bundleName/moduleName` 和目标 package 路径的完整 OHM 源路径：
+`executeScript` 返回已安装的普通方法 hook 数量。Component rule 主要在后续渲染阶段生效，生产侧不应只用 hook 数量判断业务效果，建议同时记录 patch 版本和运行时日志。
+
+## Patch 编写
+
+Patch 脚本可以引用声明文件获得 IDE 补全：
+
+```js
+/// <reference path="./fixit.d.js" />
+```
+
+### 修复实例方法
 
 ```js
 var fix = Fixit.fix(
-  'com.rickytan.ohospatch/entry/src/main/ets/demo/DemoViewModel#DemoViewModel'
+  'com.example.app/entry/src/main/ets/model/DemoViewModel#DemoViewModel'
 );
 
 var origin = fix.instanceMethod('locationOf', function (locations, index, fallback) {
   if (index < 0 || index >= locations.length) {
     this.profile.badge.text = 'out of bounds';
     this.profile.badge.advance(10);
-    this.buttonTitle = this.profile.summary();
     return fallback;
   }
   return origin.apply(this, arguments);
 });
-
-fix.classMethod('crash', function () {
-  return 'fixed';
-});
 ```
 
-需要主动调用类时使用 `Fixit.import()`；`require()` 是它的兼容别名：
+### 修复 `undefined is not a function`
+
+Demo 中第二屏的 `Unsafe onClick crash` 是一个普通 ArkUI `Button().onClick` 回调。未加载 patch 时点击会在 onClick 内直接调用未定义 callback，并触发 `undefined is not a function` 类错误；加载 patch 后，OhosPatch 用 Component event DSL 替换这个 Button 的 `onClick`，在回调最外层加 `try/catch`，并在 `try` 中调用原始事件回调。这样 patch 的性质和实例方法修复一致：包住原方法，捕获原始实现中的异常，再写回组件状态：
+
+```js
+var originUnsafeClick = panel.node({ type: 'Button', occurrence: 2 })
+  .event('onClick', function () {
+    try {
+      return originUnsafeClick.apply(this, arguments);
+    } catch (err) {
+      var message = err && err.message ? err.message : String(err);
+      this.tagText = 'Recovered Button.onClick crash: ' + message;
+      this.statusText = 'Patched Button.onClick recovered';
+    }
+  });
+```
+
+注意：OhosPatch 只会在 patch 显式调用 `origin.apply(this, arguments)` 时，把原 ArkTS pending exception 转成 JSVM 中可捕获的 `Error`。如果 handler 没有 catch，调用会回退到原 ArkTS 实现并继续保留原始异常行为。
+
+### 修复静态方法并导入其他类
 
 ```js
 var Point = Fixit.import(
-  'com.rickytan.ohospatch/entry/src/main/ets/demo/Point#Point'
+  'com.example.app/entry/src/main/ets/model/Point#Point'
 );
-var point = new Point(7, 9);
-var text = Point.textOf(point) + ' / ' + point.toText();
+
+fix.classMethod('crash', function () {
+  var point = new Point(7, 9);
+  return Point.textOf(point) + ' / ' + point.toText();
+});
 ```
 
-完整路径格式为 `bundleName/moduleName/[packageName/]src/main/ets/File#ExportName`，也接受 `@bundle:` 前缀和 `.ets` / `.ts` 后缀。启用 `useNormalizedOHMUrl` 且 `oh-package.json5` 的 `name` 与 `moduleName` 不同时，需要提供 `packageName`；两者相同时可省略。`ExportName` 省略时默认使用文件名。以上示例自动解析为：
+`require(fullPath)` 是 `Fixit.import(fullPath)` 的兼容别名。
 
-```text
-modulePath = entry/src/main/ets/demo/DemoViewModel
-moduleInfo = com.rickytan.ohospatch/entry
-exportName = DemoViewModel
-```
-
-演示补丁位于 `entry/src/main/resources/rawfile/patch.js`，同时作为网络加载失败的内置兜底打入 HAP；`patch-server` 通过 HTTP 直接服务该文件，不单独维护副本。
-
-### 声明式组件 DSL
-
-目标必须是业务模块导出的 API 20 状态管理 V1 自定义组件。业务组件本身不引用 OhosPatch，也不需要基类、装饰器或转发代码：
+### 修复声明式组件
 
 ```js
 var panel = Fixit.component(
-  'com.rickytan.ohospatch/entry/src/main/ets/demo/PatchablePanel#PatchablePanel'
+  'com.example.app/entry/src/main/ets/components/PatchablePanel#PatchablePanel'
 );
 
 panel.param('message').replace('Patched component parameter');
@@ -216,7 +273,89 @@ var originClick = panel.node({ type: 'Button', occurrence: 0 })
   });
 ```
 
-`occurrence` 从 `0` 开始，只在同一目标组件、同一节点类型内计数。属性参数必须可 JSON 序列化。事件 patch 使用 `event(name, handler)` 替换同步节点事件回调；handler 只接收 ArkUI 原始事件参数。`event()` 返回原 ArkUI 事件回调，普通 `function` handler 的 `this` 是当前 Component 实例的同步 Proxy，可用点语法读写实例属性和调用实例方法；箭头函数仍遵循 JS 词法 `this` 规则。`originClick.apply(this, arguments)` 会把原始事件参数传给业务回调。patch handler 不存在或执行失败时，已安装的事件 trampoline 会回调原业务事件。
+Component DSL 当前支持 API 20 状态管理 V1 导出的自定义组件。`event(name, handler)` 是同步事件替换；handler 只接收 ArkUI 原始事件参数，普通 `function` 的 `this` 指向当前 Component 实例 Proxy。
+
+## 内置 JS Runtime
+
+`ohospatch/src/main/cpp/runtime/fixit.js` 会在构建 HAR 时嵌入 `libohospatch.so`。JSVM 创建后先执行内置 runtime，再执行宿主 patch。
+
+内置 API：
+
+- `Fixit.fix(fullPath)`
+- `Fixit.component(fullPath)`
+- `Fixit.import(fullPath)`
+- `Fixit.registerTarget(className, descriptor)`
+- `instanceMethod(name, handler)` / `classMethod(name, handler)`
+- `component.param(name)` / `component.state(name)`
+- `component.node(selector).attr(...)` / `.attrs(...)` / `.event(...)`
+- `require(fullPath)`
+- `nil` / `Nil`、`isNil`、`nilToNull`、`nullToNil`
+- `console.debug/log/info/warn/error`
+- `setTimeout` / `clearTimeout`
+- `setInterval` / `clearInterval`
+- `setImmediate` / `clearImmediate`
+- `queueMicrotask(callback)`
+
+`console.*` 会桥接到 HiLog 的 `OhosPatch` tag。
+
+## IDE 和 AI Patch 编写
+
+声明文件位于：
+
+```text
+skills/ohospatch/references/fixit.d.js
+```
+
+它只用于开发期语言服务，不需要下发到设备。其 `@version` 必须与 `Fixit.runtimeVersion` 保持一致。
+
+仓库内置 `ohospatch` Skill，方便 Codex 和 Claude Code 按当前 runtime 约束生成 patch：
+
+```bash
+./scripts/install-skill.sh
+```
+
+安装后：
+
+- Codex 中使用 `$ohospatch`
+- Claude Code 中使用 `/ohospatch`
+
+## Demo 效果
+
+Demo APP 是两级 Navigation：
+
+1. 第一屏：`Load patch`、`Clear patch`、进入 patch target screen。
+2. 第二屏：展示 Component 参数/状态/属性/事件、普通方法 hook、静态方法 hook、`Fixit.import()`、timer，以及一个会触发 `undefined is not a function` 的按钮。
+
+Patch 前：
+
+![Demo before patch](docs/images/demo-before.png)
+
+Patch 后：
+
+![Demo after patch](docs/images/demo-after.png)
+
+启动本地 patch 服务：
+
+```bash
+node patch-server/server.mjs
+```
+
+设备或模拟器通过 HDC 反向连接本机服务：
+
+```bash
+hdc rport tcp:8080 tcp:8080
+```
+
+验证流程：
+
+1. 安装并启动 Demo。
+2. 进入第二屏，观察原始组件参数、状态和按钮样式。
+3. 未加载 patch 时点击 `Unsafe onClick crash`，会触发未定义函数调用错误。
+4. 返回第一屏，点击 `Load patch`。
+5. 再进入第二屏，观察参数、状态、Text/Button 属性、Button/Toggle 回调均被 patch 影响。
+6. 点击 `Unsafe onClick crash`，页面不会崩溃，`tag=` 文本显示 `Recovered Button.onClick crash: ...`。
+7. 等待 100 ms 后点击 `Run method hook scenario`，结果中应包含 `timer=fired`，HiLog 中会出现 `OhosPatch setTimeout callback fired`。
+8. 点击 `Clear patch` 后重新进入第二屏，恢复原始行为。
 
 ## 构建
 
@@ -240,47 +379,60 @@ ohospatch/build/default/outputs/default/ohospatch.har
   --mode module -p module=entry assembleHap --no-daemon
 ```
 
+运行真实设备/模拟器测试：
+
+```bash
+npm test
+```
+
+`npm test` 会构建 Demo HAP 和 `entry@ohosTest` HAP，安装到已连接设备并通过鸿蒙自带测试框架执行行为测试。
+
 ## GitHub Actions
 
-`.github/workflows/harmonyos-build.yml` 提供两级 CI：
+`.github/workflows/harmonyos-build.yml`：
 
-- 本地 `npm test` 会在已连接的鸿蒙模拟器/设备上构建、安装并执行 `entry@ohosTest`，测试 OhosPatch 在真实 JSVM/N-API/ArkTS 环境下的入参和出参行为。
-- 手动运行 `HarmonyOS CI` workflow 时，在自托管 macOS ARM64 runner 上构建 HAR 和未签名 HAP，并上传为保留 14 天的 artifact。
-- 设置仓库变量 `HARMONYOS_CI_ENABLED=true` 后，`main` 分支每次 push 也会自动打包。pull request 不会执行自托管打包任务。
-- CI 不再执行 Node VM runtime 测试；无设备的 runner 只做打包和二进制异常符号检查。
+- 手动运行或 `main` 分支 push 且 `HARMONYOS_CI_ENABLED=true` 时，在自托管 macOS ARM64 runner 上构建 HAR 和未签名 HAP。
+- 使用 GitHub Environment `ohpm` 读取环境级变量。
+- 上传未签名 HAR/HAP artifact。
+- 检查 `libohospatch.so` 是否含 C++ exception 相关符号。
 
-打包 runner 需要注册 `self-hosted`、`macOS`、`ARM64`、`harmonyos` 标签，GitHub Actions Runner 版本不低于 `2.327.1`，并预装 DevEco Studio、Command Line Tools 和 OpenHarmony API 20 SDK。默认从以下位置查找工具：
+`.github/workflows/ohpm-publish.yml`：
+
+- tag `v*` 触发。
+- 校验 tag 与 `ohospatch/oh-package.json5` 版本一致。
+- 使用 GitHub Environment `ohpm` 中的发布凭证和 registry 配置。
+- 构建 HAR 并执行 `ohpm publish`。
+
+自托管 runner 需要标签：
+
+```text
+self-hosted, macOS, ARM64, harmonyos
+```
+
+默认工具路径：
 
 ```text
 /Applications/DevEco-Studio.app/Contents
 $HOME/Library/OpenHarmony/Sdk
 ```
 
-路径不同时，通过仓库变量 `DEVECO_STUDIO_HOME` 和 `OHOS_BASE_SDK_HOME` 覆盖。当前工程没有签名配置，因此 CI 产出的 HAP 仅用于编译验证；发布包仍需在受控环境注入证书与 Profile。
-
-## Demo 验证
-
-启动动态 patch 服务：
-
-```bash
-node patch-server/server.mjs
-```
-
-设备或模拟器通过 HDC 反向连接本机服务：
-
-```bash
-hdc rport tcp:8080 tcp:8080
-```
-
-安装并启动 Demo 后，第一屏提供 `Load patch`、`Clear patch` 和进入第二屏的按钮。先进入第二屏可看到原始组件参数、状态、按钮、Toggle、Slider 以及异常方法结果；返回第一屏点击 `Load patch` 后再次进入第二屏，应看到组件参数、多个状态初值、Text/Button 属性、Button/Toggle 回调、实例方法、静态方法、`Fixit.import()` 和 `setTimeout` 均被 patch 影响。点击 `Clear patch` 后重新进入第二屏，应恢复原始行为。远程 patch 还会执行 `setTimeout`；等待 100 ms 后点击第二屏的 `Run method hook scenario`，实例方法结果应包含 `timer=fired`，HiLog 应出现 `OhosPatch setTimeout callback fired`。
+路径不同时，通过环境或仓库变量 `DEVECO_STUDIO_HOME`、`OHOS_BASE_SDK_HOME` 覆盖。
 
 ## 当前边界
 
-- prototype hook 不覆盖构造函数、实例字段形式的箭头函数、私有实现或不经过属性查找的调用点。
-- Patch handler 的 `this` 通过调用期 Proxy 桥接，可保留原实例、嵌套对象、方法和循环对象身份，但不可跨越当前同步调用生命周期。`Fixit.import()` 返回的持久 Proxy 可保留到 Patch 被清理或替换，并支持静态调用、构造和实例调用；普通方法参数及新建 JS 对象仍受 JSON wire 类型限制。
-- 声明式组件 DSL 首版只支持 API 20 状态管理 V1、业务模块导出的自定义组件、`type + occurrence` 节点选择器、JSON 属性参数和同步事件替换。
-- 非导出的 `@Entry` 页面、状态管理 V2、层级/ID 选择器、资源与控制器类型、已挂载组件的主动刷新，以及 `before/after/around` 事件组合尚未支持。
-- 单个 runtime 最多同时存在 256 个 timer；`setInterval(..., 0)` 会按 1 ms 调度。
-- 单个 Patch 最多保留 512 个去重后的动态导入类、实例、方法或嵌套对象句柄。
-- 生产宿主必须在调用 HAR 前完成非对称签名校验、版本和设备匹配、灰度、缓存、回滚、超时与熔断。
-- HAR 不决定下载方式和启动时机，宿主可以在 AppStartup、业务初始化或其他受控阶段调用。
+- prototype hook 不覆盖构造函数、实例字段箭头函数、私有实现或不经过属性查找的调用点。
+- Patch handler 的 `this` Proxy 只在当前同步调用或 `origin` 调用期间有效，不应保存到 timer、Promise 或全局变量后异步访问。
+- `Fixit.import()` 返回的持久 Proxy 可保留到 `OhosPatch.clear()` 或下一次 patch 替换。
+- 普通方法参数和新建 JS 对象仍受 JSON wire 类型限制。
+- Component DSL 当前支持 API 20 状态管理 V1、导出的自定义组件、`type + occurrence` 节点选择器、JSON 属性参数和同步事件替换。
+- 非导出的 `@Entry` 页面、状态管理 V2、层级/ID 选择器、资源与控制器类型、已挂载组件主动刷新，以及 `before/after/around` 事件组合尚未支持。
+- 单个 runtime 最多同时存在 256 个 timer。
+- 单个 patch 最多保留 512 个去重后的动态导入类、实例、方法或嵌套对象句柄。
+
+## 安全和稳定性
+
+- 生产宿主必须在调用 HAR 前完成签名校验、版本匹配、灰度、缓存、回滚、超时和熔断。
+- C++ 层不抛异常；JSVM/N-API 错误会记录 error 级 HiLog 并 fail closed。
+- Patch 安装失败会回滚已安装 hook。
+- Patch handler 失败时会回退原 ArkTS 方法或返回安全结果，具体取决于 hook 类型。
+- `clear()` 会恢复原方法并释放 patch 生命周期内的引用。

@@ -92,7 +92,8 @@
  *   ...args: OhosPatchJsonValue[]) => OhosPatchComponentNodeFix} attr
  *   Override one node attribute. When `value` is a function it is invoked with `this` bound to the
  *   current component instance on each render and its return value is applied as the single attribute
- *   argument; otherwise the JSON arguments are applied verbatim. At least one argument is required.
+ *   argument; extra arguments are rejected in handler mode. Otherwise the JSON arguments are applied
+ *   verbatim. At least one argument is required.
  * @property {(attributes: Record<string, OhosPatchJsonValue | OhosPatchAttrHandler>) =>
  *   OhosPatchComponentNodeFix} attrs
  *   Override multiple single-argument attributes. Each value may be a JSON value or a resolver function.

@@ -69,9 +69,13 @@ export default function fixitTest(): void {
         Fixit.fix('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/DemoViewModel#DemoViewModel')
           .classMethod('crash', function () {
             var direct = Fixit.component('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/PatchablePanel#PatchablePanel')
-              .node({ type: 'Button', occurrence: 0 })
+              .node({ type: 'Button', occurrence: 2 })
               .event('onClick', function () {
-                this.tapCount = this.tapCount + 1;
+                try {
+                  return direct.apply(this, arguments);
+                } catch (err) {
+                  this.tagText = 'component-event-recovered';
+                }
               });
             var objectRuleRejected = false;
             try {
@@ -85,11 +89,19 @@ export default function fixitTest(): void {
             } catch (err) {
               objectRuleRejected = err instanceof TypeError;
             }
-            return typeof direct + '|' + objectRuleRejected;
+            var attrExtraRejected = false;
+            try {
+              Fixit.component('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/PatchablePanel#PatchablePanel')
+                .node({ type: 'Text', occurrence: 0 })
+                .attr('fontColor', function () { return '#C44736'; }, 'extra');
+            } catch (err) {
+              attrExtraRejected = err instanceof TypeError;
+            }
+            return typeof direct + '|' + objectRuleRejected + '|' + attrExtraRejected;
           });
       `;
       expect(OhosPatch.executeScript(script)).assertLarger(0);
-      expect(DemoViewModel.crash()).assertEqual('function|true');
+      expect(DemoViewModel.crash()).assertEqual('function|true|true');
     });
 
     it('invalid full path input fails closed and later valid input still works', 0, () => {
@@ -141,6 +153,26 @@ export default function fixitTest(): void {
       // In bounds: origin.apply delegates to the original method.
       const hit = vm.locationOf(points, 0, fallback);
       expect(hit.x).assertEqual(1);
+    });
+
+    it('patched method can catch an exception thrown by origin.apply', 0, () => {
+      const script = `
+        var origin = Fixit.fix('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/DemoViewModel#DemoViewModel')
+          .instanceMethod('crashIt', function () {
+            try {
+              return origin.apply(this, arguments);
+            } catch (err) {
+              var message = err && err.message ? err.message : String(err);
+              this.buttonTitle = message;
+              return 'origin-caught:' + message;
+            }
+          });
+      `;
+      OhosPatch.executeScript(script);
+
+      const vm = new DemoViewModel();
+      expect(vm.crashIt()).assertEqual('origin-caught:instance crash');
+      expect(vm.buttonTitle).assertEqual('instance crash');
     });
 
     it('patched method can mutate this properties (nested proxy access)', 0, () => {
