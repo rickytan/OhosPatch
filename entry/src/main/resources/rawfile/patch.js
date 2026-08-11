@@ -40,8 +40,11 @@
   }, 60);
 
   // --- Component value override: param / state ---
-  panel.param('message').replace('Patched component parameter');
-  panel.param('subtitle').replace('Patched subtitle from remote JavaScript');
+  panel.param('message', 'Patched component parameter');
+  panel.param('subtitle', function (originValue) {
+    this.tagText = 'Original subtitle: ' + originValue;
+    return 'Patched subtitle from remote JavaScript';
+  });
   panel.state('tapCount', function (value) {
     return value === 0 ? 40 : value;
   });
@@ -115,8 +118,18 @@
       return originToggleChange.apply(this, arguments);
     });
 
+  // Slider.onChange 有 value、mode 两个参数；handler 按原顺序接收，arguments 原样转发给原回调。
+  var originSliderChange = panel.node({ type: 'Slider', occurrence: 0 })
+    .event('onChange', /** @this {any} */ function (value, mode) {
+      this.tagText = 'Patched slider value=' + value + ', mode=' + mode;
+      return originSliderChange.apply(this, arguments);
+    });
+
   // --- ComponentV2: 与 ComponentV1 使用相同 DSL ---
-  panelV2.param('message').replace('Patched V2 component parameter');
+  panelV2.param('message', function (originValue) {
+    this.statusText = 'V2 param handler received ' + originValue;
+    return 'Patched V2 component parameter';
+  });
   panelV2.state('tapCount', function (originValue) {
     this.statusText = 'V2 state handler received ' + originValue;
     return 100;

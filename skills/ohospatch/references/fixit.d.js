@@ -8,7 +8,7 @@
  *
  *   /// <reference path="./fixit.d.js" />
  *
- * @version 1.9.0
+ * @version 1.10.0
  */
 
 /**
@@ -64,7 +64,7 @@
 /**
  * @callback OhosPatchComponentEventHandler
  * @this {any} Synchronous Proxy for the current declarative Component instance.
- * @param {...any} args Original ArkUI event arguments.
+ * @param {...any} args JSON-serializable snapshots of the original ArkUI event arguments, in order.
  * @returns {any}
  */
 
@@ -75,16 +75,10 @@
  */
 
 /**
- * @typedef {Object} OhosPatchComponentValueFix
- * @property {(handler: (value: any) => any) => OhosPatchComponentFix} transform Transform the incoming value.
- * @property {(value: OhosPatchJsonValue) => OhosPatchComponentFix} replace Replace with a JSON value.
- */
-
-/**
- * @callback OhosPatchComponentStateHandler
+ * @callback OhosPatchComponentValueHandler
  * @this {any} Synchronous Proxy for the current declarative Component instance.
- * @param {any} originValue Current state value before replacement.
- * @returns {any} Replacement state value.
+ * @param {any} originValue Current parameter or state value before replacement.
+ * @returns {any} Replacement parameter or state value.
  */
 
 /**
@@ -111,10 +105,12 @@
 /**
  * @typedef {Object} OhosPatchComponentFix
  * @property {OhosPatchTarget} target
- * @property {(propertyName: string) => OhosPatchComponentValueFix} param Patch an incoming parameter.
- * @property {(propertyName: string, replacement: OhosPatchJsonValue | OhosPatchComponentStateHandler) =>
+ * @property {(propertyName: string, replacement: OhosPatchJsonValue | OhosPatchComponentValueHandler) =>
+ *   OhosPatchComponentFix} param Replace an incoming parameter with a JSON value or derive it from the current value.
+ * @property {(propertyName: string, replacement: OhosPatchJsonValue | OhosPatchComponentValueHandler) =>
  *   OhosPatchComponentFix} state Replace observable state with a JSON value or derive it from the current value.
- * @property {(selector: string | OhosPatchNodeSelector) => OhosPatchComponentNodeFix} node Select an ArkUI node.
+ * @property {(selector: string | OhosPatchNodeSelector) => OhosPatchComponentNodeFix} node Select an ArkUI node by
+ *   built-in type and zero-based occurrence within the target component render.
  */
 
 /** Registers method replacements for one exported ArkTS class. */
@@ -130,7 +126,7 @@ class Fixit {
   }
 
   /** @readonly @type {string} */
-  static runtimeVersion = '1.9.0';
+  static runtimeVersion = '1.10.0';
 
   /**
    * @param {string | OhosPatchTarget} target Full OHM class path, registered alias, or target descriptor.

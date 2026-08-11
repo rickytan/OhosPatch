@@ -606,8 +606,14 @@
     return makeUiEventOrigin();
   };
 
-  ComponentFix.prototype.param = function (propertyName) {
-    return new ComponentValueFix(this, 'param', propertyName);
+  ComponentFix.prototype.param = function (propertyName, replacement) {
+    if (arguments.length !== 2) {
+      throw new TypeError('Component parameter requires a property name and replacement value or handler');
+    }
+    var paramFix = new ComponentValueFix(this, 'param', propertyName);
+    return typeof replacement === 'function'
+      ? paramFix.transform(replacement)
+      : paramFix.replace(replacement);
   };
 
   ComponentFix.prototype.state = function (propertyName, replacement) {
@@ -659,7 +665,7 @@
   };
 
   Object.defineProperty(Fixit, 'runtimeVersion', {
-    value: '1.9.0',
+    value: '1.10.0',
     enumerable: true
   });
 

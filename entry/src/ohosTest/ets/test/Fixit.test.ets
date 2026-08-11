@@ -63,10 +63,10 @@ export default function fixitTest(): void {
           });
       `;
       OhosPatch.executeScript(script);
-      expect(DemoViewModel.crash()).assertEqual('1.9.0|function|true|true|undefined|undefined|true|true|false|true|x|true');
+      expect(DemoViewModel.crash()).assertEqual('1.10.0|function|true|true|undefined|undefined|true|true|false|true|x|true');
     });
 
-    it('component event patch accepts direct handler syntax only', 0, () => {
+    it('component DSL rejects removed value chains and unsupported event rules', 0, () => {
       const script = `
         Fixit.fix('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/DemoViewModel#DemoViewModel')
           .classMethod('crash', function () {
@@ -106,11 +106,19 @@ export default function fixitTest(): void {
             } catch (err) {
               legacyStateRejected = err instanceof TypeError;
             }
-            return typeof direct + '|' + objectRuleRejected + '|' + attrExtraRejected + '|' + legacyStateRejected;
+            var legacyParamRejected = false;
+            try {
+              Fixit.component('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/PatchablePanel#PatchablePanel')
+                .param('message').replace('legacy');
+            } catch (err) {
+              legacyParamRejected = err instanceof TypeError;
+            }
+            return typeof direct + '|' + objectRuleRejected + '|' + attrExtraRejected + '|' +
+              legacyStateRejected + '|' + legacyParamRejected;
           });
       `;
       expect(OhosPatch.executeScript(script)).assertLarger(0);
-      expect(DemoViewModel.crash()).assertEqual('function|true|true|true');
+      expect(DemoViewModel.crash()).assertEqual('function|true|true|true|true');
     });
 
     it('ComponentV2 supports param state node and event DSL behavior', 0, async () => {
@@ -130,7 +138,9 @@ export default function fixitTest(): void {
         var component = Fixit.component(
           'com.rickytan.ohospatch/entry/src/main/ets/demo/PatchablePanelV2#PatchablePanelV2'
         );
-        component.param('message').replace('Patched V2 test parameter');
+        component.param('message', function (originValue) {
+          return 'Patched V2 test parameter, origin=' + originValue + ', count=' + this.tapCount;
+        });
         component.state('tapCount', function (originValue) {
           this.statusText = 'Patched V2 state callback, origin=' + originValue;
           return originValue + 100;
@@ -148,7 +158,9 @@ export default function fixitTest(): void {
       expect(OhosPatch.executeScript(script)).assertLarger(0);
       await openButton.click();
 
-      const parameter = await driver.waitForComponent(ON.text('Patched V2 test parameter'), 5000);
+      const parameter = await driver.waitForComponent(
+        ON.text('Patched V2 test parameter, origin=Original V2 component parameter, count=0'), 5000
+      );
       expect(parameter !== undefined).assertTrue();
       const initialState = await driver.waitForComponent(ON.text('tapCount=100'), 5000);
       expect(initialState !== undefined).assertTrue();

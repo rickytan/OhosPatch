@@ -58,7 +58,7 @@ var panel = Fixit.component(
   'com.example.app/entry/src/main/ets/components/Panel#Panel'
 );
 
-panel.param('title').replace('fixed');
+panel.param('title', 'fixed');
 panel.state('count', function (originValue) {
   this.status = 'state patched';
   return originValue < 0 ? 0 : originValue;
@@ -72,12 +72,11 @@ var originClick = panel.node({ type: 'Button', occurrence: 0 })
 ```
 
 - Target an exported custom component.
-- Register state replacement directly with `state(name, value)` or `state(name, function (originValue) { ... })`. The function form receives the original value and binds `this` to the current Component instance Proxy. Do not use the removed `state(name).replace/transform` chain.
-- Select nodes only by built-in type plus zero-based occurrence.
+- Register parameter and state replacements directly with `param/state(name, value)` or `param/state(name, function (originValue) { ... })`. The function form receives the original value and binds `this` to the current Component instance Proxy. Do not use the removed `param/state(name).replace/transform` chains.
+- Select nodes only by a built-in type string (first occurrence) or `{ type, occurrence }`, where occurrence is zero-based within that type.
 - Keep attribute arguments and replacement values JSON-serializable.
 - Use normal `function` syntax when a Component event patch needs `this`; it is bound to the current Component instance proxy.
-- Component event handlers receive only the original ArkUI event arguments; read and write component state through `this`.
-- `node.event(...)` returns the original ArkUI event callback proxy; call it with `origin.apply(this, arguments)` when the patch should preserve original event behavior.
+- Event handlers receive every JSON-serializable ArkUI event argument in order. `node.event(...)` returns the original callback proxy; call it with `origin.apply(this, arguments)` to forward all arguments and preserve original behavior.
 - Wrap `origin.apply(this, arguments)` in `try/catch` when the patch is intended to recover from an original ArkTS exception. OhosPatch converts that explicit origin-call exception into a JSVM `Error`; uncaught origin-call errors fall back to the original ArkTS behavior.
 - For ComponentV2, `param()` targets `@Param` and `state()` targets observable instance state such as `@Local`; OhosPatch selects the V1/V2 adapter automatically.
 - Do not generate `before`, `after`, `around`, route interception, resource/controller values, ID/hierarchy selectors, or forced refresh logic.
