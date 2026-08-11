@@ -13,3 +13,4 @@ oh_modules/
 .clang-tidy
 .clangd
 oh-package-lock.json5
+.test

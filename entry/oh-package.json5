@@ -5,5 +5,8 @@
   "main": "Index.ets",
   "dependencies": {
     "@rickytan/ohospatch": "file:../ohospatch"
+  },
+  "devDependencies": {
+    "@ohos/hypium": "1.0.6"
   }
 }

@@ -25,7 +25,7 @@
 - C++ must never throw or catch exceptions. It is compiled with `-fno-exceptions`.
 - C++/JSVM/NAPI errors must be logged with error-level HiLog and must not terminate the process.
 - ArkTS and patch JavaScript may throw.
-- The original ArkTS exception must remain pending and must not be converted or swallowed by C++.
+- Plain fallback calls preserve the original ArkTS pending exception. Explicit Patch `origin.apply(...)` calls convert a pending ArkTS exception into a JSVM `Error` so patch JavaScript can catch and recover; if the JSVM error is not caught, OhosPatch falls back to the original ArkTS implementation and preserves original crash behavior.
 
 ## Current Runtime API
 
@@ -57,7 +57,7 @@ Primary implementation: `ohospatch/src/main/cpp/ohospatch.cpp`.
 - Patch method registrations are returned from JSVM as JSON specs.
 - Native loads target classes in the ArkTS VM and installs N-API trampolines.
 - Handler arguments still enter JSVM as JSON values. Method handler `this`, Component event handler `this`, nested properties, method calls, Proxy arguments, original-method results, and Proxy returns use invocation-scoped Native handles.
-- Runtime `1.4.0` creates a JS `Proxy` for the ArkTS receiver. `get`, `set`, and `apply` synchronously bridge to the original ArkTS object, preserving nested object identity and prototype method dispatch.
+- Runtime `1.7.0` includes a JS `Proxy` for the ArkTS receiver. `get`, `set`, and `apply` synchronously bridge to the original ArkTS object, preserving nested object identity and prototype method dispatch.
 - Proxy handles are valid only during the current synchronous patch invocation and must not escape to timers, promises, or globals. A call can retain at most 256 handles.
 - Hook failures fall back to the original ArkTS method.
 - Installation failure restores hooks that were already installed.
@@ -112,20 +112,19 @@ Proposed public concepts:
 - `component.state(name)` for observable component state.
 - `component.node(selector)` for a built-in ArkUI node.
 - `node.attrs({...})` for attribute overrides.
-- `node.event(name, rule)` for callback replacement.
-- Event modes eventually include `replace`, `before`, `after`, and `around`.
-- Event context eventually provides safe state snapshots, `setState`, component method invocation, and original callback invocation.
+- `node.event(name, handler)` for synchronous callback replacement.
+- Event handlers receive only the original ArkUI event arguments. Ordinary `function` handlers receive `this` as the current Component instance Proxy and should read/write state directly through that Proxy.
 
 ### Implemented status (2026-08-10)
 
-- Runtime version `1.4.0` implements `Fixit.component` and the invocation-scoped ArkTS object Proxy bridge.
+- Runtime version `1.7.0` implements `Fixit.component` and the invocation-scoped ArkTS object Proxy bridge.
 - API 20 state-management V1 exported custom components are supported.
 - `param().transform/replace` and `state().transform/replace` are implemented.
 - Node selection by `{ type, occurrence }` is implemented with zero-based per-type counting.
-- `attr`, `attrs`, and synchronous `event(..., { mode: 'replace' })` are implemented.
-- Event `capture` and `context.setState()` are implemented; capture is limited to 16 properties.
+- `attr`, `attrs`, and synchronous `event(name, handler)` are implemented.
 - Component event handlers written with normal `function` syntax receive `this` as the current Component instance Proxy. Arrow functions keep lexical `this`.
-- `node.event(...)` returns an original ArkUI event callback proxy. `origin.apply(this, arguments)` is supported and strips OhosPatch's injected event context before calling the original callback.
+- Component event handlers receive only the original ArkUI event arguments and can read/write component state through `this`.
+- `node.event(...)` returns an original ArkUI event callback proxy. `origin.apply(this, arguments)` is supported.
 - Event bridges retain the original ArkTS callback and fall back to it after `clear()` or a patch handler failure.
 - The Demo target is `entry/src/main/ets/demo/PatchablePanel.ets` and the dynamic script is `entry/src/main/resources/rawfile/patch.js` (served by `patch-server`).
 - API 20 generated output was inspected and matches `setInitiallyProvidedValue`, `updateStateVars`, `initialRender`, and `observeComponentCreation2`.
@@ -157,7 +156,6 @@ Fail closed when a component shape, node selector, attribute, or event cannot be
 - Existing mounted components need rerender/invalidation after install and clear. If that cannot be guaranteed, report that a natural rerender is required.
 - Click/touch event objects may contain native state and cannot be passed through the current generic JSON bridge. Define safe event DTOs.
 - Resource, Length, Color, enum, animation, gesture, and controller values need typed wire descriptors rather than arbitrary JSON.
-- A JS event context must not outlive the synchronous callback until weak-reference async semantics are implemented.
 - Global ArkUI wrappers must be pass-through outside an active target render frame.
 - V1 and V2 generated code differ. Keep version adapters separate.
 - Every native-to-JSVM operation that creates or retrieves a JSVM value must run inside an explicit `JSVM_HandleScope`.
@@ -165,7 +163,7 @@ Fail closed when a component shape, node selector, attribute, or event cannot be
 
 ## Build And Test
 
-Run JS/runtime tests:
+Run real-device/runtime tests. This builds and installs the demo HAP plus `entry@ohosTest`, then executes Hypium on the connected HarmonyOS/OpenHarmony emulator or device:
 
 ```bash
 npm test
@@ -203,10 +201,10 @@ Expected result: no matches.
 
 ## Tests And CI
 
-- JS tests: `ohospatch/src/test/js/fixit.test.mjs`
-- Native safety tests: `ohospatch/src/test/js/native-safety.test.mjs`
+- Device runtime tests: `entry/src/ohosTest/ets/test/*.ets`
+- Do not add Node `vm`-based Patch runtime tests. Runtime behavior must be validated in the real JSVM/N-API/ArkTS environment through Hypium.
+- Do not add source-scanning runtime tests for `ohospatch`. Validate behavior through inputs/outputs, and validate the compiled native binary directly when safety policy matters.
 - GitHub workflow: `.github/workflows/harmonyos-build.yml`
-- Push and PR run JS tests on GitHub-hosted Ubuntu.
 - HAR/HAP packaging uses a self-hosted macOS ARM64 runner labeled `harmonyos`.
 - `HARMONYOS_CI_ENABLED=true` enables package builds on main pushes.
 - Packaging uploads unsigned HAR/HAP artifacts.

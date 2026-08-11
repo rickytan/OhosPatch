@@ -5,6 +5,7 @@
     instance: Object.create(null),
     klass: Object.create(null),
     uiValues: Object.create(null),
+    uiAttrs: Object.create(null),
     uiEvents: Object.create(null)
   };
   var specs = [];
@@ -22,7 +23,6 @@
   var REMOTE_HANDLE_KEY = '__ohospatch_proxy_handle__';
   var IMPORT_HANDLE_KEY = '__ohospatch_import_handle__';
   var UNDEFINED_VALUE_KEY = '__ohospatch_proxy_undefined__';
-  var UI_EVENT_CONTEXT_KEY = '__ohospatch_ui_event_context__';
 
   function own(object, property) {
     return Object.prototype.hasOwnProperty.call(object, property);
@@ -485,10 +485,6 @@
   function makeUiEventOrigin() {
     return function () {
       var args = Array.prototype.slice.call(arguments);
-      var tail = args.length > 0 ? args[args.length - 1] : null;
-      if (tail && tail[UI_EVENT_CONTEXT_KEY] === true) {
-        args.pop();
-      }
       return decodeNativeResponse(global.__ohospatch_eventOrigin(encodeNativeWire(args)), 0);
     };
   }
@@ -557,7 +553,6 @@
     if (args.length === 0) {
       throw new TypeError('Component attribute requires at least one argument');
     }
-    args = copyJsonValue(args, 'Component attribute arguments');
 
     var target = this.component.target;
     var selector = this.selector;
@@ -567,8 +562,18 @@
     rule.nodeType = selector.type;
     rule.occurrence = selector.occurrence;
     rule.attributeName = name;
-    rule.arguments = args;
-    registerUiRule(uniqueKey, rule, null, null);
+
+    if (typeof args[0] === 'function') {
+      if (args.length !== 1) {
+        throw new TypeError('Component attribute handler does not accept extra arguments');
+      }
+      rule.attrHandler = true;
+      registerUiRule(uniqueKey, rule, registry.uiAttrs, args[0]);
+    } else {
+      rule.attrHandler = false;
+      rule.arguments = copyJsonValue(args, 'Component attribute arguments');
+      registerUiRule(uniqueKey, rule, null, null);
+    }
     return this;
   };
 
@@ -583,31 +588,11 @@
     return this;
   };
 
-  ComponentNodeFix.prototype.event = function (eventName, ruleOrHandler) {
+  ComponentNodeFix.prototype.event = function (eventName, handler) {
     var name = validateUiName(eventName, 'Component event name');
-    var mode = 'replace';
-    var capture = [];
-    var handler = ruleOrHandler;
-    if (ruleOrHandler && typeof ruleOrHandler === 'object') {
-      mode = ruleOrHandler.mode || mode;
-      capture = ruleOrHandler.capture || capture;
-      handler = ruleOrHandler.handler;
-    }
-    if (mode !== 'replace') {
-      throw new Error('Only replace component event mode is currently supported');
-    }
     if (typeof handler !== 'function') {
       throw new TypeError('Component event handler must be a function');
     }
-    if (!Array.isArray(capture)) {
-      throw new TypeError('Component event capture must be an array');
-    }
-    if (capture.length > 16) {
-      throw new RangeError('Component event capture supports at most 16 properties');
-    }
-    capture = capture.map(function (propertyName) {
-      return validateUiName(propertyName, 'Captured component property');
-    });
 
     var target = this.component.target;
     var selector = this.selector;
@@ -617,8 +602,6 @@
     rule.nodeType = selector.type;
     rule.occurrence = selector.occurrence;
     rule.eventName = name;
-    rule.mode = mode;
-    rule.capture = capture;
     registerUiRule(uniqueKey, rule, registry.uiEvents, handler);
     return makeUiEventOrigin();
   };
@@ -670,7 +653,7 @@
   };
 
   Object.defineProperty(Fixit, 'runtimeVersion', {
-    value: '1.6.0',
+    value: '1.7.0',
     enumerable: true
   });
 
@@ -798,6 +781,7 @@
     registry.instance = Object.create(null);
     registry.klass = Object.create(null);
     registry.uiValues = Object.create(null);
+    registry.uiAttrs = Object.create(null);
     registry.uiEvents = Object.create(null);
     specs = [];
     uiSpecs = [];
@@ -848,7 +832,7 @@
     };
   };
 
-  global.__ohospatch_callUiEvent = function (ruleId, eventArgs, state, ownerHandle) {
+  global.__ohospatch_callUiEvent = function (ruleId, eventArgs, ownerHandle) {
     var handler = registry.uiEvents[ruleId];
     if (!handler) {
       return { handled: false };
@@ -856,32 +840,30 @@
     if (!Array.isArray(eventArgs)) {
       eventArgs = [eventArgs || {}];
     }
-    var statePatch = Object.create(null);
-    var context = {
-      state: state || {},
-      setState: function (patch) {
-        if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
-          throw new TypeError('Component event state patch must be an object');
-        }
-        Object.keys(patch).forEach(function (name) {
-          statePatch[validateUiName(name, 'Component state property')] = patch[name];
-        });
-      }
-    };
-    Object.defineProperty(context, UI_EVENT_CONTEXT_KEY, { value: true });
     var owner = typeof ownerHandle === 'number' ? makeNativeProxy(ownerHandle, false, ownerHandle) : undefined;
     try {
-      var args = eventArgs.slice();
-      args.push(context);
-      var result = handler.apply(owner, args);
+      var result = handler.apply(owner, eventArgs);
       return {
         handled: true,
-        result: result,
-        statePatch: statePatch
+        result: result
       };
     } finally {
       nativeProxyMetadata = new WeakMap();
       nativeProxyCache = Object.create(null);
+    }
+  };
+
+  global.__ohospatch_callUiAttr = function (ruleId, ownerHandle) {
+    var handler = registry.uiAttrs[ruleId];
+    if (!handler) {
+      return { handled: false };
+    }
+    var owner = typeof ownerHandle === 'number' ? makeNativeProxy(ownerHandle, false, ownerHandle) : undefined;
+    try {
+      return { handled: true, value: handler.call(owner) };
+    } catch (err) {
+      console.error('OhosPatch attribute handler failed: ' + (err && err.message ? err.message : err));
+      return { handled: false };
     }
   };
 })(typeof globalThis === 'undefined' ? this : globalThis);

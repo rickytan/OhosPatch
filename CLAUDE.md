@@ -10,12 +10,10 @@ OhosPatch is a transparent runtime JavaScript patching system for HarmonyOS/Open
 
 ## Commands
 
-JS runtime tests (Node 22, no device needed):
+Runtime behavior tests run on a connected HarmonyOS/OpenHarmony emulator or device. They build and install the Demo HAP plus `entry@ohosTest`, then execute Hypium against the real JSVM/N-API/ArkTS environment:
 
 ```bash
-npm test                                                 # all tests
-node --test ohospatch/src/test/js/fixit.test.mjs         # one file
-node --test --test-name-pattern="proxy" ohospatch/src/test/js/fixit.test.mjs  # one test
+npm test
 ```
 
 Build the reusable HAR (output: `ohospatch/build/default/outputs/default/ohospatch.har`):
@@ -47,7 +45,7 @@ node patch-server/server.mjs          # serves http://127.0.0.1:8080/patch.js
 hdc rport tcp:8080 tcp:8080           # reverse port to device/simulator
 ```
 
-Before committing: `git diff --check`, `npm test`, and (when native changed) HAR + HAP build + exception-symbol check.
+Do not add Node `vm` Patch runtime tests or source-scanning runtime tests for `ohospatch`; validate runtime behavior through device-side inputs and outputs. Before committing: `git diff --check`, `npm test`, and (when native changed) HAR + HAP build + exception-symbol check.
 
 ## Architecture: two cooperating VMs
 
@@ -85,7 +83,7 @@ Do **not** move download, signature, URL, cache, or startup policy into `ohospat
 
 ## Native C++ invariants (hard rules)
 
-`ohospatch.cpp` is built with `-fno-exceptions`. These are enforced by `native-safety.test.mjs` (static source asserts) and the CI exception-symbol check:
+`ohospatch.cpp` is built with `-fno-exceptions`. Runtime safety is verified through device-side behavior tests, and the compiled native binary is checked directly for C++ exception symbols:
 
 - Never add `throw`, `catch`, `std::exception`/`std::runtime_error`, `napi_throw`, or `OH_JSVM_Throw`. Use `std::nothrow` for allocation and always handle failure.
 - Prefer fixed-size arrays over exception-throwing containers in native control paths.
@@ -99,10 +97,10 @@ Do **not** move download, signature, URL, cache, or startup policy into `ohospat
 
 Several files must stay mutually consistent; a change in one usually requires the others:
 
-- `skills/ohospatch/references/fixit.d.js` `@version` **must equal** `Fixit.runtimeVersion` in `ohospatch/src/main/cpp/runtime/fixit.js` (currently `1.6.0`). Signatures, constraints, and globals in the declaration must match the runtime.
+- `skills/ohospatch/references/fixit.d.js` `@version` **must equal** `Fixit.runtimeVersion` in `ohospatch/src/main/cpp/runtime/fixit.js` (currently `1.7.0`). Signatures, constraints, and globals in the declaration must match the runtime.
 - `skills/ohospatch/SKILL.md` + `scripts/install-skill.sh` must track `references/fixit.d.js`, README limitations, and demonstrated runtime behavior.
 - `README.md` "当前边界" (current limitations) must reflect actual runtime capability.
-- `native-safety.test.mjs` pins specific symbol/handle-scope/callback-storage patterns — update it when those patterns legitimately change.
+- Do not add source-scanning tests that pin implementation tokens such as handle-scope names or callback storage identifiers. When safety policy matters, test user-visible failure behavior on device and inspect the compiled binary.
 
 ## Declarative Component DSL
 

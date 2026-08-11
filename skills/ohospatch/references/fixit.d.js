@@ -8,7 +8,7 @@
  *
  *   /// <reference path="./fixit.d.js" />
  *
- * @version 1.6.0
+ * @version 1.7.0
  */
 
 /**
@@ -62,16 +62,9 @@
  */
 
 /**
- * @typedef {Object} OhosPatchComponentEventContext
- * @property {Record<string, any>} state Snapshot of properties listed by `capture`.
- * @property {(patch: Record<string, any>) => void} setState Writes captured component properties.
- */
-
-/**
  * @callback OhosPatchComponentEventHandler
  * @this {any} Synchronous Proxy for the current declarative Component instance.
- * @param {...any} args Original ArkUI event arguments followed by an
- *   `OhosPatchComponentEventContext` as the final argument.
+ * @param {...any} args Original ArkUI event arguments.
  * @returns {any}
  */
 
@@ -82,28 +75,29 @@
  */
 
 /**
- * Only synchronous `replace` mode is currently supported and at most 16
- * properties may be captured.
- *
- * @typedef {Object} OhosPatchComponentEventRule
- * @property {'replace'=} mode
- * @property {Array<string>=} capture
- * @property {OhosPatchComponentEventHandler} handler
- */
-
-/**
  * @typedef {Object} OhosPatchComponentValueFix
  * @property {(handler: (value: any) => any) => OhosPatchComponentFix} transform Transform the incoming value.
  * @property {(value: OhosPatchJsonValue) => OhosPatchComponentFix} replace Replace with a JSON value.
  */
 
 /**
+ * @typedef {(this: any) => OhosPatchJsonValue} OhosPatchAttrHandler
+ *   Attribute resolver invoked on each render with `this` bound to the current component instance
+ *   proxy; the return value is applied as the attribute argument.
+ */
+
+/**
  * @typedef {Object} OhosPatchComponentNodeFix
- * @property {(attributeName: string, ...args: OhosPatchJsonValue[]) => OhosPatchComponentNodeFix} attr
- *   Override one node attribute. At least one argument is required.
- * @property {(attributes: Record<string, OhosPatchJsonValue>) => OhosPatchComponentNodeFix} attrs
- *   Override multiple single-argument attributes.
- * @property {(eventName: string, rule: OhosPatchComponentEventRule | OhosPatchComponentEventHandler) =>
+ * @property {(attributeName: string, value: OhosPatchJsonValue | OhosPatchAttrHandler,
+ *   ...args: OhosPatchJsonValue[]) => OhosPatchComponentNodeFix} attr
+ *   Override one node attribute. When `value` is a function it is invoked with `this` bound to the
+ *   current component instance on each render and its return value is applied as the single attribute
+ *   argument; extra arguments are rejected in handler mode. Otherwise the JSON arguments are applied
+ *   verbatim. At least one argument is required.
+ * @property {(attributes: Record<string, OhosPatchJsonValue | OhosPatchAttrHandler>) =>
+ *   OhosPatchComponentNodeFix} attrs
+ *   Override multiple single-argument attributes. Each value may be a JSON value or a resolver function.
+ * @property {(eventName: string, handler: OhosPatchComponentEventHandler) =>
  *   OhosPatchOriginalEvent} event Replace a synchronous node event callback and return the original callback proxy.
  */
 
@@ -128,7 +122,7 @@ class Fixit {
   }
 
   /** @readonly @type {string} */
-  static runtimeVersion = '1.6.0';
+  static runtimeVersion = '1.7.0';
 
   /**
    * @param {string | OhosPatchTarget} target Full OHM class path, registered alias, or target descriptor.

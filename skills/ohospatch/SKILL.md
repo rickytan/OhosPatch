@@ -64,23 +64,19 @@ panel.state('count').transform(function (value) {
 });
 var originClick = panel.node({ type: 'Button', occurrence: 0 })
   .attrs({ height: 48, backgroundColor: '#1677FF' })
-  .event('onClick', {
-    mode: 'replace',
-    capture: ['count'],
-    handler: function (_event, context) {
-      this.count = context.state.count + 1;
-      return originClick.apply(this, arguments);
-    }
+  .event('onClick', function () {
+    this.count = this.count + 1;
+    return originClick.apply(this, arguments);
   });
 ```
 
 - Target an exported custom component.
 - Select nodes only by built-in type plus zero-based occurrence.
 - Keep attribute arguments and replacement values JSON-serializable.
-- Use synchronous event mode `replace`; capture at most 16 properties.
 - Use normal `function` syntax when a Component event patch needs `this`; it is bound to the current Component instance proxy.
-- Component event handlers receive the original ArkUI event arguments first and the OhosPatch context as the final argument.
+- Component event handlers receive only the original ArkUI event arguments; read and write component state through `this`.
 - `node.event(...)` returns the original ArkUI event callback proxy; call it with `origin.apply(this, arguments)` when the patch should preserve original event behavior.
+- Wrap `origin.apply(this, arguments)` in `try/catch` when the patch is intended to recover from an original ArkTS exception. OhosPatch converts that explicit origin-call exception into a JSVM `Error`; uncaught origin-call errors fall back to the original ArkTS behavior.
 - Do not generate `before`, `after`, `around`, route interception, V2 state, resource/controller values, ID/hierarchy selectors, or forced refresh logic.
 
 ## Runtime Reference
@@ -104,7 +100,7 @@ bundleName/moduleName/[packageName/]src/main/ets/File#ExportName
 
 - Prototype hooks do not cover constructors, instance-field arrow functions, private members, or call sites that bypass property lookup.
 - The handler `this` Proxy is valid only for the current synchronous invocation or `origin` call; it must not escape to timers, promises, or globals. `Fixit.import()` Proxies persist until `OhosPatch.clear()` or patch replacement.
-- Component DSL supports only API 20 state-management V1 exported custom components, `type + occurrence` node selection, JSON-serializable attributes, and synchronous `replace` events. Not supported: `before`/`after`/`around` events, non-exported `@Entry` route pages, state-management V2, ID/hierarchy selectors, resource/controller values, and forced refresh of mounted components.
+- Component DSL supports only API 20 state-management V1 exported custom components, `type + occurrence` node selection, JSON-serializable attributes, and synchronous event replacement. Not supported: `before`/`after`/`around` event composition, non-exported `@Entry` route pages, state-management V2, ID/hierarchy selectors, resource/controller values, and forced refresh of mounted components.
 - At most 256 active timers per runtime; `setInterval(..., 0)` schedules at 1 ms.
 - At most 512 deduped dynamic-import class, instance, method, or nested-object handles per patch.
 - Download, signature verification, version matching, rollout, caching, rollback, timeout, and circuit breaking are host responsibilities; the HAR owns none of them.

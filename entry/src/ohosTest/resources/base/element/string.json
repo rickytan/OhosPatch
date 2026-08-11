@@ -1,0 +1,16 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "OhosPatch test module"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "OhosPatch test ability"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "OhosPatch Test"
+    }
+  ]
+}
