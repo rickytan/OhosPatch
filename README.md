@@ -209,18 +209,14 @@ panel.state('tapCount').transform(function (value) {
 
 var originClick = panel.node({ type: 'Button', occurrence: 0 })
   .attrs({ height: 52, backgroundColor: '#C44736' })
-  .event('onClick', {
-    mode: 'replace',
-    capture: ['tapCount'],
-    handler: function (_event, context) {
-      this.tagText = 'captured tapCount=' + context.state.tapCount;
-      this.markPrimary(10);
-      return originClick.apply(this, arguments);
-    }
+  .event('onClick', function () {
+    this.tagText = 'tapCount=' + this.tapCount;
+    this.markPrimary(10);
+    return originClick.apply(this, arguments);
   });
 ```
 
-`occurrence` 从 `0` 开始，只在同一目标组件、同一节点类型内计数。属性参数必须可 JSON 序列化。事件首版只支持同步 `replace`；patch handler 会先收到 ArkUI 原始事件参数，最后一个参数是 OhosPatch 注入的 `context`。`event()` 返回原 ArkUI 事件回调，普通 `function` handler 的 `this` 是当前 Component 实例的同步 Proxy，可用点语法读写实例属性和调用实例方法；箭头函数仍遵循 JS 词法 `this` 规则。`originClick.apply(this, arguments)` 会自动忽略 OhosPatch 注入的 `context` 参数，只把原始事件参数传给业务回调。`capture` 最多读取 16 个组件属性，`context.setState()` 的对象会通过组件访问器写回 ArkTS 主 VM。patch handler 不存在或执行失败时，已安装的事件 trampoline 会回调原业务事件。
+`occurrence` 从 `0` 开始，只在同一目标组件、同一节点类型内计数。属性参数必须可 JSON 序列化。事件 patch 使用 `event(name, handler)` 替换同步节点事件回调；handler 只接收 ArkUI 原始事件参数。`event()` 返回原 ArkUI 事件回调，普通 `function` handler 的 `this` 是当前 Component 实例的同步 Proxy，可用点语法读写实例属性和调用实例方法；箭头函数仍遵循 JS 词法 `this` 规则。`originClick.apply(this, arguments)` 会把原始事件参数传给业务回调。patch handler 不存在或执行失败时，已安装的事件 trampoline 会回调原业务事件。
 
 ## 构建
 
@@ -248,9 +244,10 @@ ohospatch/build/default/outputs/default/ohospatch.har
 
 `.github/workflows/harmonyos-build.yml` 提供两级 CI：
 
-- push 和 pull request 在 GitHub-hosted Ubuntu runner 上执行 JS runtime 单元测试。
+- 本地 `npm test` 会在已连接的鸿蒙模拟器/设备上构建、安装并执行 `entry@ohosTest`，测试 OhosPatch 在真实 JSVM/N-API/ArkTS 环境下的入参和出参行为。
 - 手动运行 `HarmonyOS CI` workflow 时，在自托管 macOS ARM64 runner 上构建 HAR 和未签名 HAP，并上传为保留 14 天的 artifact。
 - 设置仓库变量 `HARMONYOS_CI_ENABLED=true` 后，`main` 分支每次 push 也会自动打包。pull request 不会执行自托管打包任务。
+- CI 不再执行 Node VM runtime 测试；无设备的 runner 只做打包和二进制异常符号检查。
 
 打包 runner 需要注册 `self-hosted`、`macOS`、`ARM64`、`harmonyos` 标签，GitHub Actions Runner 版本不低于 `2.327.1`，并预装 DevEco Studio、Command Line Tools 和 OpenHarmony API 20 SDK。默认从以下位置查找工具：
 
@@ -282,7 +279,7 @@ hdc rport tcp:8080 tcp:8080
 - prototype hook 不覆盖构造函数、实例字段形式的箭头函数、私有实现或不经过属性查找的调用点。
 - Patch handler 的 `this` 通过调用期 Proxy 桥接，可保留原实例、嵌套对象、方法和循环对象身份，但不可跨越当前同步调用生命周期。`Fixit.import()` 返回的持久 Proxy 可保留到 Patch 被清理或替换，并支持静态调用、构造和实例调用；普通方法参数及新建 JS 对象仍受 JSON wire 类型限制。
 - 声明式组件 DSL 首版只支持 API 20 状态管理 V1、业务模块导出的自定义组件、`type + occurrence` 节点选择器、JSON 属性参数和同步事件替换。
-- 非导出的 `@Entry` 页面、状态管理 V2、层级/ID 选择器、资源与控制器类型、已挂载组件的主动刷新，以及 `before/after/around/origin` 事件模式尚未支持。
+- 非导出的 `@Entry` 页面、状态管理 V2、层级/ID 选择器、资源与控制器类型、已挂载组件的主动刷新，以及 `before/after/around` 事件组合尚未支持。
 - 单个 runtime 最多同时存在 256 个 timer；`setInterval(..., 0)` 会按 1 ms 调度。
 - 单个 Patch 最多保留 512 个去重后的动态导入类、实例、方法或嵌套对象句柄。
 - 生产宿主必须在调用 HAR 前完成非对称签名校验、版本和设备匹配、灰度、缓存、回滚、超时与熔断。

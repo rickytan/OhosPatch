@@ -74,14 +74,10 @@
       height: 52,
       backgroundColor: '#C44736'
     })
-    .event('onClick', {
-      mode: 'replace',
-      capture: ['tapCount'],
-      handler: /** @this {any} */ function (_event, context) {
-        this.tagText = 'captured tapCount=' + context.state.tapCount;
-        this.markPrimary(10);
-        return originPrimaryClick.apply(this, arguments);
-      }
+    .event('onClick', /** @this {any} */ function () {
+      this.tagText = 'tapCount=' + this.tapCount;
+      this.markPrimary(10);
+      return originPrimaryClick.apply(this, arguments);
     });
 
   var originSecondaryClick = panel.node({ type: 'Button', occurrence: 1 })

@@ -8,7 +8,7 @@
  *
  *   /// <reference path="./fixit.d.js" />
  *
- * @version 1.6.0
+ * @version 1.7.0
  */
 
 /**
@@ -62,16 +62,9 @@
  */
 
 /**
- * @typedef {Object} OhosPatchComponentEventContext
- * @property {Record<string, any>} state Snapshot of properties listed by `capture`.
- * @property {(patch: Record<string, any>) => void} setState Writes captured component properties.
- */
-
-/**
  * @callback OhosPatchComponentEventHandler
  * @this {any} Synchronous Proxy for the current declarative Component instance.
- * @param {...any} args Original ArkUI event arguments followed by an
- *   `OhosPatchComponentEventContext` as the final argument.
+ * @param {...any} args Original ArkUI event arguments.
  * @returns {any}
  */
 
@@ -79,16 +72,6 @@
  * Callable proxy for the original ArkUI event callback.
  *
  * @typedef {(this: any, ...args: any[]) => any} OhosPatchOriginalEvent
- */
-
-/**
- * Only synchronous `replace` mode is currently supported and at most 16
- * properties may be captured.
- *
- * @typedef {Object} OhosPatchComponentEventRule
- * @property {'replace'=} mode
- * @property {Array<string>=} capture
- * @property {OhosPatchComponentEventHandler} handler
  */
 
 /**
@@ -113,7 +96,7 @@
  * @property {(attributes: Record<string, OhosPatchJsonValue | OhosPatchAttrHandler>) =>
  *   OhosPatchComponentNodeFix} attrs
  *   Override multiple single-argument attributes. Each value may be a JSON value or a resolver function.
- * @property {(eventName: string, rule: OhosPatchComponentEventRule | OhosPatchComponentEventHandler) =>
+ * @property {(eventName: string, handler: OhosPatchComponentEventHandler) =>
  *   OhosPatchOriginalEvent} event Replace a synchronous node event callback and return the original callback proxy.
  */
 
@@ -138,7 +121,7 @@ class Fixit {
   }
 
   /** @readonly @type {string} */
-  static runtimeVersion = '1.6.0';
+  static runtimeVersion = '1.7.0';
 
   /**
    * @param {string | OhosPatchTarget} target Full OHM class path, registered alias, or target descriptor.

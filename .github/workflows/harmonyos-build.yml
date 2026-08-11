@@ -17,28 +17,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: Runtime tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: 22
-
-      - name: Run tests
-        run: npm test
-
   package:
     name: Build HAR and HAP
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'push' && vars.HARMONYOS_CI_ENABLED == 'true')
-    needs: test
+    environment: ohpm
     runs-on:
       - self-hosted
       - macOS
