@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from '@ohos/hypium';
+import { Want } from '@kit.AbilityKit';
+import { Driver, ON, abilityDelegatorRegistry } from '@kit.TestKit';
 import { OhosPatch } from '@rickytan/ohospatch';
 import { DemoViewModel } from '../../../main/ets/demo/DemoViewModel';
 import { Point } from '../../../main/ets/demo/Point';
@@ -61,7 +63,7 @@ export default function fixitTest(): void {
           });
       `;
       OhosPatch.executeScript(script);
-      expect(DemoViewModel.crash()).assertEqual('1.7.0|function|true|true|undefined|undefined|true|true|false|true|x|true');
+      expect(DemoViewModel.crash()).assertEqual('1.8.0|function|true|true|undefined|undefined|true|true|false|true|x|true');
     });
 
     it('component event patch accepts direct handler syntax only', 0, () => {
@@ -102,6 +104,61 @@ export default function fixitTest(): void {
       `;
       expect(OhosPatch.executeScript(script)).assertLarger(0);
       expect(DemoViewModel.crash()).assertEqual('function|true|true');
+    });
+
+    it('ComponentV2 supports param state node and event DSL behavior', 0, async () => {
+      const delegator = abilityDelegatorRegistry.getAbilityDelegator();
+      const want: Want = {
+        bundleName: 'com.rickytan.ohospatch',
+        moduleName: 'entry',
+        abilityName: 'EntryAbility'
+      };
+      await delegator.startAbility(want);
+
+      const driver = Driver.create();
+      const openButton = await driver.waitForComponent(ON.text('Open patch target screen'), 5000);
+      expect(openButton !== undefined).assertTrue();
+
+      const script = `
+        var component = Fixit.component(
+          'com.rickytan.ohospatch/entry/src/main/ets/demo/PatchablePanelV2#PatchablePanelV2'
+        );
+        component.param('message').replace('Patched V2 test parameter');
+        component.state('tapCount').replace(100);
+        component.state('statusText').replace('Patched V2 test state');
+        component.node({ type: 'Text', occurrence: 1 })
+          .attr('backgroundColor', '#E7F7EE');
+        var origin = component.node({ type: 'Button', occurrence: 0 })
+          .event('onClick', function () {
+            this.markPrimary(10);
+            var result = origin.apply(this, arguments);
+            this.statusText = 'Patched V2 test event, taps=' + this.tapCount;
+            return result;
+          });
+      `;
+      expect(OhosPatch.executeScript(script)).assertLarger(0);
+      await openButton.click();
+
+      const parameter = await driver.waitForComponent(ON.text('Patched V2 test parameter'), 5000);
+      expect(parameter !== undefined).assertTrue();
+      const initialState = await driver.waitForComponent(ON.text('tapCount=100'), 5000);
+      expect(initialState !== undefined).assertTrue();
+      const initialStatus = await driver.waitForComponent(ON.text('status=Patched V2 test state'), 5000);
+      expect(initialStatus !== undefined).assertTrue();
+
+      const eventButton = await driver.waitForComponent(ON.text('V2 primary action'), 5000);
+      expect(eventButton !== undefined).assertTrue();
+      await eventButton.click();
+      const eventStatus = await driver.waitForComponent(ON.text('status=Patched V2 test event, taps=111'), 5000);
+      expect(eventStatus !== undefined).assertTrue();
+
+      OhosPatch.clear();
+      const reinstallScript = `
+        Fixit.component(
+          'com.rickytan.ohospatch/entry/src/main/ets/demo/PatchablePanelV2#PatchablePanelV2'
+        ).state('tapCount').replace(200);
+      `;
+      expect(OhosPatch.executeScript(reinstallScript)).assertLarger(0);
     });
 
     it('invalid full path input fails closed and later valid input still works', 0, () => {

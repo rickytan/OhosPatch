@@ -8,7 +8,7 @@
  *
  *   /// <reference path="./fixit.d.js" />
  *
- * @version 1.7.0
+ * @version 1.8.0
  */
 
 /**
@@ -122,7 +122,7 @@ class Fixit {
   }
 
   /** @readonly @type {string} */
-  static runtimeVersion = '1.7.0';
+  static runtimeVersion = '1.8.0';
 
   /**
    * @param {string | OhosPatchTarget} target Full OHM class path, registered alias, or target descriptor.
@@ -135,6 +135,7 @@ class Fixit {
   }
 
   /**
+   * Target an exported API 20 state-management V1 or V2 component. The Runtime selects the adapter automatically.
    * @param {string | OhosPatchTarget} target Full OHM component path, registered alias, or target descriptor.
    * @param {string=} modulePath
    * @param {string=} exportName

@@ -51,7 +51,7 @@ Use a plain script with no imports or package loader assumptions:
 
 ## Author Component Patches
 
-Use only currently supported API 20 state-management V1 behavior:
+Use the same DSL for supported API 20 state-management V1 and V2 components:
 
 ```js
 var panel = Fixit.component(
@@ -77,7 +77,8 @@ var originClick = panel.node({ type: 'Button', occurrence: 0 })
 - Component event handlers receive only the original ArkUI event arguments; read and write component state through `this`.
 - `node.event(...)` returns the original ArkUI event callback proxy; call it with `origin.apply(this, arguments)` when the patch should preserve original event behavior.
 - Wrap `origin.apply(this, arguments)` in `try/catch` when the patch is intended to recover from an original ArkTS exception. OhosPatch converts that explicit origin-call exception into a JSVM `Error`; uncaught origin-call errors fall back to the original ArkTS behavior.
-- Do not generate `before`, `after`, `around`, route interception, V2 state, resource/controller values, ID/hierarchy selectors, or forced refresh logic.
+- For ComponentV2, `param()` targets `@Param` and `state()` targets observable instance state such as `@Local`; OhosPatch selects the V1/V2 adapter automatically.
+- Do not generate `before`, `after`, `around`, route interception, resource/controller values, ID/hierarchy selectors, or forced refresh logic.
 
 ## Runtime Reference
 
@@ -100,7 +101,7 @@ bundleName/moduleName/[packageName/]src/main/ets/File#ExportName
 
 - Prototype hooks do not cover constructors, instance-field arrow functions, private members, or call sites that bypass property lookup.
 - The handler `this` Proxy is valid only for the current synchronous invocation or `origin` call; it must not escape to timers, promises, or globals. `Fixit.import()` Proxies persist until `OhosPatch.clear()` or patch replacement.
-- Component DSL supports only API 20 state-management V1 exported custom components, `type + occurrence` node selection, JSON-serializable attributes, and synchronous event replacement. Not supported: `before`/`after`/`around` event composition, non-exported `@Entry` route pages, state-management V2, ID/hierarchy selectors, resource/controller values, and forced refresh of mounted components.
+- Component DSL supports API 20 state-management V1 and V2 exported custom components, `type + occurrence` node selection, JSON-serializable attributes, and synchronous event replacement. Not supported: `before`/`after`/`around` event composition, non-exported `@Entry` route pages, ID/hierarchy selectors, resource/controller values, and forced refresh of mounted components.
 - At most 256 active timers per runtime; `setInterval(..., 0)` schedules at 1 ms.
 - At most 512 deduped dynamic-import class, instance, method, or nested-object handles per patch.
 - Download, signature verification, version matching, rollout, caching, rollback, timeout, and circuit breaking are host responsibilities; the HAR owns none of them.

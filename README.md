@@ -102,8 +102,11 @@ sequenceDiagram
 ```mermaid
 flowchart TD
   A["Fixit.component(fullPath)"] --> B["Native 加载导出的 Component 类"]
-  B --> C["包装参数初始化和首次渲染入口"]
-  C --> D["包装 observeComponentCreation2 的节点 builder"]
+  B --> C{"识别生成类模型"}
+  C -->|"V1"| V1["setInitiallyProvidedValue / updateStateVars"]
+  C -->|"V2"| V2["initParam / updateParam / resetParam"]
+  V1 --> D["包装 initialRender 与 observeComponentCreation2"]
+  V2 --> D
   D --> E["原 builder 创建 ArkUI 节点"]
   E --> F["Patch 写入节点 attrs / event"]
   F --> G["ArkUI 继续正常渲染"]
@@ -273,7 +276,9 @@ var originClick = panel.node({ type: 'Button', occurrence: 0 })
   });
 ```
 
-Component DSL 当前支持 API 20 状态管理 V1 导出的自定义组件。`event(name, handler)` 是同步事件替换；handler 只接收 ArkUI 原始事件参数，普通 `function` 的 `this` 指向当前 Component 实例 Proxy。
+Component DSL 当前支持 API 20 状态管理 V1 与 V2 导出的自定义组件，两者使用完全相同的 DSL。V2 中 `param()` 对应 `@Param`，`state()` 可修复 `@Local` 等可观察实例状态；Runtime 会根据编译产物自动选择 adapter，patch 脚本不需要声明组件版本。
+
+`event(name, handler)` 是同步事件替换；handler 只接收 ArkUI 原始事件参数，普通 `function` 的 `this` 指向当前 Component 实例 Proxy。
 
 ## 内置 JS Runtime
 
@@ -424,8 +429,8 @@ $HOME/Library/OpenHarmony/Sdk
 - Patch handler 的 `this` Proxy 只在当前同步调用或 `origin` 调用期间有效，不应保存到 timer、Promise 或全局变量后异步访问。
 - `Fixit.import()` 返回的持久 Proxy 可保留到 `OhosPatch.clear()` 或下一次 patch 替换。
 - 普通方法参数和新建 JS 对象仍受 JSON wire 类型限制。
-- Component DSL 当前支持 API 20 状态管理 V1、导出的自定义组件、`type + occurrence` 节点选择器、JSON 属性参数和同步事件替换。
-- 非导出的 `@Entry` 页面、状态管理 V2、层级/ID 选择器、资源与控制器类型、已挂载组件主动刷新，以及 `before/after/around` 事件组合尚未支持。
+- Component DSL 当前支持 API 20 状态管理 V1/V2、导出的自定义组件、`type + occurrence` 节点选择器、JSON 属性参数和同步事件替换。
+- 非导出的 `@Entry` 页面、层级/ID 选择器、资源与控制器类型、已挂载组件主动刷新，以及 `before/after/around` 事件组合尚未支持。
 - 单个 runtime 最多同时存在 256 个 timer。
 - 单个 patch 最多保留 512 个去重后的动态导入类、实例、方法或嵌套对象句柄。
 

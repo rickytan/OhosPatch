@@ -2,6 +2,7 @@ import { OhosPatch } from '@rickytan/ohospatch';
 import { loadPatch } from '../patch/PatchLoader';
 import { DemoResult, DemoScenario } from '../demo/DemoScenario';
 import { PatchablePanel } from '../demo/PatchablePanel';
+import { PatchablePanelV2 } from '../demo/PatchablePanelV2';
 
 @Entry
 @Component
@@ -127,6 +128,10 @@ struct DemoPatchScreen {
         PatchablePanel({
           message: 'Original component parameter',
           subtitle: 'State, attrs, events, this proxy, and original event callback'
+        })
+
+        PatchablePanelV2({
+          message: 'Original V2 component parameter'
         })
 
         Button('Run method hook scenario')

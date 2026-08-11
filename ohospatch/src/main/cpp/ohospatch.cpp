@@ -265,6 +265,8 @@ enum class UiRuleKind {
 enum class UiMethodKind {
     PARAM_INITIAL,
     PARAM_UPDATE,
+    PARAM_NAMED,
+    STATE_RESET,
     INITIAL_RENDER,
     OBSERVE_CREATION,
 };
@@ -296,6 +298,7 @@ struct UiMethodHook {
     UiMethodKind kind = UiMethodKind::PARAM_INITIAL;
     napi_ref original = nullptr;
     std::string methodName;
+    bool hadOwnProperty = false;
 };
 
 struct UiComponentHook {
@@ -303,7 +306,7 @@ struct UiComponentHook {
     napi_ref holder = nullptr;
     std::string className;
     std::string targetKey;
-    std::array<UiMethodHook, 4> methods;
+    std::array<UiMethodHook, 6> methods;
     size_t methodCount = 0;
 };
 
@@ -1026,6 +1029,8 @@ class JsvmRuntime
 
         if ((method->kind == UiMethodKind::PARAM_INITIAL || method->kind == UiMethodKind::PARAM_UPDATE) && argc > 0) {
             ApplyUiValueRules(napiEnv, method->component->targetKey, UiRuleKind::PARAM, argv[0]);
+        } else if (method->kind == UiMethodKind::PARAM_NAMED && argc > 1) {
+            ApplyUiNamedParamRule(napiEnv, method->component->targetKey, argv[0], &argv[1]);
         }
 
         bool pushedFrame = false;
@@ -1040,6 +1045,8 @@ class JsvmRuntime
         if (result &&
             (method->kind == UiMethodKind::PARAM_INITIAL || method->kind == UiMethodKind::PARAM_UPDATE) && argc > 0) {
             ApplyUiParamValuesToOwner(napiEnv, method->component->targetKey, argv[0], receiver);
+        } else if (result && method->kind == UiMethodKind::STATE_RESET) {
+            ApplyUiValueRules(napiEnv, method->component->targetKey, UiRuleKind::STATE, receiver);
         }
         if (pushedFrame) {
             PopUiRenderFrame();
@@ -2309,6 +2316,40 @@ class JsvmRuntime
         }
     }
 
+    void ApplyUiNamedParamRule(napi_env napiEnv, const std::string &targetKey, napi_value nameValue,
+                               napi_value *value)
+    {
+        if (!nameValue || !value || !*value) {
+            return;
+        }
+        napi_valuetype nameType = napi_undefined;
+        std::string propertyName;
+        if (!NapiOk(napiEnv, napi_typeof(napiEnv, nameValue, &nameType), "napi_typeof(V2 parameter name)") ||
+            nameType != napi_string || !NapiValueToString(napiEnv, nameValue, &propertyName)) {
+            LogError("ComponentV2 parameter hook received an invalid property name");
+            return;
+        }
+
+        for (size_t index = 0; index < uiRuleCount_; ++index) {
+            UiRule *rule = uiRules_[index].get();
+            if (!rule || rule->kind != UiRuleKind::PARAM || rule->targetKey != targetKey ||
+                rule->propertyName != propertyName) {
+                continue;
+            }
+            napi_value envelope = nullptr;
+            bool handled = false;
+            if (!CallUiValueHandler(napiEnv, rule->ruleId, *value, &envelope, &handled) || !handled) {
+                return;
+            }
+            napi_value replacement = nullptr;
+            if (NapiOk(napiEnv, napi_get_named_property(napiEnv, envelope, "value", &replacement),
+                       "napi_get_named_property(ComponentV2 replacement value)")) {
+                *value = replacement;
+            }
+            return;
+        }
+    }
+
     void ApplyUiParamValuesToOwner(napi_env napiEnv, const std::string &targetKey, napi_value params,
                                    napi_value owner)
     {
@@ -2788,6 +2829,13 @@ class JsvmRuntime
         method.component = component;
         method.kind = kind;
         method.methodName = methodName;
+        napi_value propertyName = nullptr;
+        if (!NapiOk(napiEnv, napi_create_string_utf8(napiEnv, methodName, NAPI_AUTO_LENGTH, &propertyName),
+                    "napi_create_string_utf8(component method name)") ||
+            !NapiOk(napiEnv, napi_has_own_property(napiEnv, holder, propertyName, &method.hadOwnProperty),
+                    "napi_has_own_property(component method)")) {
+            return false;
+        }
         if (!NapiOk(napiEnv, napi_create_reference(napiEnv, original, 1, &method.original),
                     "napi_create_reference(component original method)")) {
             return false;
@@ -2803,6 +2851,24 @@ class JsvmRuntime
             return false;
         }
         ++component->methodCount;
+        return true;
+    }
+
+    bool HasUiMethod(napi_env napiEnv, napi_value holder, const char *methodName, bool *available)
+    {
+        if (!available) {
+            LogError("HasUiMethod received an invalid result pointer");
+            return false;
+        }
+        *available = false;
+        napi_value value = nullptr;
+        napi_valuetype valueType = napi_undefined;
+        if (!NapiOk(napiEnv, napi_get_named_property(napiEnv, holder, methodName, &value),
+                    "napi_get_named_property(component model method)") ||
+            !NapiOk(napiEnv, napi_typeof(napiEnv, value, &valueType), "napi_typeof(component model method)")) {
+            return false;
+        }
+        *available = valueType == napi_function;
         return true;
     }
 
@@ -2849,11 +2915,51 @@ class JsvmRuntime
         bool needsState = TargetNeedsRuleKind(rule->targetKey, UiRuleKind::STATE);
         bool needsNodes = TargetNeedsRuleKind(rule->targetKey, UiRuleKind::ATTRIBUTE) ||
                           TargetNeedsRuleKind(rule->targetKey, UiRuleKind::EVENT);
-        if (needsParam &&
-            (!InstallUiMethod(napiEnv, componentPointer, holder, "setInitiallyProvidedValue",
-                              UiMethodKind::PARAM_INITIAL) ||
-             !InstallUiMethod(napiEnv, componentPointer, holder, "updateStateVars", UiMethodKind::PARAM_UPDATE))) {
+        bool hasV1Initializer = false;
+        bool hasV2Initializer = false;
+        bool hasV2Updater = false;
+        bool hasV2Resetter = false;
+        bool hasV2StateReset = false;
+        if (!HasUiMethod(napiEnv, holder, "setInitiallyProvidedValue", &hasV1Initializer)) {
             return false;
+        }
+        if (!hasV1Initializer &&
+            (!HasUiMethod(napiEnv, holder, "initParam", &hasV2Initializer) ||
+             !HasUiMethod(napiEnv, holder, "resetStateVarsOnReuse", &hasV2StateReset))) {
+            return false;
+        }
+
+        if (hasV1Initializer) {
+            if (needsParam &&
+                (!InstallUiMethod(napiEnv, componentPointer, holder, "setInitiallyProvidedValue",
+                                  UiMethodKind::PARAM_INITIAL) ||
+                 !InstallUiMethod(napiEnv, componentPointer, holder, "updateStateVars",
+                                  UiMethodKind::PARAM_UPDATE))) {
+                return false;
+            }
+        } else {
+            if (!hasV2Initializer || !hasV2StateReset) {
+                LogError(componentPointer->className + " is not a supported ComponentV1 or ComponentV2 target");
+                return false;
+            }
+            if (needsParam) {
+                if (!HasUiMethod(napiEnv, holder, "updateParam", &hasV2Updater) ||
+                    !HasUiMethod(napiEnv, holder, "resetParam", &hasV2Resetter) || !hasV2Updater ||
+                    !hasV2Resetter) {
+                    LogError(componentPointer->className + " does not expose the ComponentV2 parameter adapter");
+                    return false;
+                }
+                if (!InstallUiMethod(napiEnv, componentPointer, holder, "initParam", UiMethodKind::PARAM_NAMED) ||
+                    !InstallUiMethod(napiEnv, componentPointer, holder, "updateParam", UiMethodKind::PARAM_NAMED) ||
+                    !InstallUiMethod(napiEnv, componentPointer, holder, "resetParam", UiMethodKind::PARAM_NAMED)) {
+                    return false;
+                }
+            }
+            if (needsState &&
+                !InstallUiMethod(napiEnv, componentPointer, holder, "resetStateVarsOnReuse",
+                                 UiMethodKind::STATE_RESET)) {
+                return false;
+            }
         }
         if ((needsState || needsNodes) &&
             !InstallUiMethod(napiEnv, componentPointer, holder, "initialRender", UiMethodKind::INITIAL_RENDER)) {
@@ -2929,10 +3035,30 @@ class JsvmRuntime
                 napi_value original = nullptr;
                 restored = NapiOk(component->env,
                                   napi_get_reference_value(component->env, method.original, &original),
-                                  "napi_get_reference_value(component original method)") &&
-                           NapiOk(component->env,
-                                  napi_set_named_property(component->env, holder, method.methodName.c_str(), original),
-                                  "napi_set_named_property(restore component method)");
+                                  "napi_get_reference_value(component original method)");
+                if (!restored) {
+                    break;
+                }
+                if (method.hadOwnProperty) {
+                    restored = NapiOk(
+                        component->env,
+                        napi_set_named_property(component->env, holder, method.methodName.c_str(), original),
+                        "napi_set_named_property(restore component method)");
+                } else {
+                    napi_value propertyName = nullptr;
+                    bool deleted = false;
+                    restored = NapiOk(component->env,
+                                      napi_create_string_utf8(component->env, method.methodName.c_str(),
+                                                              NAPI_AUTO_LENGTH, &propertyName),
+                                      "napi_create_string_utf8(restore component method name)") &&
+                               NapiOk(component->env,
+                                      napi_delete_property(component->env, holder, propertyName, &deleted),
+                                      "napi_delete_property(restore inherited component method)") &&
+                               deleted;
+                    if (!deleted) {
+                        LogError("Failed to remove inherited component method trampoline: " + method.methodName);
+                    }
+                }
             }
             if (!restored) {
                 retained[retainedCount++] = std::move(component);

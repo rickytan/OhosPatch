@@ -653,7 +653,7 @@
   };
 
   Object.defineProperty(Fixit, 'runtimeVersion', {
-    value: '1.7.0',
+    value: '1.8.0',
     enumerable: true
   });
 

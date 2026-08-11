@@ -91,20 +91,20 @@ Do **not** move download, signature, URL, cache, or startup policy into `ohospat
 - `JSVM_CallbackStruct` passed to `OH_JSVM_CreateFunction` needs **stable process/VM lifetime** — declare them `static`, never on a temporary stack frame.
 - Timers use the host N-API libuv event loop (`napi_get_uv_event_loop`); callback + args stay in JSVM, Native holds only timer IDs. Max 256 active timers; `clear()`/replacement/VM reset cancels them.
 - Failure behavior: JSVM/NAPI bridge errors → error-level HiLog (tag `OhosPatch`), never crash. Patch execution failure → fall back to original ArkTS method. Hook install failure → roll back already-installed hooks. `executeScript` returns `0` on failure.
-- Original ArkTS exceptions must remain pending — never convert or swallow them in C++.
+- Plain fallback calls preserve original ArkTS pending exceptions. Explicit Patch `origin.apply(...)` calls convert a pending ArkTS exception into a catchable JSVM `Error`; if uncaught, OhosPatch falls back to the original ArkTS behavior.
 
 ## Cross-file sync invariants
 
 Several files must stay mutually consistent; a change in one usually requires the others:
 
-- `skills/ohospatch/references/fixit.d.js` `@version` **must equal** `Fixit.runtimeVersion` in `ohospatch/src/main/cpp/runtime/fixit.js` (currently `1.7.0`). Signatures, constraints, and globals in the declaration must match the runtime.
+- `skills/ohospatch/references/fixit.d.js` `@version` **must equal** `Fixit.runtimeVersion` in `ohospatch/src/main/cpp/runtime/fixit.js` (currently `1.8.0`). Signatures, constraints, and globals in the declaration must match the runtime.
 - `skills/ohospatch/SKILL.md` + `scripts/install-skill.sh` must track `references/fixit.d.js`, README limitations, and demonstrated runtime behavior.
 - `README.md` "当前边界" (current limitations) must reflect actual runtime capability.
 - Do not add source-scanning tests that pin implementation tokens such as handle-scope names or callback storage identifiers. When safety policy matters, test user-visible failure behavior on device and inspect the compiled binary.
 
 ## Declarative Component DSL
 
-Targets API 20 state-management V1 **exported** custom components only. `build()` does not exist after compilation — it becomes generated `initialRender()`; params flow through `setInitiallyProvidedValue`/`updateStateVars`; nodes via `observeComponentCreation2`. **The public DSL must not expose generated names** — an API/version adapter owns them. When changing component behavior beyond an established pattern, inspect the generated ArkTS output (`entry/build/.../cache/.../esmodule/.../*.ts`); source syntax alone is insufficient. Fail closed (log error, leave business behavior untouched) when a shape/selector/attribute/event can't be verified.
+Targets API 20 state-management V1 and V2 **exported** custom components through separate native adapters. `build()` becomes generated `initialRender()` and nodes use `observeComponentCreation2`; V1 params use `setInitiallyProvidedValue`/`updateStateVars`, while V2 params use `initParam`/`updateParam`/`resetParam` and reuse resets through `resetStateVarsOnReuse`. **The public DSL must not expose generated names**. When changing component behavior beyond an established pattern, inspect the generated ArkTS output (`entry/build/.../cache/.../esmodule/.../*.ts`); source syntax alone is insufficient. Fail closed (log error, leave business behavior untouched) when a shape/selector/attribute/event can't be verified.
 
 ## Working rules
 

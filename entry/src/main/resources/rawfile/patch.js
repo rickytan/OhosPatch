@@ -13,6 +13,9 @@
   var panel = Fixit.component(
     'com.rickytan.ohospatch/entry/src/main/ets/demo/PatchablePanel#PatchablePanel'
   );
+  var panelV2 = Fixit.component(
+    'com.rickytan.ohospatch/entry/src/main/ets/demo/PatchablePanelV2#PatchablePanelV2'
+  );
 
   // --- Timer + console 日志 ---
   // setTimeout：一次性回调，闭包变量在 method patch 中可读。
@@ -110,6 +113,28 @@
       this.tagText = 'toggle patched before origin';
       this.statusText = 'Patched toggle received ' + isOn;
       return originToggleChange.apply(this, arguments);
+    });
+
+  // --- ComponentV2: 与 ComponentV1 使用相同 DSL ---
+  panelV2.param('message').replace('Patched V2 component parameter');
+  panelV2.state('tapCount').replace(100);
+  panelV2.state('statusText').replace('V2 state replaced before initial render');
+  panelV2.node({ type: 'Text', occurrence: 0 })
+    .attr('fontColor', '#C44736');
+  panelV2.node({ type: 'Text', occurrence: 1 })
+    .attr('backgroundColor', function () {
+      return this.tapCount >= 100 ? '#E7F7EE' : '#EEF2F5';
+    });
+  var originV2Click = panelV2.node({ type: 'Button', occurrence: 0 })
+    .attrs({
+      height: 52,
+      backgroundColor: '#1F6B46'
+    })
+    .event('onClick', /** @this {any} */ function () {
+      this.markPrimary(10);
+      var result = originV2Click.apply(this, arguments);
+      this.statusText = 'Patched V2 event, taps=' + this.tapCount;
+      return result;
     });
 
   // --- Method patch: 实例方法 ---
