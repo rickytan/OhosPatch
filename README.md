@@ -21,7 +21,7 @@ OhosPatch/
 │       ├── demo/              # 未侵入的业务类和验证场景
 │       ├── patch/             # 宿主下载、验签接入点和启动策略
 │       └── pages/             # 验证页面
-└── patch-server/              # 运行时 patch 服务，不打入 HAP/HAR
+└── patch-server/              # 开发期 HTTP 服务，直接服务 rawfile 下的 patch.js
 ```
 
 `ohospatch` 可以独立构建为 `ohospatch.har`。`entry` 没有 Native 或补丁实现源码，只通过 `file:../ohospatch` 依赖接入 HAR。
@@ -191,7 +191,7 @@ moduleInfo = com.rickytan.ohospatch/entry
 exportName = DemoViewModel
 ```
 
-演示补丁位于 `patch-server/patch.js`，不会打入 HAR 或 HAP。
+演示补丁位于 `entry/src/main/resources/rawfile/patch.js`，同时作为网络加载失败的内置兜底打入 HAP；`patch-server` 通过 HTTP 直接服务该文件，不单独维护副本。
 
 ### 声明式组件 DSL
 

@@ -78,7 +78,7 @@ prototype[methodName] = native trampoline ──▶ calls into JSVM handler
 
 - `ohospatch/` — the **entire** patch implementation, built as a reusable HAR. `Index.ets` → `src/main/ets/OhosPatch.ets` (ArkTS facade) → `src/main/cpp/ohospatch.cpp` (3k-line native core) + `src/main/cpp/runtime/fixit.js` (embedded JS runtime).
 - `entry/` — Demo APP only. Consumes the HAR via `file:../ohospatch`. Contains **no** native or patch implementation source. Business demo classes (`DemoViewModel`, `PatchablePanel`, `Point`) do not reference OhosPatch.
-- `patch-server/` — dev-only HTTP server (`server.mjs` + `patch.js`). **Never** bundled into HAR/HAP.
+- `patch-server/` - dev-only HTTP server (`server.mjs`); serves `entry/src/main/resources/rawfile/patch.js` directly. The server is not packaged; the rawfile patch is the HAP fallback.
 - `skills/ohospatch/references/fixit.d.js` - editor-only JSDoc declaration; not delivered to device, not executed. Installed alongside the skill.
 
 Do **not** move download, signature, URL, cache, or startup policy into `ohospatch` — those are host responsibilities.

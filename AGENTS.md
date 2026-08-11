@@ -9,7 +9,7 @@
 - Workspace project root: this directory.
 - The reusable patch implementation is the `ohospatch` HAR module.
 - `entry` is only a Demo APP that consumes the HAR and demonstrates behavior.
-- `patch-server` serves a patch dynamically. Patch code must not be bundled into the HAR or HAP.
+- `patch-server` serves the demo patch dynamically over HTTP; it reads `entry/src/main/resources/rawfile/patch.js`, which is also shipped inside the HAP as a network-failure fallback.
 
 ## Product Requirements Established With The User
 
@@ -127,7 +127,7 @@ Proposed public concepts:
 - Component event handlers written with normal `function` syntax receive `this` as the current Component instance Proxy. Arrow functions keep lexical `this`.
 - `node.event(...)` returns an original ArkUI event callback proxy. `origin.apply(this, arguments)` is supported and strips OhosPatch's injected event context before calling the original callback.
 - Event bridges retain the original ArkTS callback and fall back to it after `clear()` or a patch handler failure.
-- The Demo target is `entry/src/main/ets/demo/PatchablePanel.ets` and the dynamic script is `patch-server/patch.js`.
+- The Demo target is `entry/src/main/ets/demo/PatchablePanel.ets` and the dynamic script is `entry/src/main/resources/rawfile/patch.js` (served by `patch-server`).
 - API 20 generated output was inspected and matches `setInitiallyProvidedValue`, `updateStateVars`, `initialRender`, and `observeComponentCreation2`.
 - The HAP was installed on a HarmonyOS 6.0.2 API 22 Pura 90 emulator after compiling against API 20.
 - Device screenshots verified patched parameter text, state `40`, Button attributes, and click replacement from `40` to `50`.
@@ -217,7 +217,7 @@ Expected result: no matches.
 - Start server with `node patch-server/server.mjs`.
 - Use `hdc rport tcp:8080 tcp:8080` for simulator/device access.
 - The current remote patch demonstrates component param/state/attrs/events, event `this`, original event callback, prototype hooks, imports, and timer execution.
-- No patch script is bundled into the application package.
+- The demo patch is bundled into the HAP as a rawfile fallback; production hosts still download and verify patches at runtime.
 
 ## Working Rules
 

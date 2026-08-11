@@ -1,4 +1,4 @@
-/// <reference path="../skills/ohospatch/references/fixit.d.js" />
+/// <reference path="../../../../../skills/ohospatch/references/fixit.d.js" />
 
 (function (Fixit) {
   var Point = Fixit.import(
