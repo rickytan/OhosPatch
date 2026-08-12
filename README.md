@@ -53,17 +53,12 @@ OhosPatch/
 ## 架构
 
 ```mermaid
-flowchart LR
-  subgraph Host["宿主 APP"]
-    Loader["下载 / 验签 / 灰度 / 缓存"]
-    Business["ArkTS 业务类与 ArkUI 组件"]
-  end
-
-  subgraph Har["ohospatch HAR"]
-    API["OhosPatch.executeScript / executeFile"]
-    Native["Native N-API Bridge"]
-    JSVM["独立 JSVM + Fixit Runtime"]
-  end
+graph LR
+  Loader["宿主 APP: 下载 / 验签 / 灰度 / 缓存"]
+  Business["宿主 APP: ArkTS 业务类与 ArkUI 组件"]
+  API["ohospatch HAR: OhosPatch.executeScript / executeFile"]
+  JSVM["独立 JSVM + Fixit Runtime"]
+  Native["Native N-API Bridge"]
 
   Loader --> API
   API --> JSVM
@@ -100,10 +95,13 @@ sequenceDiagram
 声明式组件 Hook 调用链：
 
 ```mermaid
-flowchart TD
+graph TD
   A["Fixit.component(fullPath)"] --> B["Native 加载导出的 Component 类"]
-  B --> C["包装参数初始化和首次渲染入口"]
-  C --> D["包装 observeComponentCreation2 的节点 builder"]
+  B --> C{"识别生成类模型"}
+  C -->|V1| V1["setInitiallyProvidedValue / updateStateVars"]
+  C -->|V2| V2["initParam / updateParam / resetParam"]
+  V1 --> D["包装 initialRender 与 observeComponentCreation2"]
+  V2 --> D
   D --> E["原 builder 创建 ArkUI 节点"]
   E --> F["Patch 写入节点 attrs / event"]
   F --> G["ArkUI 继续正常渲染"]
@@ -132,18 +130,18 @@ OhosPatch 使用两层运行时协作：
 OhosPatch 在生产环境中只负责“执行已可信 patch”。建议宿主侧按下面流程接入：
 
 ```mermaid
-flowchart LR
+graph LR
   A["启动或业务初始化"] --> B["读取本地缓存 patch"]
   B --> C{"签名 / 版本 / 设备校验"}
-  C -- 通过 --> D["OhosPatch.executeScript"]
-  C -- 失败 --> E["丢弃并记录"]
+  C -->|通过| D["OhosPatch.executeScript"]
+  C -->|失败| E["丢弃并记录"]
   A --> F["后台请求 patch 配置"]
   F --> G["下载 patch"]
   G --> H["验签、灰度、熔断、缓存"]
   H --> D
   D --> I{"hookCount > 0"}
-  I -- 是 --> J["记录版本和成功状态"]
-  I -- 否 --> K["回滚 / 禁用该 patch"]
+  I -->|是| J["记录版本和成功状态"]
+  I -->|否| K["回滚 / 禁用该 patch"]
 ```
 
 宿主必须负责：
@@ -201,28 +199,93 @@ Patch 脚本可以引用声明文件获得 IDE 补全：
 /// <reference path="./fixit.d.js" />
 ```
 
+完整目标路径格式是：
+
+```text
+bundleName/moduleName/[packageName/]src/main/ets/File#ExportName
+```
+
+例如 Demo 的 `PatchablePanel` 导出自 `entry/src/main/ets/demo/PatchablePanel.ets`，所以目标为：
+
+```text
+com.rickytan.ohospatch/entry/src/main/ets/demo/PatchablePanel#PatchablePanel
+```
+
+下面每个示例都先列出已经发布在 APP 中、无需为 OhosPatch 修改的原始 ArkTS 代码，再列出下发的 JavaScript Patch。
+
 ### 修复实例方法
+
+原始 ArkTS 类：
+
+```ts
+export class DemoViewModel {
+  buttonTitle: string = 'idle';
+  profile: DemoProfile = new DemoProfile();
+
+  locationOf(locations: Array<Point>, index: number, _defaultValue: Point): Point {
+    const point = locations[index];
+    if (point === undefined) {
+      throw new Error(`index ${index} out of bounds`);
+    }
+    return point;
+  }
+}
+```
+
+对应 Patch：
 
 ```js
 var fix = Fixit.fix(
   'com.example.app/entry/src/main/ets/model/DemoViewModel#DemoViewModel'
 );
 
-var origin = fix.instanceMethod('locationOf', function (locations, index, fallback) {
+var originLocation = fix.instanceMethod('locationOf', function (locations, index, fallback) {
   if (index < 0 || index >= locations.length) {
     this.profile.badge.text = 'out of bounds';
     this.profile.badge.advance(10);
+    this.buttonTitle = this.profile.summary();
     return fallback;
   }
-  return origin.apply(this, arguments);
+  return originLocation.apply(this, arguments);
 });
 ```
 
+`this` 是当前 `DemoViewModel` 实例的同步 Proxy，可以用普通点语法访问多层属性、赋值和调用实例方法。越界时 Patch 返回 `fallback`；未越界时，`originLocation.apply(this, arguments)` 把原接收者和全部原参数交还给原方法。
+
 ### 修复 `undefined is not a function`
 
-Demo 中第二屏的 `Unsafe onClick crash` 是一个普通 ArkUI `Button().onClick` 回调。未加载 patch 时点击会在 onClick 内直接调用未定义 callback，并触发 `undefined is not a function` 类错误；加载 patch 后，OhosPatch 用 Component event DSL 替换这个 Button 的 `onClick`，在回调最外层加 `try/catch`，并在 `try` 中调用原始事件回调。这样 patch 的性质和实例方法修复一致：包住原方法，捕获原始实现中的异常，再写回组件状态：
+原始 ArkTS 组件中的第三个 Button：
+
+```ts
+@Component
+export struct PatchablePanel {
+  @State statusText: string = 'Waiting for action';
+  @State tagText: string = 'original tag';
+  unsafeCallback?: () => string;
+
+  build() {
+    Column() {
+      // occurrence 0: Primary action
+      Button('Primary action').onClick(() => {})
+      // occurrence 1: Secondary action
+      Button('Secondary action').onClick(() => {})
+      // occurrence 2: Unsafe onClick crash
+      Button('Unsafe onClick crash')
+        .onClick(() => {
+          this.tagText = (this.unsafeCallback as () => string)();
+        })
+    }
+  }
+}
+```
+
+`unsafeCallback` 没有赋值，原 `Button.onClick` 会触发 `undefined is not a function`。对应 Patch 选择第三个 Button，替换其回调，并在 `try` 中调用原回调：
 
 ```js
+var panel = Fixit.component(
+  'com.example.app/entry/src/main/ets/components/PatchablePanel#PatchablePanel'
+);
+
 var originUnsafeClick = panel.node({ type: 'Button', occurrence: 2 })
   .event('onClick', function () {
     try {
@@ -235,13 +298,41 @@ var originUnsafeClick = panel.node({ type: 'Button', occurrence: 2 })
   });
 ```
 
-注意：OhosPatch 只会在 patch 显式调用 `origin.apply(this, arguments)` 时，把原 ArkTS pending exception 转成 JSVM 中可捕获的 `Error`。如果 handler 没有 catch，调用会回退到原 ArkTS 实现并继续保留原始异常行为。
+OhosPatch 在 `origin.apply(...)` 边界把原 ArkTS pending exception 转成当前 JSVM 调用中可捕获的 `Error`。这个 `try/catch` 必须包住 `originUnsafeClick.apply(...)`；只包 Patch 自己的状态赋值无法捕获原回调异常。handler 不处理异常时，Runtime fail closed，保留原业务异常行为。
 
 ### 修复静态方法并导入其他类
+
+原始 ArkTS 类：
+
+```ts
+export class Point {
+  readonly x: number;
+  readonly y: number;
+
+  constructor(x: number, y: number) {
+    this.x = x;
+    this.y = y;
+  }
+
+  toText(): string { return `(${this.x}, ${this.y})`; }
+  static textOf(point: Point): string { return `(${point.x}, ${point.y})`; }
+}
+
+export class DemoViewModel {
+  static crash(): string {
+    throw new Error('class crash');
+  }
+}
+```
+
+对应 Patch：
 
 ```js
 var Point = Fixit.import(
   'com.example.app/entry/src/main/ets/model/Point#Point'
+);
+var fix = Fixit.fix(
+  'com.example.app/entry/src/main/ets/model/DemoViewModel#DemoViewModel'
 );
 
 fix.classMethod('crash', function () {
@@ -250,30 +341,284 @@ fix.classMethod('crash', function () {
 });
 ```
 
-`require(fullPath)` 是 `Fixit.import(fullPath)` 的兼容别名。
+`Fixit.import()` 返回可调用的持久 ArkTS 类 Proxy，支持静态方法、`new`、实例属性和实例方法。`require(fullPath)` 是它的别名。
 
-### 修复声明式组件
+### 修复 Component 参数和状态
+
+原始状态管理 V1 组件：
+
+```ts
+@Component
+export struct PatchablePanel {
+  @Prop message: string = 'Original component parameter';
+  @Prop subtitle: string = 'Original subtitle';
+  @State tapCount: number = 0;
+  @State statusText: string = 'Waiting for action';
+
+  build() {
+    Column() {
+      Text(this.message)
+      Text(this.subtitle)
+      Text(`tapCount=${this.tapCount}`)
+      Text(`status=${this.statusText}`)
+    }
+  }
+}
+```
+
+对应 Patch：
 
 ```js
 var panel = Fixit.component(
   'com.example.app/entry/src/main/ets/components/PatchablePanel#PatchablePanel'
 );
 
-panel.param('message').replace('Patched component parameter');
-panel.state('tapCount').transform(function (value) {
-  return value === 0 ? 40 : value;
+// 固定值替换。
+panel.param('subtitle', 'Patched subtitle');
+panel.state('statusText', 'Patched state');
+
+// param 和 state 的函数形式都会接收替换前的值，并返回替换后的值。
+panel.param('message', function (originValue) {
+  this.statusText = 'Original message=' + originValue;
+  return 'Patched component parameter';
+});
+panel.state('tapCount', function (originValue) {
+  this.statusText = 'Original count=' + originValue;
+  return originValue === 0 ? 40 : originValue;
+});
+```
+
+`param(name, valueOrHandler)` 和 `state(name, valueOrHandler)` 使用相同形式。普通 `function` 中的 `this` 是当前 Component 实例 Proxy；箭头函数保留 JavaScript 词法 `this`，因此需要访问组件实例时不能使用箭头函数。当前公开 DSL 只支持这种直接传值或 handler 的形式。
+
+状态管理 V2 使用相同 DSL：`param()` 对应 `@Param`，`state()` 可修复 `@Local` 等可观察实例状态。Runtime 根据编译产物自动选择 V1/V2 adapter，Patch 不需要声明版本。
+
+### 选择节点并修复属性
+
+原始组件开头按源码顺序创建以下四个 Text，后面还有 Toggle 标签和结果 Text：
+
+```ts
+@Component
+export struct PatchablePanel {
+  build() {
+    Column() {
+      Text(this.message)                                      // Text occurrence 0
+      Text(this.subtitle)                                     // Text occurrence 1
+      Text(`tapCount=${this.tapCount}`)                       // Text occurrence 2
+        .fontColor('#27313D')
+        .backgroundColor('#EEF2F5')
+      Text(`status=${this.statusText}`)                       // Text occurrence 3
+        .fontSize(14)
+    }
+  }
+}
+```
+
+对应 Patch：
+
+```js
+// 字符串是 occurrence: 0 的简写，选择第一个 Text。
+panel.node('Text').attr('fontColor', '#C44736');
+
+// 选择第三个 Text，一次修复多个单参数属性。
+panel.node({ type: 'Text', occurrence: 2 }).attrs({
+  backgroundColor: '#E7F7EE',
+  fontColor: function () {
+    return this.tapCount > 45 ? '#C44736' : '#1F6B46';
+  }
 });
 
-var originClick = panel.node({ type: 'Button', occurrence: 0 })
-  .attrs({ height: 52, backgroundColor: '#C44736' })
-  .event('onClick', function () {
-    this.tagText = 'tapCount=' + this.tapCount;
-    this.markPrimary(10);
-    return originClick.apply(this, arguments);
+// 单个属性也可以使用动态 handler；每次目标节点渲染时重新求值。
+panel.node({ type: 'Text', occurrence: 3 })
+  .attr('fontSize', function () {
+    return this.switchOn ? 16 : 14;
   });
 ```
 
-Component DSL 当前支持 API 20 状态管理 V1 导出的自定义组件。`event(name, handler)` 是同步事件替换；handler 只接收 ArkUI 原始事件参数，普通 `function` 的 `this` 指向当前 Component 实例 Proxy。
+Selector 目前只有字符串和对象两种输入形态：
+
+| 写法 | 含义 |
+| --- | --- |
+| `node('Button')` | 当前目标组件渲染中的第一个 Button |
+| `node({ type: 'Button' })` | 同上，`occurrence` 默认是 `0` |
+| `node({ type: 'Button', occurrence: 2 })` | 当前目标组件渲染中的第三个 Button |
+| `node({ type: 'Button', where: { id: 'submit', height: 44 } })` | 原始 `id` 和 `height` 同时匹配的第一个 Button |
+
+`type` 必须是内置 ArkUI 节点 API 名称，例如 `Text`、`Button`、`Toggle`、`Slider`。`occurrence` 和 `where` 不能同时出现。节点规则在原 builder 执行后写入，因此 Patch 属性是最后写入者。
+
+`where` 的 key 是任意 ArkUI 属性方法名，value 是该方法原始第一个参数的编译时固定值。Runtime 不硬编码 `id`、`height` 等属性名；它会临时观察 `where` 中实际声明的方法。所有 value 必须可 JSON 序列化，所有条件按深度值比较并且必须同时满足。如果同一次组件构建中有多个节点满足条件，只选择按 builder 执行顺序遇到的第一个。
+
+属性在源码链中的位置不影响匹配和覆盖。例如原始组件把 `id` 放在最后：
+
+```ts
+Button('Submit')
+  .height(44)
+  .backgroundColor('#59636E')
+  .onClick(() => this.submit())
+  .id('submitButton')
+```
+
+Patch 仍可同时使用链首的 `height` 和链尾的 `id` 定位，并覆盖此前已经执行过的属性或事件：
+
+```js
+var originSubmit = panel.node({
+  type: 'Button',
+  where: { id: 'submitButton', height: 44 }
+})
+  .attrs({ height: 48, backgroundColor: '#1F6B46' })
+  .event('onClick', function () {
+    this.statusText = 'Patched submit';
+    return originSubmit.apply(this, arguments);
+  });
+```
+
+匹配只读取宿主 builder 的原始属性调用，Patch 自己写入的 `height: 48` 不参与 selector。若属性未执行、值不相等或节点不存在，本次规则保持 no-op，不改变原始渲染；Runtime 只对同一未命中的 selector 输出一次 warning，不抛异常。`where` 不能匹配 `Button(label)` 这类 `create` 参数，也不能匹配运行时函数、Resource/Controller 等不可 JSON 序列化值。
+
+`occurrence` 从 `0` 开始，按同一类型节点在目标组件当前这次实际执行的渲染路径中单独计数；`Text occurrence: 2` 不受前面的 Button 或 Row 影响。
+
+多级嵌套组件时，`occurrence` 只在当前 `Fixit.component(fullPath)` 指向的组件内部计算。父组件中的 `<Child />` 只是父组件渲染路径上的一个自定义组件创建点，不会把 `Child` 内部的 `Text/Button` 计入父组件 selector；要修复子组件内部节点，需要对 `Child` 自己再写一条 `Fixit.component(childFullPath)`。
+
+条件渲染时，只统计当前状态下实际执行到的分支。`if` 分支里第一个 `Button` 是该分支执行时的 `Button occurrence: 0`；切到 `else` 分支后，`else` 分支里实际创建的同类型节点会重新按执行顺序计数。循环和 `ForEach` 也是同一规则：每个实际执行的迭代都会按顺序贡献节点，因此列表长度、排序或过滤条件变化会改变后续同类型节点的 `occurrence`。
+
+更具体地说，编译后的组件渲染会在执行到每个 ArkUI 内置节点 builder 时累加计数；没有执行到的分支不会占位。
+
+同级混排时，不同类型分别计数：
+
+```ts
+build() {
+  Column() {
+    Text('A')      // Text occurrence 0
+    Button('One')  // Button occurrence 0
+    Text('B')      // Text occurrence 1
+    Button('Two')  // Button occurrence 1
+    Text('C')      // Text occurrence 2
+  }
+}
+```
+
+等价地看成执行了下面这些内置节点 builder，OhosPatch 只在同一 `type` 内递增：
+
+```text
+Text.create(...)    -> Text 0
+Button.create...    -> Button 0
+Text.create(...)    -> Text 1
+Button.create...    -> Button 1
+Text.create(...)    -> Text 2
+```
+
+所以 `node({ type: 'Text', occurrence: 2 })` 命中 `Text('C')`，`node({ type: 'Button', occurrence: 1 })` 命中 `Button('Two')`。
+
+嵌套自定义组件时，只算当前目标组件自己的渲染路径：
+
+```ts
+@Component
+export struct ParentPanel {
+  build() {
+    Column() {
+      Text('Parent top')     // ParentPanel: Text occurrence 0
+      ChildPanel()
+      Text('Parent bottom')  // ParentPanel: Text occurrence 1
+    }
+  }
+}
+
+@Component
+export struct ChildPanel {
+  build() {
+    Column() {
+      Text('Child title')    // ChildPanel: Text occurrence 0
+      Button('Child action') // ChildPanel: Button occurrence 0
+    }
+  }
+}
+```
+
+`Fixit.component('.../ParentPanel#ParentPanel').node({ type: 'Text', occurrence: 1 })` 命中 `Parent bottom`。它不会命中 `Child title`，因为 `ChildPanel` 内部节点属于 `Fixit.component('.../ChildPanel#ChildPanel')` 的计数范围。
+
+条件渲染时，当前分支决定计数结果：
+
+```ts
+build() {
+  Column() {
+    Text('Header') // Text occurrence 0
+    if (this.loggedIn) {
+      Text('Profile')   // loggedIn=true: Text occurrence 1
+      Button('Logout')  // loggedIn=true: Button occurrence 0
+    } else {
+      Button('Login')   // loggedIn=false: Button occurrence 0
+      Text('Guest')     // loggedIn=false: Text occurrence 1
+    }
+    Text('Footer') // Text occurrence 2, 两个分支下都一样
+  }
+}
+```
+
+当 `loggedIn=true` 时，`Button occurrence 0` 是 `Logout`；当 `loggedIn=false` 时，同一个 selector 命中 `Login`。这种 selector 适合修复“当前状态下的第一个 Button”，不适合表达“无论哪个分支都命中同一个业务按钮”。如果两个分支需要不同 patch，应分别确认触发状态并绑定准确 App 版本。
+
+循环或列表会把每次实际迭代都计入：
+
+```ts
+build() {
+  Column() {
+    ForEach(this.items, (item: Item) => {
+      Text(item.title)     // 每个 item 贡献一个 Text
+      Button('Open')       // 每个 item 贡献一个 Button
+    })
+    Text('After list')     // occurrence 取决于 items.length
+  }
+}
+```
+
+如果 `items = [A, B]`，执行顺序是：
+
+```text
+Text(A)          -> Text 0
+Button(Open A)   -> Button 0
+Text(B)          -> Text 1
+Button(Open B)   -> Button 1
+Text(After list) -> Text 2
+```
+
+如果 `items = [A, B, C]`，`Text('After list')` 会变成 `Text occurrence 3`。`occurrence` 只做按类型计数，不需要临时捕获属性和执行深比较，性能更好，应作为生产 Patch 的首选。列表长度、过滤、排序或分页会改变计数时，再使用 `where` 匹配稳定的原始属性。
+
+当前不支持 `create` 参数、文本内容、父子层级、样式类或自定义 key selector。`id` 可以作为普通原始属性写入 `where`。发布版本增删节点、调整属性或改变同类型节点顺序后，selector 都可能失效，因此宿主仍必须把 Patch 与准确 APP 版本绑定。
+
+`attr(name, ...args)` 可传一个或多个 JSON 可序列化的静态参数；动态 handler 只能返回该属性的单个参数，不能附加额外参数。`attrs({...})` 是多个单参数 `attr` 的简写。
+
+### 修复具有多个参数的事件
+
+Demo 原始 Slider 事件有 `value` 和 `mode` 两个位置参数：
+
+```ts
+@Component
+export struct PatchablePanel {
+  @State sliderValue: number = 20;
+  @State statusText: string = 'Waiting for action';
+
+  build() {
+    Slider({ value: this.sliderValue, min: 0, max: 100, step: 5 })
+      .onChange((value: number, mode: SliderChangeMode) => {
+        this.sliderValue = value;
+        this.statusText = `Slider changed to ${value}, mode=${mode}`;
+      })
+  }
+}
+```
+
+对应 Patch：
+
+```js
+var originSliderChange = panel.node({ type: 'Slider', occurrence: 0 })
+  .event('onChange', function (value, mode) {
+    this.tagText = 'Patched slider value=' + value + ', mode=' + mode;
+
+    // arguments 同时包含 value 和 mode，按原顺序转发给 ArkTS 原回调。
+    return originSliderChange.apply(this, arguments);
+  });
+```
+
+`event(name, handler)` 会按原顺序把 ArkUI 回调的全部位置参数传给 handler，所以也可以显式写 `originSliderChange.call(this, value, mode)`。推荐 `origin.apply(this, arguments)`，这样原事件增加参数时不会遗漏。`event()` 返回的 origin Proxy 以及 Component `this` 只在当前同步事件调用中有效，不能保存到 timer、Promise 或全局变量后异步使用。
+
+事件参数通过 JSON 快照跨越 ArkTS VM 与 JSVM；数字、字符串、布尔值、数组和普通 DTO 可直接使用。包含 Native 状态、循环引用、函数或 Controller 的事件对象不保证完整桥接，此类事件应只读取经过验证的可序列化字段。当前 event 是同步替换，不支持 `before`、`after`、`around` 或异步调用 origin。
 
 ## 内置 JS Runtime
 
@@ -284,12 +629,10 @@ Component DSL 当前支持 API 20 状态管理 V1 导出的自定义组件。`ev
 - `Fixit.fix(fullPath)`
 - `Fixit.component(fullPath)`
 - `Fixit.import(fullPath)`
-- `Fixit.registerTarget(className, descriptor)`
 - `instanceMethod(name, handler)` / `classMethod(name, handler)`
-- `component.param(name)` / `component.state(name)`
+- `component.param(name, valueOrHandler)` / `component.state(name, valueOrHandler)`
 - `component.node(selector).attr(...)` / `.attrs(...)` / `.event(...)`
 - `require(fullPath)`
-- `nil` / `Nil`、`isNil`、`nilToNull`、`nullToNil`
 - `console.debug/log/info/warn/error`
 - `setTimeout` / `clearTimeout`
 - `setInterval` / `clearInterval`
@@ -333,6 +676,36 @@ Patch 前：
 Patch 后：
 
 ![Demo after patch](docs/images/demo-after.png)
+
+### Demo Patch 为什么这样写
+
+Demo 使用一个真实的远程脚本 [`entry/src/main/resources/rawfile/patch.js`](entry/src/main/resources/rawfile/patch.js) 同时覆盖 Runtime 的主要能力，而不是为截图写一份特殊 Patch。它对应的未侵入业务源码是 [`PatchablePanel.ets`](entry/src/main/ets/demo/PatchablePanel.ets)、[`PatchablePanelV2.ets`](entry/src/main/ets/demo/PatchablePanelV2.ets)、[`DemoViewModel.ets`](entry/src/main/ets/demo/DemoViewModel.ets) 和 [`Point.ets`](entry/src/main/ets/demo/Point.ets)。
+
+脚本按以下目的组织：
+
+1. `param/state` 同时演示固定值和基于原值的函数替换，以及 handler 中的 Component `this`。
+2. 多个 `Text/Button/Toggle/Slider` 规则验证 selector 的原始属性匹配、首个命中、按类型 `occurrence` 计数、静态属性、动态属性和多参数事件。
+3. Button handler 分别演示“先执行 Patch 再调 origin”“Patch 调组件方法后再调 origin”和“用 try/catch 包住会抛错的 origin”。
+4. V1 与 V2 使用同一 DSL，验证 Runtime 自动选择 adapter。
+5. `DemoViewModel`、`Point` 和 timer 规则验证普通方法、静态方法、跨模块 import、嵌套 Proxy 与 JSVM 全局函数。
+
+截图中的可见变化与 Patch 一一对应：
+
+| Patch 规则 | Patch 前 | Patch 后截图中的效果 |
+| --- | --- | --- |
+| `param('message', ...)` | `Original component parameter` | 顶部标题内容变为 `Patched component parameter` |
+| `param('subtitle', handler)` | `State, attrs, events...` | 副标题变为 `Patched subtitle from remote JavaScript` |
+| 第一个 Text 的 `fontColor` | 标题为深色 | 标题变为红色 |
+| `state('tapCount', handler)` | `tapCount=0` | `tapCount=40` |
+| `state('secondaryCount', handler)` | `secondary=1` | `secondary=21` |
+| 第三个 Text 的 `backgroundColor/fontColor` | 灰底深色文字 | `tapCount` 行变为浅绿底绿色文字 |
+| `state('switchOn', true)` | Switch 关闭 | Switch 打开并显示 `Switch is on` |
+| `state('sliderValue', 75)` | Slider 值为 20 | Slider 滑块位于 75 |
+| 三个 Button 的 `height/backgroundColor` | 高 44，灰/棕/红 | 高 52，红/绿/绿 |
+| 第三个 Button 的 `onClick` | 点击调用 undefined callback | 截图是在点击后拍摄：页面存活，`status` 和 `tag` 显示 recovered 信息 |
+| `locationOf` 实例方法 | `Invalid index -> index 2 out of bounds` | 返回 fallback `(0.5, 1.5)`，并通过嵌套 Proxy 写出 `out of bounds@10` |
+
+截图首屏范围没有显示 V2 面板以及后续 method/import/timer 结果；向下滚动可以继续验证。拖动 Slider 时，Patch handler 会收到 `value`、`mode` 两个参数，写入 `tagText` 后通过 `originSliderChange.apply(this, arguments)` 保留原来的 Slider 状态更新。点击 Primary/Secondary Button 则会看到 Patch 对组件方法和原事件回调的组合调用。
 
 启动本地 patch 服务：
 
@@ -424,8 +797,8 @@ $HOME/Library/OpenHarmony/Sdk
 - Patch handler 的 `this` Proxy 只在当前同步调用或 `origin` 调用期间有效，不应保存到 timer、Promise 或全局变量后异步访问。
 - `Fixit.import()` 返回的持久 Proxy 可保留到 `OhosPatch.clear()` 或下一次 patch 替换。
 - 普通方法参数和新建 JS 对象仍受 JSON wire 类型限制。
-- Component DSL 当前支持 API 20 状态管理 V1、导出的自定义组件、`type + occurrence` 节点选择器、JSON 属性参数和同步事件替换。
-- 非导出的 `@Entry` 页面、状态管理 V2、层级/ID 选择器、资源与控制器类型、已挂载组件主动刷新，以及 `before/after/around` 事件组合尚未支持。
+- Component DSL 当前支持 API 20 状态管理 V1/V2、导出的自定义组件、首选的 `type + occurrence` 节点选择器、`type + where` 原始属性选择器、JSON 属性参数和同步事件替换。
+- 非导出的 `@Entry` 页面、层级/ID 选择器、资源与控制器类型、已挂载组件主动刷新，以及 `before/after/around` 事件组合尚未支持。
 - 单个 runtime 最多同时存在 256 个 timer。
 - 单个 patch 最多保留 512 个去重后的动态导入类、实例、方法或嵌套对象句柄。
 

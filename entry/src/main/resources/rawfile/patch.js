@@ -13,6 +13,9 @@
   var panel = Fixit.component(
     'com.rickytan.ohospatch/entry/src/main/ets/demo/PatchablePanel#PatchablePanel'
   );
+  var panelV2 = Fixit.component(
+    'com.rickytan.ohospatch/entry/src/main/ets/demo/PatchablePanelV2#PatchablePanelV2'
+  );
 
   // --- Timer + console 日志 ---
   // setTimeout：一次性回调，闭包变量在 method patch 中可读。
@@ -37,17 +40,20 @@
   }, 60);
 
   // --- Component value override: param / state ---
-  panel.param('message').replace('Patched component parameter');
-  panel.param('subtitle').replace('Patched subtitle from remote JavaScript');
-  panel.state('tapCount').transform(function (value) {
+  panel.param('message', 'Patched component parameter');
+  panel.param('subtitle', function (originValue) {
+    this.tagText = 'Original subtitle: ' + originValue;
+    return 'Patched subtitle from remote JavaScript';
+  });
+  panel.state('tapCount', function (value) {
     return value === 0 ? 40 : value;
   });
-  panel.state('statusText').replace('State replaced while the component was created');
-  panel.state('secondaryCount').transform(function (value) {
+  panel.state('statusText', 'State replaced while the component was created');
+  panel.state('secondaryCount', function (value) {
     return value + 20;
   });
-  panel.state('switchOn').replace(true);
-  panel.state('sliderValue').replace(75);
+  panel.state('switchOn', true);
+  panel.state('sliderValue', 75);
 
   // --- Component attribute: 静态值 ---
   panel.node({ type: 'Text', occurrence: 0 })
@@ -110,6 +116,44 @@
       this.tagText = 'toggle patched before origin';
       this.statusText = 'Patched toggle received ' + isOn;
       return originToggleChange.apply(this, arguments);
+    });
+
+  // Slider.onChange 有 value、mode 两个参数；handler 按原顺序接收，arguments 原样转发给原回调。
+  var originSliderChange = panel.node({ type: 'Slider', occurrence: 0 })
+    .event('onChange', /** @this {any} */ function (value, mode) {
+      this.tagText = 'Patched slider value=' + value + ', mode=' + mode;
+      return originSliderChange.apply(this, arguments);
+    });
+
+  // --- ComponentV2: 与 ComponentV1 使用相同 DSL ---
+  panelV2.param('message', function (originValue) {
+    this.statusText = 'V2 param handler received ' + originValue;
+    return 'Patched V2 component parameter';
+  });
+  panelV2.state('tapCount', function (originValue) {
+    this.statusText = 'V2 state handler received ' + originValue;
+    return 100;
+  });
+  panelV2.node({ type: 'Text', occurrence: 0 })
+    .attr('fontColor', '#C44736');
+  panelV2.node({ type: 'Text', occurrence: 1 })
+    .attr('backgroundColor', function () {
+      return this.tapCount >= 100 ? '#E7F7EE' : '#EEF2F5';
+    });
+  // id 位于宿主 builder 链尾；where 仍会读取原始 id/height 并只命中第一个符合节点。
+  var originV2Click = panelV2.node({
+    type: 'Button',
+    where: { id: 'v2-primary-action', height: 44 }
+  })
+    .attrs({
+      height: 52,
+      backgroundColor: '#1F6B46'
+    })
+    .event('onClick', /** @this {any} */ function () {
+      this.markPrimary(10);
+      var result = originV2Click.apply(this, arguments);
+      this.statusText = 'Patched V2 event, taps=' + this.tapCount;
+      return result;
     });
 
   // --- Method patch: 实例方法 ---

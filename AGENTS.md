@@ -34,12 +34,10 @@ The embedded runtime is `ohospatch/src/main/cpp/runtime/fixit.js`.
 - `skills/ohospatch/references/fixit.d.js` is the editor-only JSDoc declaration for every public Patch context API. Keep its `@version`, signatures, constraints, and globals synchronized with the embedded runtime.
 - `skills/ohospatch/` is the portable Codex/Claude authoring Skill source. Keep it and `scripts/install-skill.sh` aligned with `fixit.d.js`, README limitations, and demonstrated Runtime behavior.
 
-- `Fixit.fix(fullPath)` and `Fixit.component(fullPath)` parse complete OHM paths internally; do not use `require()` to create target descriptors.
+- `Fixit.fix(fullPath)` and `Fixit.component(fullPath)` parse complete OHM paths internally; do not use `require()` to prepare patch targets.
 - `Fixit.import(fullPath)` synchronously loads an exported ArkTS class and returns a persistent host-VM Proxy supporting static calls, `new`, instance calls, properties, arguments, and Patch results. References are released by `clear()` or Patch replacement.
-- `Fixit.registerTarget(className, descriptor)`
 - `instanceMethod(name, handler)` / `classMethod(name, handler)`
-- `require(fullPath)` is a compatibility alias of `Fixit.import(fullPath)` and returns a callable ArkTS class Proxy.
-- `nil`, `Nil`, `isNil`, `nilToNull`, `nullToNil`
+- `require(fullPath)` is an alias of `Fixit.import(fullPath)` and returns a callable ArkTS class Proxy.
 - `console.debug/log/info/warn/error` bridged to HiLog.
 - `setTimeout/clearTimeout`
 - `setInterval/clearInterval`
@@ -57,7 +55,7 @@ Primary implementation: `ohospatch/src/main/cpp/ohospatch.cpp`.
 - Patch method registrations are returned from JSVM as JSON specs.
 - Native loads target classes in the ArkTS VM and installs N-API trampolines.
 - Handler arguments still enter JSVM as JSON values. Method handler `this`, Component event handler `this`, nested properties, method calls, Proxy arguments, original-method results, and Proxy returns use invocation-scoped Native handles.
-- Runtime `1.7.0` includes a JS `Proxy` for the ArkTS receiver. `get`, `set`, and `apply` synchronously bridge to the original ArkTS object, preserving nested object identity and prototype method dispatch.
+- Runtime `1.13.0` includes a JS `Proxy` for the ArkTS receiver. `get`, `set`, and `apply` synchronously bridge to the original ArkTS object, preserving nested object identity and prototype method dispatch.
 - Proxy handles are valid only during the current synchronous patch invocation and must not escape to timers, promises, or globals. A call can retain at most 256 handles.
 - Hook failures fall back to the original ArkTS method.
 - Installation failure restores hooks that were already installed.
@@ -103,44 +101,53 @@ Important generated shape for state-management V1:
 - `rerender()` calls `updateDirtyElements()`.
 - An `@Entry` page can be non-exported and registered only through `registerNamedRoute`.
 
+Important generated shape for state-management V2:
+
+- The generated class extends `ViewV2`.
+- Constructor parameters flow through inherited `initParam(name, value)`.
+- Parameter updates and reuse flow through `updateParam(name, value)` and `resetParam(name, value)`.
+- Local state is stored as observable instance properties and is reset by `resetStateVarsOnReuse(params)`.
+- Node rendering still uses `initialRender()` and `observeComponentCreation2(builderCallback, ComponentApi)`.
+
 The public DSL must not expose generated names such as `initialRender` or `observeComponentCreation2`. An API/version adapter owns those details.
 
 Proposed public concepts:
 
 - `Fixit.component(fullPath)` parses the complete OHM target path internally.
-- `component.param(name)` for incoming component parameters.
-- `component.state(name)` for observable component state.
+- `component.param(name, valueOrHandler)` for incoming component parameters. Handler form receives the original value with `this` bound to the current Component instance Proxy.
+- `component.state(name, valueOrHandler)` for observable component state. Handler form receives the original value with `this` bound to the current Component instance Proxy.
 - `component.node(selector)` for a built-in ArkUI node.
 - `node.attrs({...})` for attribute overrides.
 - `node.event(name, handler)` for synchronous callback replacement.
 - Event handlers receive only the original ArkUI event arguments. Ordinary `function` handlers receive `this` as the current Component instance Proxy and should read/write state directly through that Proxy.
 
-### Implemented status (2026-08-10)
+### Implemented status (2026-08-12)
 
-- Runtime version `1.7.0` implements `Fixit.component` and the invocation-scoped ArkTS object Proxy bridge.
-- API 20 state-management V1 exported custom components are supported.
-- `param().transform/replace` and `state().transform/replace` are implemented.
-- Node selection by `{ type, occurrence }` is implemented with zero-based per-type counting.
+- Runtime version `1.13.0` implements `Fixit.component`, original-attribute node selectors, and the invocation-scoped ArkTS object Proxy bridge.
+- API 20 state-management V1 and V2 exported custom components are supported through separate native adapters with the same public DSL.
+- Direct `param/state(name, valueOrHandler)` are implemented; no chain-style value-fix API is exposed.
+- Node selection prefers `{ type, occurrence }` for efficient zero-based per-type counting and supports `{ type, where }` when original-attribute matching is needed.
 - `attr`, `attrs`, and synchronous `event(name, handler)` are implemented.
 - Component event handlers written with normal `function` syntax receive `this` as the current Component instance Proxy. Arrow functions keep lexical `this`.
 - Component event handlers receive only the original ArkUI event arguments and can read/write component state through `this`.
 - `node.event(...)` returns an original ArkUI event callback proxy. `origin.apply(this, arguments)` is supported.
 - Event bridges retain the original ArkTS callback and fall back to it after `clear()` or a patch handler failure.
-- The Demo target is `entry/src/main/ets/demo/PatchablePanel.ets` and the dynamic script is `entry/src/main/resources/rawfile/patch.js` (served by `patch-server`).
-- API 20 generated output was inspected and matches `setInitiallyProvidedValue`, `updateStateVars`, `initialRender`, and `observeComponentCreation2`.
+- The Demo targets are `entry/src/main/ets/demo/PatchablePanel.ets` and `PatchablePanelV2.ets`; the dynamic script is `entry/src/main/resources/rawfile/patch.js` (served by `patch-server`).
+- API 20 generated output was inspected for both models and matches the V1/V2 shapes documented above.
 - The HAP was installed on a HarmonyOS 6.0.2 API 22 Pura 90 emulator after compiling against API 20.
 - Device screenshots verified patched parameter text, state `40`, Button attributes, and click replacement from `40` to `50`.
-- HiLog verified 8 installed rules/hooks and the process remained alive after prior JSVM crash fixes.
+- Hypium launches the real Demo Ability and verifies ComponentV2 parameter, local state, node, event, `this`, and original callback behavior on the simulator.
 
 Implementation should proceed in explicit capability phases:
 
 1. API 20, state-management V1, exported custom components.
 2. Component parameter/state transforms.
-3. Node selector by component type plus occurrence.
+3. Node selector by component type plus occurrence, with original fixed attributes available when counting is unstable.
 4. Basic scalar node attributes.
 5. Synchronous event replacement, initially `onClick` and then generic event adapters.
-6. Route factory interception for non-exported `@Entry` pages.
-7. ID/create-argument/hierarchy selectors, resources, live-instance refresh, original event callbacks, and V2 adapters.
+6. State-management V2 adapter with the same public DSL.
+7. Route factory interception for non-exported `@Entry` pages.
+8. Create-argument/hierarchy selectors, resources, and live-instance refresh.
 
 Fail closed when a component shape, node selector, attribute, or event cannot be verified. Log an error and leave business behavior untouched.
 

@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from '@ohos/hypium';
+import { Want } from '@kit.AbilityKit';
+import { Driver, ON, abilityDelegatorRegistry } from '@kit.TestKit';
 import { OhosPatch } from '@rickytan/ohospatch';
 import { DemoViewModel } from '../../../main/ets/demo/DemoViewModel';
 import { Point } from '../../../main/ets/demo/Point';
@@ -47,24 +49,21 @@ export default function fixitTest(): void {
             return [
               Fixit.runtimeVersion,
               typeof require,
-              nil === null,
-              Nil === null,
               typeof YES,
               typeof NO,
-              isNil(null),
-              isNil(undefined),
-              isNil(0),
-              nilToNull(undefined) === null,
-              nilToNull('x'),
-              nullToNil(null) === null
+              typeof nil,
+              typeof Nil,
+              typeof isNil,
+              typeof nilToNull,
+              typeof nullToNil
             ].join('|');
           });
       `;
       OhosPatch.executeScript(script);
-      expect(DemoViewModel.crash()).assertEqual('1.7.0|function|true|true|undefined|undefined|true|true|false|true|x|true');
+      expect(DemoViewModel.crash()).assertEqual('1.13.0|function|undefined|undefined|undefined|undefined|undefined|undefined|undefined');
     });
 
-    it('component event patch accepts direct handler syntax only', 0, () => {
+    it('component DSL validates direct value API and unsupported event rules', 0, () => {
       const script = `
         Fixit.fix('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/DemoViewModel#DemoViewModel')
           .classMethod('crash', function () {
@@ -97,11 +96,119 @@ export default function fixitTest(): void {
             } catch (err) {
               attrExtraRejected = err instanceof TypeError;
             }
-            return typeof direct + '|' + objectRuleRejected + '|' + attrExtraRejected;
+            var missingStateReplacementRejected = false;
+            try {
+              Fixit.component('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/PatchablePanel#PatchablePanel')
+                .state('tapCount');
+            } catch (err) {
+              missingStateReplacementRejected = err instanceof TypeError;
+            }
+            var missingParamReplacementRejected = false;
+            try {
+              Fixit.component('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/PatchablePanel#PatchablePanel')
+                .param('message');
+            } catch (err) {
+              missingParamReplacementRejected = err instanceof TypeError;
+            }
+            var emptyWhereRejected = false;
+            try {
+              Fixit.component('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/PatchablePanel#PatchablePanel')
+                .node({ type: 'Button', where: {} })
+                .attr('height', 48);
+            } catch (err) {
+              emptyWhereRejected = err instanceof TypeError;
+            }
+            var mixedSelectorRejected = false;
+            try {
+              Fixit.component('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/PatchablePanel#PatchablePanel')
+                .node({ type: 'Button', occurrence: 0, where: { height: 44 } })
+                .attr('height', 48);
+            } catch (err) {
+              mixedSelectorRejected = err instanceof TypeError;
+            }
+            return typeof direct + '|' + objectRuleRejected + '|' + attrExtraRejected + '|' +
+              missingStateReplacementRejected + '|' + missingParamReplacementRejected + '|' +
+              emptyWhereRejected + '|' + mixedSelectorRejected;
           });
       `;
       expect(OhosPatch.executeScript(script)).assertLarger(0);
-      expect(DemoViewModel.crash()).assertEqual('function|true|true');
+      expect(DemoViewModel.crash()).assertEqual('function|true|true|true|true|true|true');
+    });
+
+    it('ComponentV2 supports param state node and event DSL behavior', 0, async () => {
+      const delegator = abilityDelegatorRegistry.getAbilityDelegator();
+      const want: Want = {
+        bundleName: 'com.rickytan.ohospatch',
+        moduleName: 'entry',
+        abilityName: 'EntryAbility'
+      };
+      await delegator.startAbility(want);
+
+      const driver = Driver.create();
+      const openButton = await driver.waitForComponent(ON.text('Open patch target screen'), 5000);
+      expect(openButton !== undefined).assertTrue();
+
+      const script = `
+        var component = Fixit.component(
+          'com.rickytan.ohospatch/entry/src/main/ets/demo/PatchablePanelV2#PatchablePanelV2'
+        );
+        component.param('message', function (originValue) {
+          return 'Patched V2 test parameter, origin=' + originValue + ', count=' + this.tapCount;
+        });
+        component.state('tapCount', function (originValue) {
+          this.statusText = 'Patched V2 state callback, origin=' + originValue;
+          return originValue + 100;
+        });
+        component.node({ type: 'Text', occurrence: 1 })
+          .attr('backgroundColor', '#E7F7EE');
+        component.node({
+          type: 'Button',
+          where: { id: 'v2-primary-action', height: 44 }
+        }).attr('id', 'patched-v2-primary-action');
+        component.node({ type: 'Button', where: { id: 'missing-action' } })
+          .attr('id', 'unexpected-action');
+        var origin = component.node({ type: 'Button', where: { height: 44 } })
+          .event('onClick', function () {
+            this.markPrimary(10);
+            var result = origin.apply(this, arguments);
+            this.statusText = 'Patched V2 test event, taps=' + this.tapCount;
+            return result;
+          });
+      `;
+      expect(OhosPatch.executeScript(script)).assertLarger(0);
+      await openButton.click();
+
+      const parameter = await driver.waitForComponent(
+        ON.text('Patched V2 test parameter, origin=Original V2 component parameter, count=0'), 5000
+      );
+      expect(parameter !== undefined).assertTrue();
+      const initialState = await driver.waitForComponent(ON.text('tapCount=100'), 5000);
+      expect(initialState !== undefined).assertTrue();
+      const initialStatus = await driver.waitForComponent(
+        ON.text('status=Patched V2 state callback, origin=0'), 5000
+      );
+      expect(initialStatus !== undefined).assertTrue();
+
+      const eventButton = await driver.waitForComponent(ON.id('patched-v2-primary-action'), 5000);
+      expect(eventButton !== undefined).assertTrue();
+      expect(await eventButton.getText()).assertEqual('V2 primary action');
+      await eventButton.click();
+      const eventStatus = await driver.waitForComponent(ON.text('status=Patched V2 test event, taps=111'), 5000);
+      expect(eventStatus !== undefined).assertTrue();
+
+      const secondaryButton = await driver.waitForComponent(ON.id('v2-secondary-action'), 5000);
+      expect(secondaryButton !== undefined).assertTrue();
+      await secondaryButton.click();
+      const secondaryStatus = await driver.waitForComponent(ON.text('status=V2 event ran, taps=113'), 5000);
+      expect(secondaryStatus !== undefined).assertTrue();
+
+      OhosPatch.clear();
+      const reinstallScript = `
+        Fixit.component(
+          'com.rickytan.ohospatch/entry/src/main/ets/demo/PatchablePanelV2#PatchablePanelV2'
+        ).state('tapCount', 200);
+      `;
+      expect(OhosPatch.executeScript(reinstallScript)).assertLarger(0);
     });
 
     it('invalid full path input fails closed and later valid input still works', 0, () => {
@@ -249,20 +356,6 @@ export default function fixitTest(): void {
       `;
       const count = OhosPatch.executeScript(script);
       expect(count).assertLarger(0);
-    });
-
-    it('registerTarget alias resolves a short name to a full target', 0, () => {
-      const script = `
-        Fixit.registerTarget('DemoViewModel', {
-          modulePath: 'entry/src/main/ets/demo/DemoViewModel',
-          moduleInfo: 'com.rickytan.ohospatch/entry_test'
-        });
-        Fixit.fix('DemoViewModel')
-          .instanceMethod('crashIt', function () { return 'alias-works'; });
-      `;
-      OhosPatch.executeScript(script);
-      const vm = new DemoViewModel();
-      expect(vm.crashIt()).assertEqual('alias-works');
     });
 
     it('timer callbacks run in the real Patch JSVM and can update later patch results', 0, async () => {

@@ -12,7 +12,6 @@
   var uiSpecs = [];
   var uiRuleKeys = Object.create(null);
   var nextUiRuleId = 1;
-  var targets = Object.create(null);
   var timers = Object.create(null);
   var nextTimerId = 1;
   var nativeProxyMetadata = new WeakMap();
@@ -375,31 +374,18 @@
     return target.moduleInfo + '|' + target.modulePath + '#' + target.exportName;
   }
 
-  function normalizeTarget(target, modulePath, exportName) {
-    var normalized;
+  function normalizeTarget(target) {
     if (typeof target === 'string') {
-      if (!modulePath && own(targets, target)) {
-        normalized = copyTarget(targets[target]);
-      } else if (!modulePath && (target.indexOf('/') !== -1 || target.indexOf('@bundle:') === 0)) {
-        normalized = parseTargetPath(target);
-      } else {
-        normalized = {
-          className: target,
-          modulePath: modulePath || '',
-          moduleInfo: '',
-          exportName: exportName || target
-        };
+      if (target.indexOf('/') !== -1 || target.indexOf('@bundle:') === 0) {
+        var normalized = parseTargetPath(target);
+        if (!normalized.className || !normalized.modulePath) {
+          throw new Error('Fixit target requires className and modulePath');
+        }
+        return normalized;
       }
-    } else if (target && typeof target === 'object') {
-      normalized = copyTarget(target);
-    } else {
-      throw new TypeError('Fixit.fix requires a class name or target descriptor');
+      throw new Error('Fixit target must be a full OHM path string');
     }
-
-    if (!normalized.className || !normalized.modulePath) {
-      throw new Error('Fixit target requires className and modulePath');
-    }
-    return normalized;
+    throw new TypeError('Fixit.fix requires a full OHM path string');
   }
 
   function validateMethod(methodName, handler) {
@@ -495,36 +481,33 @@
     return descriptor;
   }
 
-  function ComponentFix(target, modulePath, exportName) {
-    this.target = normalizeTarget(target, modulePath, exportName);
+  function ComponentFix(target) {
+    this.target = normalizeTarget(target);
   }
 
-  function ComponentValueFix(component, kind, propertyName) {
-    this.component = component;
-    this.kind = kind;
-    this.propertyName = validateUiName(propertyName, 'Component property name');
-  }
-
-  ComponentValueFix.prototype.transform = function (handler) {
-    if (typeof handler !== 'function') {
-      throw new TypeError('Component value transform must be a function');
+  function registerComponentValue(component, kind, propertyName, replacement) {
+    var property = validateUiName(propertyName, 'Component property name');
+    var handler;
+    if (typeof replacement === 'function') {
+      handler = replacement;
+    } else {
+      var copiedReplacement = copyJsonValue(replacement, 'Component replacement value');
+      handler = function () {
+        return copiedReplacement;
+      };
     }
-    var target = this.component.target;
-    var uniqueKey = targetKey(target) + '|' + this.kind + '|' + this.propertyName;
+    if (typeof handler !== 'function') {
+      throw new TypeError('Component value replacement must be a JSON value or function');
+    }
+    var target = component.target;
+    var uniqueKey = targetKey(target) + '|' + kind + '|' + property;
     var rule = copyUiTarget(target);
-    rule.kind = this.kind;
-    rule.propertyName = this.propertyName;
+    rule.kind = kind;
+    rule.propertyName = property;
     rule.operation = 'transform';
     registerUiRule(uniqueKey, rule, registry.uiValues, handler);
-    return this.component;
-  };
-
-  ComponentValueFix.prototype.replace = function (value) {
-    var replacement = copyJsonValue(value, 'Component replacement value');
-    return this.transform(function () {
-      return replacement;
-    });
-  };
+    return component;
+  }
 
   function normalizeNodeSelector(selector) {
     var normalized = typeof selector === 'string' ? { type: selector } : selector;
@@ -532,14 +515,47 @@
       throw new TypeError('Component node selector must be a type string or descriptor');
     }
     var type = validateUiName(normalized.type, 'Component node type');
+    if (normalized.where !== undefined) {
+      if (normalized.occurrence !== undefined) {
+        throw new TypeError('Component node selector cannot combine where and occurrence');
+      }
+      if (!normalized.where || typeof normalized.where !== 'object' || Array.isArray(normalized.where)) {
+        throw new TypeError('Component node where must be a non-empty object');
+      }
+      var names = Object.keys(normalized.where).sort();
+      if (names.length === 0) {
+        throw new TypeError('Component node where must be a non-empty object');
+      }
+      var where = {};
+      names.forEach(function (name) {
+        validateUiName(name, 'Component node where attribute name');
+        where[name] = copyJsonValue(normalized.where[name], 'Component node where value');
+      });
+      return {
+        type: type,
+        selectorKey: JSON.stringify({ type: type, where: where }),
+        where: where
+      };
+    }
     var occurrence = normalized.occurrence === undefined ? 0 : Number(normalized.occurrence);
     if (!Number.isInteger(occurrence) || occurrence < 0 || occurrence > 4294967295) {
       throw new TypeError('Component node occurrence must be a non-negative uint32 integer');
     }
     return {
       type: type,
-      occurrence: occurrence
+      occurrence: occurrence,
+      selectorKey: JSON.stringify({ type: type, occurrence: occurrence })
     };
+  }
+
+  function copyNodeSelector(rule, selector) {
+    rule.nodeType = selector.type;
+    rule.selectorKey = selector.selectorKey;
+    if (selector.where) {
+      rule.where = selector.where;
+    } else {
+      rule.occurrence = selector.occurrence;
+    }
   }
 
   function ComponentNodeFix(component, selector) {
@@ -556,11 +572,10 @@
 
     var target = this.component.target;
     var selector = this.selector;
-    var uniqueKey = targetKey(target) + '|node|' + selector.type + '|' + selector.occurrence + '|attr|' + name;
+    var uniqueKey = targetKey(target) + '|node|' + selector.selectorKey + '|attr|' + name;
     var rule = copyUiTarget(target);
     rule.kind = 'attribute';
-    rule.nodeType = selector.type;
-    rule.occurrence = selector.occurrence;
+    copyNodeSelector(rule, selector);
     rule.attributeName = name;
 
     if (typeof args[0] === 'function') {
@@ -596,53 +611,49 @@
 
     var target = this.component.target;
     var selector = this.selector;
-    var uniqueKey = targetKey(target) + '|node|' + selector.type + '|' + selector.occurrence + '|event|' + name;
+    var uniqueKey = targetKey(target) + '|node|' + selector.selectorKey + '|event|' + name;
     var rule = copyUiTarget(target);
     rule.kind = 'event';
-    rule.nodeType = selector.type;
-    rule.occurrence = selector.occurrence;
+    copyNodeSelector(rule, selector);
     rule.eventName = name;
     registerUiRule(uniqueKey, rule, registry.uiEvents, handler);
     return makeUiEventOrigin();
   };
 
-  ComponentFix.prototype.param = function (propertyName) {
-    return new ComponentValueFix(this, 'param', propertyName);
+  ComponentFix.prototype.param = function (propertyName, replacement) {
+    if (arguments.length !== 2) {
+      throw new TypeError('Component parameter requires a property name and replacement value or handler');
+    }
+    return registerComponentValue(this, 'param', propertyName, replacement);
   };
 
-  ComponentFix.prototype.state = function (propertyName) {
-    return new ComponentValueFix(this, 'state', propertyName);
+  ComponentFix.prototype.state = function (propertyName, replacement) {
+    if (arguments.length !== 2) {
+      throw new TypeError('Component state requires a property name and replacement value or handler');
+    }
+    return registerComponentValue(this, 'state', propertyName, replacement);
   };
 
   ComponentFix.prototype.node = function (selector) {
     return new ComponentNodeFix(this, selector);
   };
 
-  function Fixit(target, modulePath, exportName) {
+  function Fixit(target) {
     if (!(this instanceof Fixit)) {
-      return new Fixit(target, modulePath, exportName);
+      return new Fixit(target);
     }
-    this.target = normalizeTarget(target, modulePath, exportName);
+    this.target = normalizeTarget(target);
   }
 
-  Fixit.fix = function (target, modulePath, exportName) {
-    return new Fixit(target, modulePath, exportName);
+  Fixit.fix = function (target) {
+    return new Fixit(target);
   };
 
-  Fixit.component = function (target, modulePath, exportName) {
-    return new ComponentFix(target, modulePath, exportName);
+  Fixit.component = function (target) {
+    return new ComponentFix(target);
   };
 
   Fixit.import = importTarget;
-
-  Fixit.registerTarget = function (className, target) {
-    if (typeof className !== 'string' || className.length === 0) {
-      throw new TypeError('Fixit.registerTarget requires a class name');
-    }
-    var descriptor = copyTarget(target || {});
-    descriptor.className = descriptor.className || className;
-    targets[className] = normalizeTarget(descriptor);
-  };
 
   Fixit.prototype.instanceMethod = function (methodName, handler) {
     return register(this.target, methodName, false, handler);
@@ -653,7 +664,7 @@
   };
 
   Object.defineProperty(Fixit, 'runtimeVersion', {
-    value: '1.7.0',
+    value: '1.13.0',
     enumerable: true
   });
 
@@ -730,17 +741,6 @@
   }
 
   global.Fixit = Fixit;
-  global.nil = null;
-  global.Nil = null;
-  global.nilToNull = function (value) {
-    return value == null ? null : value;
-  };
-  global.nullToNil = function (value) {
-    return value === null ? global.nil : value;
-  };
-  global.isNil = function (value) {
-    return value === null || value === undefined;
-  };
   global.require = Fixit.import;
   global.setTimeout = function (callback, delay) {
     return scheduleTimer(callback, delay, false, Array.prototype.slice.call(arguments, 2));
@@ -787,7 +787,6 @@
     uiSpecs = [];
     uiRuleKeys = Object.create(null);
     nextUiRuleId = 1;
-    targets = Object.create(null);
     importedProxyCache = Object.create(null);
   };
 
@@ -821,15 +820,21 @@
     }
   };
 
-  global.__ohospatch_callUiValue = function (ruleId, value) {
+  global.__ohospatch_callUiValue = function (ruleId, value, ownerHandle) {
     var handler = registry.uiValues[ruleId];
     if (!handler) {
       return { handled: false };
     }
-    return {
-      handled: true,
-      value: handler(value)
-    };
+    var owner = typeof ownerHandle === 'number' ? makeNativeProxy(ownerHandle, false, ownerHandle) : undefined;
+    try {
+      return {
+        handled: true,
+        value: handler.call(owner, value)
+      };
+    } finally {
+      nativeProxyMetadata = new WeakMap();
+      nativeProxyCache = Object.create(null);
+    }
   };
 
   global.__ohospatch_callUiEvent = function (ruleId, eventArgs, ownerHandle) {

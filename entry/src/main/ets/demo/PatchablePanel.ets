@@ -96,9 +96,9 @@ export struct PatchablePanel {
 
       Slider({ value: this.sliderValue, min: 0, max: 100, step: 5 })
         .width('100%')
-        .onChange((value: number) => {
+        .onChange((value: number, mode: SliderChangeMode) => {
           this.sliderValue = value;
-          this.statusText = `Slider changed to ${value}`;
+          this.statusText = `Slider changed to ${value}, mode=${mode}`;
         })
 
       Text(`tag=${this.tagText}, slider=${this.sliderValue}`)
