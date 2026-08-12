@@ -3,7 +3,12 @@
   "version": "1.0.0",
   "description": "Transparent runtime JavaScript patching for HarmonyOS using JSVM.",
   "main": "Index.ets",
-  "author": "rickytan",
+  "author": {
+    "name": "rickytan",
+    "url": "https://github.com/rickytan"
+  },
+  "homepage": "https://github.com/rickytan/OhosPatch",
+  "repository": "https://github.com/rickytan/OhosPatch",
   "license": "MIT",
   "dependencies": {
     "libohospatch.so": "file:./src/main/cpp/types/libohospatch"
