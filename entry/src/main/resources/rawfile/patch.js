@@ -140,7 +140,11 @@
     .attr('backgroundColor', function () {
       return this.tapCount >= 100 ? '#E7F7EE' : '#EEF2F5';
     });
-  var originV2Click = panelV2.node({ type: 'Button', occurrence: 0 })
+  // id 位于宿主 builder 链尾；where 仍会读取原始 id/height 并只命中第一个符合节点。
+  var originV2Click = panelV2.node({
+    type: 'Button',
+    where: { id: 'v2-primary-action', height: 44 }
+  })
     .attrs({
       height: 52,
       backgroundColor: '#1F6B46'

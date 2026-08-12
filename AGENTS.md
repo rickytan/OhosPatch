@@ -55,7 +55,7 @@ Primary implementation: `ohospatch/src/main/cpp/ohospatch.cpp`.
 - Patch method registrations are returned from JSVM as JSON specs.
 - Native loads target classes in the ArkTS VM and installs N-API trampolines.
 - Handler arguments still enter JSVM as JSON values. Method handler `this`, Component event handler `this`, nested properties, method calls, Proxy arguments, original-method results, and Proxy returns use invocation-scoped Native handles.
-- Runtime `1.12.0` includes a JS `Proxy` for the ArkTS receiver. `get`, `set`, and `apply` synchronously bridge to the original ArkTS object, preserving nested object identity and prototype method dispatch.
+- Runtime `1.13.0` includes a JS `Proxy` for the ArkTS receiver. `get`, `set`, and `apply` synchronously bridge to the original ArkTS object, preserving nested object identity and prototype method dispatch.
 - Proxy handles are valid only during the current synchronous patch invocation and must not escape to timers, promises, or globals. A call can retain at most 256 handles.
 - Hook failures fall back to the original ArkTS method.
 - Installation failure restores hooks that were already installed.
@@ -123,10 +123,10 @@ Proposed public concepts:
 
 ### Implemented status (2026-08-12)
 
-- Runtime version `1.12.0` implements `Fixit.component` and the invocation-scoped ArkTS object Proxy bridge.
+- Runtime version `1.13.0` implements `Fixit.component`, original-attribute node selectors, and the invocation-scoped ArkTS object Proxy bridge.
 - API 20 state-management V1 and V2 exported custom components are supported through separate native adapters with the same public DSL.
 - Direct `param/state(name, valueOrHandler)` are implemented; no chain-style value-fix API is exposed.
-- Node selection by `{ type, occurrence }` is implemented with zero-based per-type counting.
+- Node selection prefers `{ type, occurrence }` for efficient zero-based per-type counting and supports `{ type, where }` when original-attribute matching is needed.
 - `attr`, `attrs`, and synchronous `event(name, handler)` are implemented.
 - Component event handlers written with normal `function` syntax receive `this` as the current Component instance Proxy. Arrow functions keep lexical `this`.
 - Component event handlers receive only the original ArkUI event arguments and can read/write component state through `this`.
@@ -142,12 +142,12 @@ Implementation should proceed in explicit capability phases:
 
 1. API 20, state-management V1, exported custom components.
 2. Component parameter/state transforms.
-3. Node selector by component type plus occurrence.
+3. Node selector by component type plus occurrence, with original fixed attributes available when counting is unstable.
 4. Basic scalar node attributes.
 5. Synchronous event replacement, initially `onClick` and then generic event adapters.
 6. State-management V2 adapter with the same public DSL.
 7. Route factory interception for non-exported `@Entry` pages.
-8. ID/create-argument/hierarchy selectors, resources, and live-instance refresh.
+8. Create-argument/hierarchy selectors, resources, and live-instance refresh.
 
 Fail closed when a component shape, node selector, attribute, or event cannot be verified. Log an error and leave business behavior untouched.
 

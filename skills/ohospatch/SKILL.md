@@ -73,14 +73,14 @@ var originClick = panel.node({ type: 'Button', occurrence: 0 })
 
 - Target an exported custom component.
 - Register parameter and state replacements directly with `param/state(name, value)` or `param/state(name, function (originValue) { ... })`. The function form receives the original value and binds `this` to the current Component instance Proxy. This is the only public value-replacement DSL.
-- Select nodes only by a built-in type string (first occurrence) or `{ type, occurrence }`, where occurrence is zero-based within that built-in type for the component render path that actually executes.
+- Prefer a built-in type string or `{ type, occurrence }`: occurrence is zero-based within that built-in type and avoids attribute capture and deep comparison. Use `{ type, where: { attribute: fixedValue } }` when dynamic branches or lists make occurrence unstable. Every `where` entry matches the original ArkUI attribute method's first argument by JSON value, all entries must match, and only the first matching node is selected. Attribute order does not matter. Values must be compile-time fixed and JSON-serializable; `where` and `occurrence` cannot be combined.
 - For nested custom components, `occurrence` is counted inside the target component being patched; child component internals have their own `Fixit.component(childFullPath)` rule. For conditional rendering, only the active `if`/`else` branch contributes nodes on that render. For loops or list builders, every executed iteration contributes in execution order.
 - Keep attribute arguments and replacement values JSON-serializable.
 - Use normal `function` syntax when a Component event patch needs `this`; it is bound to the current Component instance proxy.
 - Event handlers receive every JSON-serializable ArkUI event argument in order. `node.event(...)` returns the original callback proxy; call it with `origin.apply(this, arguments)` to forward all arguments and preserve original behavior.
 - Wrap `origin.apply(this, arguments)` in `try/catch` when the patch is intended to recover from an original ArkTS exception. OhosPatch converts that explicit origin-call exception into a JSVM `Error`; uncaught origin-call errors fall back to the original ArkTS behavior.
 - For ComponentV2, `param()` targets `@Param` and `state()` targets observable instance state such as `@Local`; OhosPatch selects the V1/V2 adapter automatically.
-- Do not generate `before`, `after`, `around`, route interception, resource/controller values, ID/hierarchy selectors, or forced refresh logic.
+- Do not generate `before`, `after`, `around`, route interception, create-argument/hierarchy selectors, resource/controller values, or forced refresh logic. An executed `id(...)` is a supported `where` attribute.
 
 ## Runtime Reference
 
@@ -103,7 +103,7 @@ bundleName/moduleName/[packageName/]src/main/ets/File#ExportName
 
 - Prototype hooks do not cover constructors, instance-field arrow functions, private members, or call sites that bypass property lookup.
 - The handler `this` Proxy is valid only for the current synchronous invocation or `origin` call; it must not escape to timers, promises, or globals. `Fixit.import()` Proxies persist until `OhosPatch.clear()` or patch replacement.
-- Component DSL supports API 20 state-management V1 and V2 exported custom components, `type + occurrence` node selection on the actually executed render path, JSON-serializable attributes, and synchronous event replacement. Not supported: `before`/`after`/`around` event composition, non-exported `@Entry` route pages, ID/hierarchy selectors, resource/controller values, and forced refresh of mounted components.
+- Component DSL supports API 20 state-management V1 and V2 exported custom components, preferred `type + occurrence` selection, `type + where` original-attribute selection, JSON-serializable attributes, and synchronous event replacement. Not supported: `before`/`after`/`around` event composition, non-exported `@Entry` route pages, create-argument/hierarchy selectors, resource/controller values, and forced refresh of mounted components.
 - At most 256 active timers per runtime; `setInterval(..., 0)` schedules at 1 ms.
 - At most 512 deduped dynamic-import class, instance, method, or nested-object handles per patch.
 - Download, signature verification, version matching, rollout, caching, rollback, timeout, and circuit breaking are host responsibilities; the HAR owns none of them.

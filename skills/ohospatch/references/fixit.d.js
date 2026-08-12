@@ -8,7 +8,7 @@
  *
  *   /// <reference path="./fixit.d.js" />
  *
- * @version 1.12.0
+ * @version 1.13.0
  */
 
 /**
@@ -58,7 +58,8 @@
 /**
  * @typedef {Object} OhosPatchNodeSelector
  * @property {string} type Built-in ArkUI component type, such as `Button`.
- * @property {number=} occurrence Zero-based occurrence within the actually executed render path for this built-in node type; defaults to `0`.
+ * @property {number=} occurrence Zero-based occurrence within the actually executed render path for this built-in node type; defaults to `0`. Cannot be combined with `where`.
+ * @property {Record<string, OhosPatchJsonValue>=} where Non-empty map of original, compile-time-fixed ArkUI attribute values. All entries must match; the first matching node is selected. Cannot be combined with `occurrence`.
  */
 
 /**
@@ -110,7 +111,7 @@
  * @property {(propertyName: string, replacement: OhosPatchJsonValue | OhosPatchComponentValueHandler) =>
  *   OhosPatchComponentFix} state Replace observable state with a JSON value or derive it from the current value.
  * @property {(selector: string | OhosPatchNodeSelector) => OhosPatchComponentNodeFix} node Select an ArkUI node by
- *   built-in type and zero-based occurrence within the target component's actually executed render path.
+ *   built-in type plus either zero-based occurrence or original attribute values. Prefer occurrence for lower runtime overhead.
  */
 
 /** Registers method replacements for one exported ArkTS class. */
@@ -124,7 +125,7 @@ class Fixit {
   }
 
   /** @readonly @type {string} */
-  static runtimeVersion = '1.12.0';
+  static runtimeVersion = '1.13.0';
 
   /**
    * @param {string} target Full OHM class path.

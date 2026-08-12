@@ -60,7 +60,7 @@ export default function fixitTest(): void {
           });
       `;
       OhosPatch.executeScript(script);
-      expect(DemoViewModel.crash()).assertEqual('1.12.0|function|undefined|undefined|undefined|undefined|undefined|undefined|undefined');
+      expect(DemoViewModel.crash()).assertEqual('1.13.0|function|undefined|undefined|undefined|undefined|undefined|undefined|undefined');
     });
 
     it('component DSL validates direct value API and unsupported event rules', 0, () => {
@@ -110,12 +110,29 @@ export default function fixitTest(): void {
             } catch (err) {
               missingParamReplacementRejected = err instanceof TypeError;
             }
+            var emptyWhereRejected = false;
+            try {
+              Fixit.component('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/PatchablePanel#PatchablePanel')
+                .node({ type: 'Button', where: {} })
+                .attr('height', 48);
+            } catch (err) {
+              emptyWhereRejected = err instanceof TypeError;
+            }
+            var mixedSelectorRejected = false;
+            try {
+              Fixit.component('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/PatchablePanel#PatchablePanel')
+                .node({ type: 'Button', occurrence: 0, where: { height: 44 } })
+                .attr('height', 48);
+            } catch (err) {
+              mixedSelectorRejected = err instanceof TypeError;
+            }
             return typeof direct + '|' + objectRuleRejected + '|' + attrExtraRejected + '|' +
-              missingStateReplacementRejected + '|' + missingParamReplacementRejected;
+              missingStateReplacementRejected + '|' + missingParamReplacementRejected + '|' +
+              emptyWhereRejected + '|' + mixedSelectorRejected;
           });
       `;
       expect(OhosPatch.executeScript(script)).assertLarger(0);
-      expect(DemoViewModel.crash()).assertEqual('function|true|true|true|true');
+      expect(DemoViewModel.crash()).assertEqual('function|true|true|true|true|true|true');
     });
 
     it('ComponentV2 supports param state node and event DSL behavior', 0, async () => {
@@ -144,7 +161,13 @@ export default function fixitTest(): void {
         });
         component.node({ type: 'Text', occurrence: 1 })
           .attr('backgroundColor', '#E7F7EE');
-        var origin = component.node({ type: 'Button', occurrence: 0 })
+        component.node({
+          type: 'Button',
+          where: { id: 'v2-primary-action', height: 44 }
+        }).attr('id', 'patched-v2-primary-action');
+        component.node({ type: 'Button', where: { id: 'missing-action' } })
+          .attr('id', 'unexpected-action');
+        var origin = component.node({ type: 'Button', where: { height: 44 } })
           .event('onClick', function () {
             this.markPrimary(10);
             var result = origin.apply(this, arguments);
@@ -166,11 +189,18 @@ export default function fixitTest(): void {
       );
       expect(initialStatus !== undefined).assertTrue();
 
-      const eventButton = await driver.waitForComponent(ON.text('V2 primary action'), 5000);
+      const eventButton = await driver.waitForComponent(ON.id('patched-v2-primary-action'), 5000);
       expect(eventButton !== undefined).assertTrue();
+      expect(await eventButton.getText()).assertEqual('V2 primary action');
       await eventButton.click();
       const eventStatus = await driver.waitForComponent(ON.text('status=Patched V2 test event, taps=111'), 5000);
       expect(eventStatus !== undefined).assertTrue();
+
+      const secondaryButton = await driver.waitForComponent(ON.id('v2-secondary-action'), 5000);
+      expect(secondaryButton !== undefined).assertTrue();
+      await secondaryButton.click();
+      const secondaryStatus = await driver.waitForComponent(ON.text('status=V2 event ran, taps=113'), 5000);
+      expect(secondaryStatus !== undefined).assertTrue();
 
       OhosPatch.clear();
       const reinstallScript = `

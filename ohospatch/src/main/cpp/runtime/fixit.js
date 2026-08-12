@@ -515,14 +515,47 @@
       throw new TypeError('Component node selector must be a type string or descriptor');
     }
     var type = validateUiName(normalized.type, 'Component node type');
+    if (normalized.where !== undefined) {
+      if (normalized.occurrence !== undefined) {
+        throw new TypeError('Component node selector cannot combine where and occurrence');
+      }
+      if (!normalized.where || typeof normalized.where !== 'object' || Array.isArray(normalized.where)) {
+        throw new TypeError('Component node where must be a non-empty object');
+      }
+      var names = Object.keys(normalized.where).sort();
+      if (names.length === 0) {
+        throw new TypeError('Component node where must be a non-empty object');
+      }
+      var where = {};
+      names.forEach(function (name) {
+        validateUiName(name, 'Component node where attribute name');
+        where[name] = copyJsonValue(normalized.where[name], 'Component node where value');
+      });
+      return {
+        type: type,
+        selectorKey: JSON.stringify({ type: type, where: where }),
+        where: where
+      };
+    }
     var occurrence = normalized.occurrence === undefined ? 0 : Number(normalized.occurrence);
     if (!Number.isInteger(occurrence) || occurrence < 0 || occurrence > 4294967295) {
       throw new TypeError('Component node occurrence must be a non-negative uint32 integer');
     }
     return {
       type: type,
-      occurrence: occurrence
+      occurrence: occurrence,
+      selectorKey: JSON.stringify({ type: type, occurrence: occurrence })
     };
+  }
+
+  function copyNodeSelector(rule, selector) {
+    rule.nodeType = selector.type;
+    rule.selectorKey = selector.selectorKey;
+    if (selector.where) {
+      rule.where = selector.where;
+    } else {
+      rule.occurrence = selector.occurrence;
+    }
   }
 
   function ComponentNodeFix(component, selector) {
@@ -539,11 +572,10 @@
 
     var target = this.component.target;
     var selector = this.selector;
-    var uniqueKey = targetKey(target) + '|node|' + selector.type + '|' + selector.occurrence + '|attr|' + name;
+    var uniqueKey = targetKey(target) + '|node|' + selector.selectorKey + '|attr|' + name;
     var rule = copyUiTarget(target);
     rule.kind = 'attribute';
-    rule.nodeType = selector.type;
-    rule.occurrence = selector.occurrence;
+    copyNodeSelector(rule, selector);
     rule.attributeName = name;
 
     if (typeof args[0] === 'function') {
@@ -579,11 +611,10 @@
 
     var target = this.component.target;
     var selector = this.selector;
-    var uniqueKey = targetKey(target) + '|node|' + selector.type + '|' + selector.occurrence + '|event|' + name;
+    var uniqueKey = targetKey(target) + '|node|' + selector.selectorKey + '|event|' + name;
     var rule = copyUiTarget(target);
     rule.kind = 'event';
-    rule.nodeType = selector.type;
-    rule.occurrence = selector.occurrence;
+    copyNodeSelector(rule, selector);
     rule.eventName = name;
     registerUiRule(uniqueKey, rule, registry.uiEvents, handler);
     return makeUiEventOrigin();
@@ -633,7 +664,7 @@
   };
 
   Object.defineProperty(Fixit, 'runtimeVersion', {
-    value: '1.12.0',
+    value: '1.13.0',
     enumerable: true
   });
 

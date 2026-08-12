@@ -441,8 +441,39 @@ Selector 目前只有字符串和对象两种输入形态：
 | `node('Button')` | 当前目标组件渲染中的第一个 Button |
 | `node({ type: 'Button' })` | 同上，`occurrence` 默认是 `0` |
 | `node({ type: 'Button', occurrence: 2 })` | 当前目标组件渲染中的第三个 Button |
+| `node({ type: 'Button', where: { id: 'submit', height: 44 } })` | 原始 `id` 和 `height` 同时匹配的第一个 Button |
 
-`type` 必须是内置 ArkUI 节点 API 名称，例如 `Text`、`Button`、`Toggle`、`Slider`。`occurrence` 从 `0` 开始，按同一类型节点在目标组件当前这次实际执行的渲染路径中单独计数；`Text occurrence: 2` 不受前面的 Button 或 Row 影响。节点规则在原 builder 执行后写入，因此 Patch 属性是最后写入者。
+`type` 必须是内置 ArkUI 节点 API 名称，例如 `Text`、`Button`、`Toggle`、`Slider`。`occurrence` 和 `where` 不能同时出现。节点规则在原 builder 执行后写入，因此 Patch 属性是最后写入者。
+
+`where` 的 key 是任意 ArkUI 属性方法名，value 是该方法原始第一个参数的编译时固定值。Runtime 不硬编码 `id`、`height` 等属性名；它会临时观察 `where` 中实际声明的方法。所有 value 必须可 JSON 序列化，所有条件按深度值比较并且必须同时满足。如果同一次组件构建中有多个节点满足条件，只选择按 builder 执行顺序遇到的第一个。
+
+属性在源码链中的位置不影响匹配和覆盖。例如原始组件把 `id` 放在最后：
+
+```ts
+Button('Submit')
+  .height(44)
+  .backgroundColor('#59636E')
+  .onClick(() => this.submit())
+  .id('submitButton')
+```
+
+Patch 仍可同时使用链首的 `height` 和链尾的 `id` 定位，并覆盖此前已经执行过的属性或事件：
+
+```js
+var originSubmit = panel.node({
+  type: 'Button',
+  where: { id: 'submitButton', height: 44 }
+})
+  .attrs({ height: 48, backgroundColor: '#1F6B46' })
+  .event('onClick', function () {
+    this.statusText = 'Patched submit';
+    return originSubmit.apply(this, arguments);
+  });
+```
+
+匹配只读取宿主 builder 的原始属性调用，Patch 自己写入的 `height: 48` 不参与 selector。若属性未执行、值不相等或节点不存在，本次规则保持 no-op，不改变原始渲染；Runtime 只对同一未命中的 selector 输出一次 warning，不抛异常。`where` 不能匹配 `Button(label)` 这类 `create` 参数，也不能匹配运行时函数、Resource/Controller 等不可 JSON 序列化值。
+
+`occurrence` 从 `0` 开始，按同一类型节点在目标组件当前这次实际执行的渲染路径中单独计数；`Text occurrence: 2` 不受前面的 Button 或 Row 影响。
 
 多级嵌套组件时，`occurrence` 只在当前 `Fixit.component(fullPath)` 指向的组件内部计算。父组件中的 `<Child />` 只是父组件渲染路径上的一个自定义组件创建点，不会把 `Child` 内部的 `Text/Button` 计入父组件 selector；要修复子组件内部节点，需要对 `Child` 自己再写一条 `Fixit.component(childFullPath)`。
 
@@ -547,9 +578,9 @@ Button(Open B)   -> Button 1
 Text(After list) -> Text 2
 ```
 
-如果 `items = [A, B, C]`，`Text('After list')` 会变成 `Text occurrence 3`。因此列表长度、过滤、排序或分页会影响后续节点的 `occurrence`，生产 patch 应优先选择不受动态列表影响的稳定节点；当前版本还没有 id/hierarchy selector 来表达更精确的定位。
+如果 `items = [A, B, C]`，`Text('After list')` 会变成 `Text occurrence 3`。`occurrence` 只做按类型计数，不需要临时捕获属性和执行深比较，性能更好，应作为生产 Patch 的首选。列表长度、过滤、排序或分页会改变计数时，再使用 `where` 匹配稳定的原始属性。
 
-当前不支持 `id`、文本内容、父子层级、样式类或自定义 key selector。发布版本增删或调整同类型节点顺序后，`occurrence` 可能改变，因此宿主必须把 Patch 与准确 APP 版本绑定。
+当前不支持 `create` 参数、文本内容、父子层级、样式类或自定义 key selector。`id` 可以作为普通原始属性写入 `where`。发布版本增删节点、调整属性或改变同类型节点顺序后，selector 都可能失效，因此宿主仍必须把 Patch 与准确 APP 版本绑定。
 
 `attr(name, ...args)` 可传一个或多个 JSON 可序列化的静态参数；动态 handler 只能返回该属性的单个参数，不能附加额外参数。`attrs({...})` 是多个单参数 `attr` 的简写。
 
@@ -653,7 +684,7 @@ Demo 使用一个真实的远程脚本 [`entry/src/main/resources/rawfile/patch.
 脚本按以下目的组织：
 
 1. `param/state` 同时演示固定值和基于原值的函数替换，以及 handler 中的 Component `this`。
-2. 多个 `Text/Button/Toggle/Slider` 规则验证 selector 的按类型 `occurrence` 计数、静态属性、动态属性和多参数事件。
+2. 多个 `Text/Button/Toggle/Slider` 规则验证 selector 的原始属性匹配、首个命中、按类型 `occurrence` 计数、静态属性、动态属性和多参数事件。
 3. Button handler 分别演示“先执行 Patch 再调 origin”“Patch 调组件方法后再调 origin”和“用 try/catch 包住会抛错的 origin”。
 4. V1 与 V2 使用同一 DSL，验证 Runtime 自动选择 adapter。
 5. `DemoViewModel`、`Point` 和 timer 规则验证普通方法、静态方法、跨模块 import、嵌套 Proxy 与 JSVM 全局函数。
@@ -766,7 +797,7 @@ $HOME/Library/OpenHarmony/Sdk
 - Patch handler 的 `this` Proxy 只在当前同步调用或 `origin` 调用期间有效，不应保存到 timer、Promise 或全局变量后异步访问。
 - `Fixit.import()` 返回的持久 Proxy 可保留到 `OhosPatch.clear()` 或下一次 patch 替换。
 - 普通方法参数和新建 JS 对象仍受 JSON wire 类型限制。
-- Component DSL 当前支持 API 20 状态管理 V1/V2、导出的自定义组件、`type + occurrence` 节点选择器、JSON 属性参数和同步事件替换。
+- Component DSL 当前支持 API 20 状态管理 V1/V2、导出的自定义组件、首选的 `type + occurrence` 节点选择器、`type + where` 原始属性选择器、JSON 属性参数和同步事件替换。
 - 非导出的 `@Entry` 页面、层级/ID 选择器、资源与控制器类型、已挂载组件主动刷新，以及 `before/after/around` 事件组合尚未支持。
 - 单个 runtime 最多同时存在 256 个 timer。
 - 单个 patch 最多保留 512 个去重后的动态导入类、实例、方法或嵌套对象句柄。

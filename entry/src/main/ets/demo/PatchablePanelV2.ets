@@ -36,6 +36,16 @@ export struct PatchablePanelV2 {
         .onClick(() => {
           this.markPrimary(1);
         })
+        .id('v2-primary-action')
+
+      Button('V2 secondary action')
+        .width('100%')
+        .height(44)
+        .backgroundColor(this.tapCount >= 0 ? '#7B5E2E' : '#59636E')
+        .onClick(() => {
+          this.markPrimary(2);
+        })
+        .id('v2-secondary-action')
     }
     .width('100%')
     .padding(14)

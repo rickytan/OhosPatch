@@ -97,7 +97,7 @@ Do **not** move download, signature, URL, cache, or startup policy into `ohospat
 
 Several files must stay mutually consistent; a change in one usually requires the others:
 
-- `skills/ohospatch/references/fixit.d.js` `@version` **must equal** `Fixit.runtimeVersion` in `ohospatch/src/main/cpp/runtime/fixit.js` (currently `1.12.0`). Signatures, constraints, and globals in the declaration must match the runtime.
+- `skills/ohospatch/references/fixit.d.js` `@version` **must equal** `Fixit.runtimeVersion` in `ohospatch/src/main/cpp/runtime/fixit.js` (currently `1.13.0`). Signatures, constraints, and globals in the declaration must match the runtime.
 - `skills/ohospatch/SKILL.md` + `scripts/install-skill.sh` must track `references/fixit.d.js`, README limitations, and demonstrated runtime behavior.
 - `README.md` "当前边界" (current limitations) must reflect actual runtime capability.
 - Do not add source-scanning tests that pin implementation tokens such as handle-scope names or callback storage identifiers. When safety policy matters, test user-visible failure behavior on device and inspect the compiled binary.
