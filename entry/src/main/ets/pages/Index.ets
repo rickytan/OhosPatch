@@ -3,6 +3,7 @@ import { loadPatch } from '../patch/PatchLoader';
 import { DemoResult, DemoScenario } from '../demo/DemoScenario';
 import { PatchablePanel } from '../demo/PatchablePanel';
 import { PatchablePanelV2 } from '../demo/PatchablePanelV2';
+import { ParentChildParamPanel } from '../demo/ChildParamPanel';
 
 @Entry
 @Component
@@ -133,6 +134,8 @@ struct DemoPatchScreen {
         PatchablePanelV2({
           message: 'Original V2 component parameter'
         })
+
+        ParentChildParamPanel()
 
         Button('Run method hook scenario')
           .width('100%')

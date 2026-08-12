@@ -8,7 +8,7 @@
  *
  *   /// <reference path="./fixit.d.js" />
  *
- * @version 1.13.0
+ * @version 1.15.0
  */
 
 /**
@@ -56,9 +56,48 @@
  */
 
 /**
+ * Runtime metadata exposed to Patch scripts.
+ *
+ * @typedef {Object} OhosPatchRuntimeInfo
+ * @property {string=} osFullName System OS version string.
+ * @property {number=} sdkApiVersion Current SDK API level.
+ * @property {number=} firstApiVersion First API level supported by the device.
+ * @property {number=} majorVersion System major version.
+ * @property {number=} seniorVersion System senior version.
+ * @property {number=} featureVersion System feature version.
+ * @property {number=} buildVersion System build version.
+ * @property {string=} versionId System version ID.
+ * @property {string=} buildType System build type.
+ * @property {string=} osReleaseType System release type.
+ * @property {string=} bundleName Current application bundle name.
+ * @property {string=} appVersionName Current application version name.
+ * @property {number=} appVersionCode Current application version code.
+ * @property {string} patchRuntimeVersion OhosPatch JS runtime version.
+ */
+
+/**
+ * Resource lookup helper backed by the host app `Context.resourceManager`.
+ * The main call form mirrors ArkUI native resources: `$r('app.string.name')`,
+ * `$r('app.color.name')`, `$r('app.float.name')`, `$r('app.media.name')`.
+ *
+ * @typedef {((path: string, ...args: Array<string | number>) => any) & {
+ *   string(name: string, ...args: Array<string | number>): string,
+ *   color(name: string): number,
+ *   number(name: string): number,
+ *   float(name: string): number,
+ *   integer(name: string): number,
+ *   int(name: string): number,
+ *   stringArray(name: string): string[],
+ *   media(name: string, density?: number): string,
+ *   image(name: string, density?: number): string
+ * }} OhosPatchResource
+ */
+
+/**
  * @typedef {Object} OhosPatchNodeSelector
- * @property {string} type Built-in ArkUI component type, such as `Button`.
- * @property {number=} occurrence Zero-based occurrence within the actually executed render path for this built-in node type; defaults to `0`. Cannot be combined with `where`.
+ * @property {string} type Built-in ArkUI component type, such as `Button`, or a full custom Component
+ *   path when patching a child Component creation point.
+ * @property {number=} occurrence Zero-based occurrence within the actually executed render path for this node type; defaults to `0`. Cannot be combined with `where`.
  * @property {Record<string, OhosPatchJsonValue>=} where Non-empty map of original, compile-time-fixed ArkUI attribute values. All entries must match; the first matching node is selected. Cannot be combined with `occurrence`.
  */
 
@@ -101,6 +140,10 @@
  *   Override multiple single-argument attributes. Each value may be a JSON value or a resolver function.
  * @property {(eventName: string, handler: OhosPatchComponentEventHandler) =>
  *   OhosPatchOriginalEvent} event Replace a synchronous node event callback and return the original callback proxy.
+ * @property {(propertyName: string, replacement: OhosPatchJsonValue | OhosPatchComponentValueHandler) =>
+ *   OhosPatchComponentNodeFix} param
+ *   Replace an incoming parameter on a selected child custom Component. The selector `type` must be the
+ *   child's full Component path. Built-in ArkUI nodes do not support this method.
  */
 
 /**
@@ -111,7 +154,8 @@
  * @property {(propertyName: string, replacement: OhosPatchJsonValue | OhosPatchComponentValueHandler) =>
  *   OhosPatchComponentFix} state Replace observable state with a JSON value or derive it from the current value.
  * @property {(selector: string | OhosPatchNodeSelector) => OhosPatchComponentNodeFix} node Select an ArkUI node by
- *   built-in type plus either zero-based occurrence or original attribute values. Prefer occurrence for lower runtime overhead.
+ *   built-in type plus either zero-based occurrence or original attribute values, or select a child custom
+ *   Component by full path plus occurrence. Prefer occurrence for lower runtime overhead.
  */
 
 /** Registers method replacements for one exported ArkTS class. */
@@ -125,7 +169,7 @@ class Fixit {
   }
 
   /** @readonly @type {string} */
-  static runtimeVersion = '1.13.0';
+  static runtimeVersion = '1.15.0';
 
   /**
    * @param {string} target Full OHM class path.
@@ -154,6 +198,16 @@ class Fixit {
    * @returns {OhosPatchImportedClass}
    */
   static import(fullPath) {
+    return /** @type {any} */ (undefined);
+  }
+
+  /** @type {OhosPatchResource} */
+  static resource = /** @type {any} */ (undefined);
+
+  /**
+   * @returns {OhosPatchRuntimeInfo}
+   */
+  static runtimeInfo() {
     return /** @type {any} */ (undefined);
   }
 
@@ -186,6 +240,9 @@ class Fixit {
 function require(fullPath) {
   return Fixit.import(fullPath);
 }
+
+/** @type {OhosPatchResource} */
+var $r = Fixit.resource;
 
 /** @typedef {(...args: any[]) => void} OhosPatchTimerCallback */
 

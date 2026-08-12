@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from '@ohos/hypium';
 import { systemDateTime } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { abilityDelegatorRegistry } from '@kit.TestKit';
 import { OhosPatch } from '@rickytan/ohospatch';
 import { DemoViewModel } from '../../../main/ets/demo/DemoViewModel';
 
@@ -40,6 +41,7 @@ export default function perfTest(): void {
   describe('Performance', () => {
     beforeEach(() => {
       OhosPatch.clear();
+      OhosPatch.init(abilityDelegatorRegistry.getAbilityDelegator().getAppContext());
     });
 
     afterEach(() => {

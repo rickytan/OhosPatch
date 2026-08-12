@@ -514,8 +514,19 @@
     if (!normalized || typeof normalized !== 'object') {
       throw new TypeError('Component node selector must be a type string or descriptor');
     }
-    var type = validateUiName(normalized.type, 'Component node type');
+    var componentTarget = null;
+    var type;
+    if (typeof normalized.type === 'string' &&
+        (normalized.type.indexOf('/') !== -1 || normalized.type.indexOf('#') !== -1)) {
+      componentTarget = normalizeTarget(normalized.type);
+      type = targetKey(componentTarget);
+    } else {
+      type = validateUiName(normalized.type, 'Component node type');
+    }
     if (normalized.where !== undefined) {
+      if (componentTarget) {
+        throw new TypeError('Component child selector does not support where');
+      }
       if (normalized.occurrence !== undefined) {
         throw new TypeError('Component node selector cannot combine where and occurrence');
       }
@@ -544,7 +555,10 @@
     return {
       type: type,
       occurrence: occurrence,
-      selectorKey: JSON.stringify({ type: type, occurrence: occurrence })
+      selectorKey: componentTarget
+        ? JSON.stringify({ component: type, occurrence: occurrence })
+        : JSON.stringify({ type: type, occurrence: occurrence }),
+      componentTarget: componentTarget
     };
   }
 
@@ -563,7 +577,20 @@
     this.selector = normalizeNodeSelector(selector);
   }
 
+  function assertBuiltInNodeSelector(selector, operation) {
+    if (selector.componentTarget) {
+      throw new TypeError('Component child selector does not support ' + operation);
+    }
+  }
+
+  function assertChildNodeSelector(selector, operation) {
+    if (!selector.componentTarget) {
+      throw new TypeError('Built-in ArkUI node selector does not support ' + operation);
+    }
+  }
+
   ComponentNodeFix.prototype.attr = function (attributeName) {
+    assertBuiltInNodeSelector(this.selector, 'attr');
     var name = validateUiName(attributeName, 'Component attribute name');
     var args = Array.prototype.slice.call(arguments, 1);
     if (args.length === 0) {
@@ -604,6 +631,7 @@
   };
 
   ComponentNodeFix.prototype.event = function (eventName, handler) {
+    assertBuiltInNodeSelector(this.selector, 'event');
     var name = validateUiName(eventName, 'Component event name');
     if (typeof handler !== 'function') {
       throw new TypeError('Component event handler must be a function');
@@ -618,6 +646,38 @@
     rule.eventName = name;
     registerUiRule(uniqueKey, rule, registry.uiEvents, handler);
     return makeUiEventOrigin();
+  };
+
+  ComponentNodeFix.prototype.param = function (propertyName, replacement) {
+    assertChildNodeSelector(this.selector, 'param');
+    if (arguments.length !== 2) {
+      throw new TypeError('Component child parameter requires a property name and replacement value or handler');
+    }
+    var property = validateUiName(propertyName, 'Component child parameter name');
+    var handler;
+    if (typeof replacement === 'function') {
+      handler = replacement;
+    } else {
+      var copiedReplacement = copyJsonValue(replacement, 'Component child parameter replacement value');
+      handler = function () {
+        return copiedReplacement;
+      };
+    }
+    var target = this.component.target;
+    var selector = this.selector;
+    var childTarget = selector.componentTarget;
+    var uniqueKey = targetKey(target) + '|child|' + selector.selectorKey + '|param|' + property;
+    var rule = copyUiTarget(target);
+    rule.kind = 'childParam';
+    copyNodeSelector(rule, selector);
+    rule.propertyName = property;
+    rule.childClassName = childTarget.className;
+    rule.childModulePath = childTarget.modulePath;
+    rule.childModuleInfo = childTarget.moduleInfo || '';
+    rule.childExportName = childTarget.exportName;
+    rule.childTargetKey = targetKey(childTarget);
+    registerUiRule(uniqueKey, rule, registry.uiValues, handler);
+    return this;
   };
 
   ComponentFix.prototype.param = function (propertyName, replacement) {
@@ -655,6 +715,76 @@
 
   Fixit.import = importTarget;
 
+  function encodeResourceOptions(options) {
+    if (options === undefined || options === null) {
+      return '';
+    }
+    return JSON.stringify(copyJsonValue(options, 'Resource options'));
+  }
+
+  function parseResourcePath(path) {
+    if (typeof path !== 'string' || path.length === 0) {
+      throw new TypeError('$r requires a non-empty resource path');
+    }
+    var parts = path.split('.');
+    if (parts.length < 3 || parts[0] !== 'app') {
+      throw new TypeError('$r resource path must use app.<type>.<name> format');
+    }
+    var type = parts[1];
+    var name = parts.slice(2).join('.');
+    if (!type || !name) {
+      throw new TypeError('$r resource path must use app.<type>.<name> format');
+    }
+    return { type: type, name: name };
+  }
+
+  function resourceByType(kind, name, options) {
+    if (typeof kind !== 'string' || kind.length === 0) {
+      throw new TypeError('$r requires a non-empty resource kind');
+    }
+    if (typeof name !== 'string' || name.length === 0) {
+      throw new TypeError('$r requires a non-empty resource name');
+    }
+    return global.__ohospatch_resource(kind, name, encodeResourceOptions(options));
+  }
+
+  function resource(path) {
+    var parsed = parseResourcePath(path);
+    var args = Array.prototype.slice.call(arguments, 1);
+    if (parsed.type === 'string') {
+      return resourceByType(parsed.type, parsed.name, args);
+    }
+    if (parsed.type === 'media' || parsed.type === 'image') {
+      return resourceByType(parsed.type, parsed.name, args.length > 0 ? args[0] : undefined);
+    }
+    return resourceByType(parsed.type, parsed.name);
+  }
+
+  resource.string = function (name) {
+    return resourceByType('string', name, Array.prototype.slice.call(arguments, 1));
+  };
+  resource.color = function (name) {
+    return resourceByType('color', name);
+  };
+  resource.number = function (name) {
+    return resourceByType('number', name);
+  };
+  resource.float = resource.number;
+  resource.integer = resource.number;
+  resource.int = resource.number;
+  resource.stringArray = function (name) {
+    return resourceByType('stringArray', name);
+  };
+  resource.media = function (name, density) {
+    return resourceByType('media', name, density);
+  };
+  resource.image = resource.media;
+
+  Fixit.resource = resource;
+  Fixit.runtimeInfo = function () {
+    return global.__ohospatch_runtimeInfo();
+  };
+
   Fixit.prototype.instanceMethod = function (methodName, handler) {
     return register(this.target, methodName, false, handler);
   };
@@ -664,7 +794,7 @@
   };
 
   Object.defineProperty(Fixit, 'runtimeVersion', {
-    value: '1.13.0',
+    value: '1.15.0',
     enumerable: true
   });
 
@@ -741,6 +871,7 @@
   }
 
   global.Fixit = Fixit;
+  global.$r = resource;
   global.require = Fixit.import;
   global.setTimeout = function (callback, delay) {
     return scheduleTimer(callback, delay, false, Array.prototype.slice.call(arguments, 2));

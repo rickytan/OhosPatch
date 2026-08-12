@@ -11,6 +11,7 @@ export default function fixitTest(): void {
     // Clear all patches before each test to ensure isolation.
     beforeEach(() => {
       OhosPatch.clear();
+      OhosPatch.init(abilityDelegatorRegistry.getAbilityDelegator().getAppContext());
     });
 
     afterEach(() => {
@@ -42,6 +43,20 @@ export default function fixitTest(): void {
       expect(DemoViewModel.crash()).assertEqual('class method patched');
     });
 
+    it('target loading falls back to host moduleInfo when a package path is parsed as HSP', 0, () => {
+      const script = `
+        Fixit.fix('com.rickytan.ohospatch/missing_hsp/entry/src/main/ets/demo/DemoViewModel#DemoViewModel')
+          .classMethod('crash', function () {
+            var Point = Fixit.import(
+              'com.rickytan.ohospatch/missing_hsp/entry/src/main/ets/demo/Point#Point'
+            );
+            return Point.textOf(new Point(7, 9));
+          });
+      `;
+      expect(OhosPatch.executeScript(script)).assertLarger(0);
+      expect(DemoViewModel.crash()).assertEqual('(7, 9)');
+    });
+
     it('patch context exposes builtin helpers with observable values', 0, () => {
       const script = `
         Fixit.fix('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/DemoViewModel#DemoViewModel')
@@ -60,7 +75,33 @@ export default function fixitTest(): void {
           });
       `;
       OhosPatch.executeScript(script);
-      expect(DemoViewModel.crash()).assertEqual('1.13.0|function|undefined|undefined|undefined|undefined|undefined|undefined|undefined');
+      expect(DemoViewModel.crash()).assertEqual('1.15.0|function|undefined|undefined|undefined|undefined|undefined|undefined|undefined');
+    });
+
+    it('patch context can read app resources and runtime information', 0, () => {
+      const script = `
+        Fixit.fix('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/DemoViewModel#DemoViewModel')
+          .classMethod('crash', function () {
+            var color = $r('app.color.start_window_background');
+            var icon = $r('app.media.app_icon');
+            var info = Fixit.runtimeInfo();
+            return [
+              $r('app.string.app_name'),
+              typeof color,
+              typeof $r('app.float.ohospatch_demo_float'),
+              typeof icon === 'string' && icon.length > 0,
+              typeof info.sdkApiVersion,
+              info.sdkApiVersion > 0,
+              typeof info.osFullName,
+              typeof info.bundleName,
+              typeof info.appVersionName,
+              typeof info.appVersionCode,
+              info.patchRuntimeVersion
+            ].join('|');
+          });
+      `;
+      OhosPatch.executeScript(script);
+      expect(DemoViewModel.crash()).assertEqual('OhosPatch|number|number|true|number|true|string|string|string|number|1.15.0');
     });
 
     it('component DSL validates direct value API and unsupported event rules', 0, () => {
@@ -126,13 +167,30 @@ export default function fixitTest(): void {
             } catch (err) {
               mixedSelectorRejected = err instanceof TypeError;
             }
+            var builtInParamRejected = false;
+            try {
+              Fixit.component('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/PatchablePanel#PatchablePanel')
+                .node({ type: 'Button', occurrence: 0 })
+                .param('title', 'bad');
+            } catch (err) {
+              builtInParamRejected = err instanceof TypeError;
+            }
+            var childAttrRejected = false;
+            try {
+              Fixit.component('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/ChildParamPanel#ParentChildParamPanel')
+                .node({ type: 'com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/ChildParamPanel#ChildParamPanel' })
+                .attr('height', 48);
+            } catch (err) {
+              childAttrRejected = err instanceof TypeError;
+            }
             return typeof direct + '|' + objectRuleRejected + '|' + attrExtraRejected + '|' +
               missingStateReplacementRejected + '|' + missingParamReplacementRejected + '|' +
-              emptyWhereRejected + '|' + mixedSelectorRejected;
+              emptyWhereRejected + '|' + mixedSelectorRejected + '|' + builtInParamRejected + '|' +
+              childAttrRejected;
           });
       `;
       expect(OhosPatch.executeScript(script)).assertLarger(0);
-      expect(DemoViewModel.crash()).assertEqual('function|true|true|true|true|true|true');
+      expect(DemoViewModel.crash()).assertEqual('function|true|true|true|true|true|true|true|true');
     });
 
     it('ComponentV2 supports param state node and event DSL behavior', 0, async () => {
@@ -174,6 +232,16 @@ export default function fixitTest(): void {
             this.statusText = 'Patched V2 test event, taps=' + this.tapCount;
             return result;
           });
+        Fixit.component(
+          'com.rickytan.ohospatch/entry/src/main/ets/demo/ChildParamPanel#ParentChildParamPanel'
+        )
+          .node({
+            type: 'com.rickytan.ohospatch/entry/src/main/ets/demo/ChildParamPanel#ChildParamPanel',
+            occurrence: 1
+          })
+          .param('title', function (originValue) {
+            return 'scoped patched ' + originValue;
+          });
       `;
       expect(OhosPatch.executeScript(script)).assertLarger(0);
       await openButton.click();
@@ -188,6 +256,12 @@ export default function fixitTest(): void {
         ON.text('status=Patched V2 state callback, origin=0'), 5000
       );
       expect(initialStatus !== undefined).assertTrue();
+
+      const firstChild = await driver.waitForComponent(ON.text('first:static child'), 5000);
+      expect(firstChild !== undefined).assertTrue();
+
+      const secondChild = await driver.waitForComponent(ON.text('second:scoped patched dynamic child'), 5000);
+      expect(secondChild !== undefined).assertTrue();
 
       const eventButton = await driver.waitForComponent(ON.id('patched-v2-primary-action'), 5000);
       expect(eventButton !== undefined).assertTrue();

@@ -97,6 +97,7 @@ export async function loadPatch(
   context: common.Context,
   options: PatchLoadOptions = {}
 ): Promise<PatchLoadResult> {
+  OhosPatch.init(context);
   const path = cachePath(context);
 
   // Cache first: reuse the last successfully fetched patch without hitting the network.
