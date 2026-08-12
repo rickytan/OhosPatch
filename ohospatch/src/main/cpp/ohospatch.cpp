@@ -5,6 +5,7 @@
 #include "uv.h"
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <new>
@@ -12,7 +13,7 @@
 
 namespace {
 
-constexpr unsigned int kLogDomain = 0xD003900;
+constexpr unsigned int kLogDomain = 0x3900;
 constexpr const char *kLogTag = "OhosPatch";
 
 void LogError(const char *operation, int status)
@@ -29,6 +30,13 @@ void LogError(const std::string &message)
 void LogWarn(const std::string &message)
 {
     OH_LOG_Print(LOG_APP, LOG_WARN, kLogDomain, kLogTag, "%{public}s", message.c_str());
+}
+
+void LogScriptLoad(uint64_t elapsedMicroseconds, size_t scriptBytes, size_t installedCount)
+{
+    OH_LOG_Print(LOG_APP, LOG_INFO, kLogDomain, kLogTag,
+                 "Patch script load finished in %{public}llu us; bytes=%{public}zu, installed=%{public}zu",
+                 static_cast<unsigned long long>(elapsedMicroseconds), scriptBytes, installedCount);
 }
 
 void LogUvError(const char *operation, int status)
@@ -3998,7 +4006,12 @@ napi_value ExecuteScript(napi_env env, napi_callback_info info)
     if (!NapiString(env, args[0], &script)) {
         return NapiUint32(env, 0);
     }
+
+    const auto startedAt = std::chrono::steady_clock::now();
     size_t count = Runtime().ExecuteAndInstall(env, script);
+    const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - startedAt);
+    LogScriptLoad(static_cast<uint64_t>(elapsed.count()), script.size(), count);
     return NapiUint32(env, static_cast<uint32_t>(count));
 }
 

@@ -23,6 +23,14 @@ export class DemoViewModel {
   backgroundColor: string = '#FFFFFF';
   profile: DemoProfile = new DemoProfile();
 
+  expensiveCalculation(seed: number, rounds: number): number {
+    let value = seed;
+    for (let index = 0; index < rounds; index++) {
+      value = (value * 48271 + index + 1) % 2147483647;
+    }
+    return value;
+  }
+
   locationOf(locations: Array<Point>, index: number, _defaultValue: Point): Point {
     const point = locations[index];
     if (point === undefined) {
