@@ -4,7 +4,8 @@
   "description": "OhosPatch sample entry module.",
   "main": "Index.ets",
   "dependencies": {
-    "@rickytan/ohospatch": "file:../ohospatch"
+    "@rickytan/ohospatch": "file:../ohospatch",
+    "@vendor/business_page": "file:../business_page"
   },
   "devDependencies": {
     "@ohos/hypium": "1.0.6"

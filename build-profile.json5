@@ -5,7 +5,7 @@
       {
         "name": "default",
         "signingConfig": "default",
-        "compileSdkVersion": 20,
+        "compileSdkVersion": 23,
         "targetSdkVersion": 20,
         "compatibleSdkVersion": 20,
         "runtimeOS": "OpenHarmony",
@@ -28,10 +28,6 @@
   },
   "modules": [
     {
-      "name": "ohospatch",
-      "srcPath": "./ohospatch",
-    },
-    {
       "name": "entry",
       "srcPath": "./entry",
       "targets": [
@@ -42,6 +38,14 @@
           ]
         }
       ]
+    },
+    {
+      "name": "ohospatch",
+      "srcPath": "./ohospatch",
+    },
+    {
+      "name": "business_page",
+      "srcPath": "./business_page",
     }
   ]
 }

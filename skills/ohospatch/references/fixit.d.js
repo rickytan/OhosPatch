@@ -233,6 +233,8 @@ class Fixit {
 /**
  * Alias of `Fixit.import()`. Synchronously load an exported ArkTS class from
  * `bundleName/moduleName/[packageName/]src/main/ets/File#ExportName`.
+ * Scoped package names such as `@google/somelib` are written as normal path
+ * segments before `src/main/ets`.
  *
  * @param {string} fullPath
  * @returns {OhosPatchImportedClass}

@@ -1,4 +1,5 @@
 #include "ark_runtime/jsvm.h"
+#include "bundle/native_interface_bundle.h"
 #include "fixit_runtime.h"
 #include "hilog/log.h"
 #include "napi/native_api.h"
@@ -14,7 +15,7 @@
 namespace {
 
 constexpr unsigned int kLogDomain = 0x3900;
-constexpr const char *kLogTag = "OhosPatch";
+constexpr const char *kLogTag = "[OhosPatch]";
 
 void LogError(const char *operation, int status)
 {
@@ -505,6 +506,7 @@ class JsvmRuntime
             return 0;
         }
         if (!Run(script)) {
+            LogError("OhosPatch ExecuteAndInstall: Run(script) failed");
             ClearRegistry();
             ClearImportedValues();
             return 0;
@@ -519,6 +521,12 @@ class JsvmRuntime
         bool uiInstalled = hooksInstalled && InstallUiRules(napiEnv);
         bool scopeClosed = JsvmOk(OH_JSVM_CloseHandleScope(env_, scope),
                                   "OH_JSVM_CloseHandleScope(patch install)", env_);
+        if (!hooksInstalled) {
+            LogError("OhosPatch ExecuteAndInstall: InstallHooks failed");
+        }
+        if (hooksInstalled && !uiInstalled) {
+            LogError("OhosPatch ExecuteAndInstall: InstallUiRules failed");
+        }
         if (!hooksInstalled || !uiInstalled || !scopeClosed) {
             RestoreUiHooks();
             ClearUiRules();
@@ -850,6 +858,34 @@ class JsvmRuntime
         return !bundleName->empty();
     }
 
+    bool ReadNativeBundleInfo(std::string *bundleName, std::string *moduleName)
+    {
+        if (!bundleName || !moduleName) {
+            LogError("ReadNativeBundleInfo received an invalid argument");
+            return false;
+        }
+
+        bool hasValue = false;
+        OH_NativeBundle_ApplicationInfo applicationInfo = OH_NativeBundle_GetCurrentApplicationInfo();
+        if (applicationInfo.bundleName) {
+            *bundleName = applicationInfo.bundleName;
+            hasValue = true;
+        }
+
+        OH_NativeBundle_ElementName elementName = OH_NativeBundle_GetMainElementName();
+        if (elementName.moduleName) {
+            *moduleName = elementName.moduleName;
+            hasValue = true;
+        }
+        if (elementName.bundleName) {
+            if (bundleName->empty()) {
+                *bundleName = elementName.bundleName;
+            }
+            hasValue = true;
+        }
+        return hasValue;
+    }
+
     void CaptureHostModuleInfo(napi_env napiEnv, napi_value context)
     {
         hostBundleName_.clear();
@@ -857,21 +893,26 @@ class JsvmRuntime
         hostModuleInfo_.clear();
 
         std::string bundleName;
-        if (!TryNapiNamedString(napiEnv, context, "bundleName", &bundleName) &&
+        std::string moduleName;
+        ReadNativeBundleInfo(&bundleName, &moduleName);
+
+        if (bundleName.empty() && !TryNapiNamedString(napiEnv, context, "bundleName", &bundleName) &&
             !TryNapiNestedNamedString(napiEnv, context, "abilityInfo", "bundleName", &bundleName) &&
             !TryNapiNestedNamedString(napiEnv, context, "applicationInfo", "name", &bundleName)) {
             ReadSelfBundleName(napiEnv, &bundleName);
         }
 
-        std::string moduleName;
-        TryNapiNamedString(napiEnv, context, "moduleName", &moduleName) ||
-            TryNapiNestedNamedString(napiEnv, context, "abilityInfo", "moduleName", &moduleName) ||
-            TryNapiNestedNamedString(napiEnv, context, "currentHapModuleInfo", "name", &moduleName) ||
-            TryNapiNestedNamedString(napiEnv, context, "hapModuleInfo", "name", &moduleName) ||
-            TryNapiNestedNamedString(napiEnv, context, "moduleInfo", "name", &moduleName);
+        if (moduleName.empty()) {
+            TryNapiNamedString(napiEnv, context, "moduleName", &moduleName) ||
+                TryNapiNestedNamedString(napiEnv, context, "abilityInfo", "moduleName", &moduleName) ||
+                TryNapiNestedNamedString(napiEnv, context, "currentHapModuleInfo", "name", &moduleName) ||
+                TryNapiNestedNamedString(napiEnv, context, "hapModuleInfo", "name", &moduleName) ||
+                TryNapiNestedNamedString(napiEnv, context, "moduleInfo", "name", &moduleName);
+        }
 
         if (bundleName.empty() || moduleName.empty()) {
-            LogWarn("OhosPatch could not infer host moduleInfo from Context; cross-HAR fallback is disabled");
+            LogWarn("OhosPatch could not infer host moduleInfo from native bundle API or Context; cross-HAR fallback "
+                    "is disabled");
             return;
         }
         hostBundleName_ = bundleName;
@@ -4463,6 +4504,23 @@ class JsvmRuntime
                    env_) &&
             JsvmOk(OH_JSVM_RunScript(env_, compiled, &result), "OH_JSVM_RunScript", env_)) {
             success = true;
+        } else {
+            // A syntax error or a thrown error leaves a pending JSVM exception.
+            // Clear it so the next ExecuteAndInstall can call back into JSVM
+            // (ClearRegistry -> __ohospatch_clear) without OH_JSVM_CallFunction failing.
+            bool exceptionPending = false;
+            OH_JSVM_IsExceptionPending(env_, &exceptionPending);
+            if (exceptionPending) {
+                JSVM_Value exception = nullptr;
+                OH_JSVM_GetAndClearLastException(env_, &exception);
+                JSVM_Value messageValue = nullptr;
+                if (OH_JSVM_GetNamedProperty(env_, exception, "message", &messageValue) == JSVM_OK) {
+                    std::string message;
+                    if (JsvmString(messageValue, &message) && !message.empty()) {
+                        LogError("OhosPatch Run exception: " + message);
+                    }
+                }
+            }
         }
         bool closed = JsvmOk(OH_JSVM_CloseHandleScope(env_, scope), "OH_JSVM_CloseHandleScope", env_);
         return success && closed;

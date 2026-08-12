@@ -337,11 +337,16 @@
     }
 
     var parts = path.split('/');
-    var sourceOffset = parts[2] === 'src' ? 2 : 3;
-    if (parts.length < sourceOffset + 4 ||
-        parts[sourceOffset] !== 'src' ||
-        parts[sourceOffset + 1] !== 'main' ||
-        parts[sourceOffset + 2] !== 'ets') {
+    var sourceOffset = -1;
+    for (var partIndex = 2; partIndex < parts.length - 2; partIndex += 1) {
+      if (parts[partIndex] === 'src' &&
+          parts[partIndex + 1] === 'main' &&
+          parts[partIndex + 2] === 'ets') {
+        sourceOffset = partIndex;
+        break;
+      }
+    }
+    if (sourceOffset === -1 || parts.length < sourceOffset + 4) {
       throw new Error('OhosPatch path must use bundleName/moduleName/[packageName/]src/main/ets/File format');
     }
     for (var index = 0; index < parts.length; index += 1) {
@@ -352,7 +357,7 @@
 
     var bundleName = parts[0];
     var moduleName = parts[1];
-    var packageName = sourceOffset === 2 ? moduleName : parts[2];
+    var packageName = sourceOffset === 2 ? moduleName : parts.slice(2, sourceOffset).join('/');
     var fileName = parts[parts.length - 1];
     exportName = exportName || fileName;
     if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(exportName)) {

@@ -3,18 +3,18 @@
 (function (Fixit) {
   // --- Import: 跨模块加载 ArkTS 类（返回持久 Proxy，可 new / 静态 / 实例调用）---
   var Point = Fixit.import(
-    'com.rickytan.ohospatch/entry/src/main/ets/demo/Point#Point'
+    'com.rickytan.ohospatch/entry/@vendor/business_page/src/main/ets/ViewModel/Point#Point'
   );
 
   // --- Patch 目标 ---
   var fix = Fixit.fix(
-    'com.rickytan.ohospatch/entry/src/main/ets/demo/DemoViewModel#DemoViewModel'
+    'com.rickytan.ohospatch/entry/@vendor/business_page/src/main/ets/ViewModel/DemoViewModel#DemoViewModel'
   );
   var panel = Fixit.component(
-    'com.rickytan.ohospatch/entry/src/main/ets/demo/PatchablePanel#PatchablePanel'
+    'com.rickytan.ohospatch/entry/@vendor/business_page/src/main/ets/components/PatchablePanel#PatchablePanel'
   );
   var panelV2 = Fixit.component(
-    'com.rickytan.ohospatch/entry/src/main/ets/demo/PatchablePanelV2#PatchablePanelV2'
+    'com.rickytan.ohospatch/entry/@vendor/business_page/src/main/ets/components/PatchablePanelV2#PatchablePanelV2'
   );
 
   // --- Timer + console 日志 ---
@@ -154,6 +154,17 @@
       var result = originV2Click.apply(this, arguments);
       this.statusText = 'Patched V2 event, taps=' + this.tapCount;
       return result;
+    });
+
+  Fixit.component(
+    'com.rickytan.ohospatch/entry/@vendor/business_page/src/main/ets/components/ChildParamPanel#ParentChildParamPanel'
+  )
+    .node({
+      type: 'com.rickytan.ohospatch/entry/@vendor/business_page/src/main/ets/components/ChildParamPanel#ChildParamPanel',
+      occurrence: 1
+    })
+    .param('title', function (originValue) {
+      return 'scoped patched ' + originValue;
     });
 
   // --- Method patch: 实例方法 ---

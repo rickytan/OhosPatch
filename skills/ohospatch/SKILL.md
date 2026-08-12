@@ -99,6 +99,7 @@ bundleName/moduleName/[packageName/]src/main/ets/File#ExportName
 - `@bundle:` prefix and `.ets`/`.ts` suffix are accepted.
 - `ExportName` defaults to the file name when omitted.
 - When `useNormalizedOHMUrl` is enabled and the oh-package `name` differs from `moduleName`, the `packageName` segment is required; omit it when they match.
+- Scoped OH package names are supported. For `@google/somelib`, write `com.example.app/entry/@google/somelib/src/main/ets/foo/Bar#Bar`; the runtime keeps `@google/somelib` as the package path.
 - Example: `com.example.app/entry/src/main/ets/model/DemoViewModel#DemoViewModel` resolves to `modulePath = entry/src/main/ets/model/DemoViewModel`, `moduleInfo = com.example.app/entry`, `exportName = DemoViewModel`.
 
 ### Current limitations

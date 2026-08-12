@@ -18,7 +18,7 @@
     "nativeLib": {
       "filter": {
         "excludes": [
-          "**/libc++_shared.so"
+//          "**/libc++_shared.so"
         ]
       }
     }

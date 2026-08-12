@@ -3,7 +3,7 @@ import { systemDateTime } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { abilityDelegatorRegistry } from '@kit.TestKit';
 import { OhosPatch } from '@rickytan/ohospatch';
-import { DemoViewModel } from '../../../main/ets/demo/DemoViewModel';
+import { DemoViewModel } from '@vendor/business_page';
 
 const PERF_DOMAIN = 0x3900;
 const PERF_TAG = 'OhosPatchPerf';
@@ -51,7 +51,7 @@ export default function perfTest(): void {
     it('loads and installs a patch script within 20 milliseconds', 0, () => {
       const script = `
         Fixit.fix(
-          'com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/DemoViewModel#DemoViewModel'
+          'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/ViewModel/DemoViewModel#DemoViewModel'
         ).instanceMethod('crashIt', function () {
           return 'performance-test';
         });
@@ -78,7 +78,7 @@ export default function perfTest(): void {
 
       const script = `
         var origin = Fixit.fix(
-          'com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/DemoViewModel#DemoViewModel'
+          'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/ViewModel/DemoViewModel#DemoViewModel'
         ).instanceMethod('expensiveCalculation', function () {
           return origin.apply(this, arguments);
         });

@@ -1,10 +1,8 @@
-import { describe, it, expect, beforeEach, afterEach } from '@ohos/hypium';
+import { afterEach, beforeEach, describe, expect, it } from '@ohos/hypium';
 import { Want } from '@kit.AbilityKit';
-import { Driver, ON, abilityDelegatorRegistry } from '@kit.TestKit';
+import { abilityDelegatorRegistry, Driver, ON } from '@kit.TestKit';
 import { OhosPatch } from '@rickytan/ohospatch';
-import { DemoViewModel } from '../../../main/ets/demo/DemoViewModel';
-import { Point } from '../../../main/ets/demo/Point';
-import { DemoScenario } from '../../../main/ets/demo/DemoScenario';
+import { DemoScenario, DemoViewModel, Point } from '@vendor/business_page';
 
 export default function fixitTest(): void {
   describe('FixitRuntime', () => {
@@ -20,7 +18,7 @@ export default function fixitTest(): void {
 
     it('executeScript installs a method patch that overrides instance behavior', 0, () => {
       const script = `
-        Fixit.fix('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/DemoViewModel#DemoViewModel')
+        Fixit.fix('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/ViewModel/DemoViewModel#DemoViewModel')
           .instanceMethod('crashIt', function () {
             return 'patched by ohtest';
           });
@@ -34,7 +32,7 @@ export default function fixitTest(): void {
 
     it('executeScript installs a class (static) method patch', 0, () => {
       const script = `
-        Fixit.fix('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/DemoViewModel#DemoViewModel')
+        Fixit.fix('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/ViewModel/DemoViewModel#DemoViewModel')
           .classMethod('crash', function () {
             return 'class method patched';
           });
@@ -45,10 +43,10 @@ export default function fixitTest(): void {
 
     it('target loading falls back to host moduleInfo when a package path is parsed as HSP', 0, () => {
       const script = `
-        Fixit.fix('com.rickytan.ohospatch/missing_hsp/entry/src/main/ets/demo/DemoViewModel#DemoViewModel')
+        Fixit.fix('com.rickytan.ohospatch/missing_hsp/@vendor/business_page/src/main/ets/ViewModel/DemoViewModel#DemoViewModel')
           .classMethod('crash', function () {
             var Point = Fixit.import(
-              'com.rickytan.ohospatch/missing_hsp/entry/src/main/ets/demo/Point#Point'
+              'com.rickytan.ohospatch/missing_hsp/@vendor/business_page/src/main/ets/ViewModel/Point#Point'
             );
             return Point.textOf(new Point(7, 9));
           });
@@ -57,9 +55,27 @@ export default function fixitTest(): void {
       expect(DemoViewModel.crash()).assertEqual('(7, 9)');
     });
 
+    it('full path parser accepts scoped OH package names before src/main/ets', 0, () => {
+      const script = `
+        var scopedImportError = '';
+        try {
+          Fixit.import('com.example.app/entry/@google/somelib/src/main/ets/foo/Bar#Bar');
+        } catch (err) {
+          scopedImportError = String(err && err.message ? err.message : err);
+        }
+        Fixit.fix('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/ViewModel/DemoViewModel#DemoViewModel')
+          .classMethod('crash', function () {
+            return scopedImportError.indexOf('OhosPatch path must use') === -1 &&
+              scopedImportError.indexOf('could not load the target module') !== -1;
+          });
+      `;
+      expect(OhosPatch.executeScript(script)).assertLarger(0);
+      expect(DemoViewModel.crash()).assertTrue();
+    });
+
     it('patch context exposes builtin helpers with observable values', 0, () => {
       const script = `
-        Fixit.fix('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/DemoViewModel#DemoViewModel')
+        Fixit.fix('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/ViewModel/DemoViewModel#DemoViewModel')
           .classMethod('crash', function () {
             return [
               Fixit.runtimeVersion,
@@ -80,7 +96,7 @@ export default function fixitTest(): void {
 
     it('patch context can read app resources and runtime information', 0, () => {
       const script = `
-        Fixit.fix('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/DemoViewModel#DemoViewModel')
+        Fixit.fix('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/ViewModel/DemoViewModel#DemoViewModel')
           .classMethod('crash', function () {
             var color = $r('app.color.start_window_background');
             var icon = $r('app.media.app_icon');
@@ -106,9 +122,9 @@ export default function fixitTest(): void {
 
     it('component DSL validates direct value API and unsupported event rules', 0, () => {
       const script = `
-        Fixit.fix('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/DemoViewModel#DemoViewModel')
+        Fixit.fix('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/ViewModel/DemoViewModel#DemoViewModel')
           .classMethod('crash', function () {
-            var direct = Fixit.component('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/PatchablePanel#PatchablePanel')
+            var direct = Fixit.component('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/component/PatchablePanel#PatchablePanel')
               .node({ type: 'Button', occurrence: 2 })
               .event('onClick', function () {
                 try {
@@ -119,7 +135,7 @@ export default function fixitTest(): void {
               });
             var objectRuleRejected = false;
             try {
-              Fixit.component('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/PatchablePanel#PatchablePanel')
+              Fixit.component('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/component/PatchablePanel#PatchablePanel')
                 .node({ type: 'Button', occurrence: 1 })
                 .event('onClick', {
                   mode: 'replace',
@@ -131,7 +147,7 @@ export default function fixitTest(): void {
             }
             var attrExtraRejected = false;
             try {
-              Fixit.component('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/PatchablePanel#PatchablePanel')
+              Fixit.component('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/component/PatchablePanel#PatchablePanel')
                 .node({ type: 'Text', occurrence: 0 })
                 .attr('fontColor', function () { return '#C44736'; }, 'extra');
             } catch (err) {
@@ -139,21 +155,21 @@ export default function fixitTest(): void {
             }
             var missingStateReplacementRejected = false;
             try {
-              Fixit.component('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/PatchablePanel#PatchablePanel')
+              Fixit.component('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/component/PatchablePanel#PatchablePanel')
                 .state('tapCount');
             } catch (err) {
               missingStateReplacementRejected = err instanceof TypeError;
             }
             var missingParamReplacementRejected = false;
             try {
-              Fixit.component('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/PatchablePanel#PatchablePanel')
+              Fixit.component('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/component/PatchablePanel#PatchablePanel')
                 .param('message');
             } catch (err) {
               missingParamReplacementRejected = err instanceof TypeError;
             }
             var emptyWhereRejected = false;
             try {
-              Fixit.component('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/PatchablePanel#PatchablePanel')
+              Fixit.component('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/component/PatchablePanel#PatchablePanel')
                 .node({ type: 'Button', where: {} })
                 .attr('height', 48);
             } catch (err) {
@@ -161,7 +177,7 @@ export default function fixitTest(): void {
             }
             var mixedSelectorRejected = false;
             try {
-              Fixit.component('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/PatchablePanel#PatchablePanel')
+              Fixit.component('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/component/PatchablePanel#PatchablePanel')
                 .node({ type: 'Button', occurrence: 0, where: { height: 44 } })
                 .attr('height', 48);
             } catch (err) {
@@ -169,7 +185,7 @@ export default function fixitTest(): void {
             }
             var builtInParamRejected = false;
             try {
-              Fixit.component('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/PatchablePanel#PatchablePanel')
+              Fixit.component('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/component/PatchablePanel#PatchablePanel')
                 .node({ type: 'Button', occurrence: 0 })
                 .param('title', 'bad');
             } catch (err) {
@@ -177,8 +193,8 @@ export default function fixitTest(): void {
             }
             var childAttrRejected = false;
             try {
-              Fixit.component('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/ChildParamPanel#ParentChildParamPanel')
-                .node({ type: 'com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/ChildParamPanel#ChildParamPanel' })
+              Fixit.component('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/component/ChildParamPanel#ParentChildParamPanel')
+                .node({ type: 'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/component/ChildParamPanel#ChildParamPanel' })
                 .attr('height', 48);
             } catch (err) {
               childAttrRejected = err instanceof TypeError;
@@ -208,7 +224,7 @@ export default function fixitTest(): void {
 
       const script = `
         var component = Fixit.component(
-          'com.rickytan.ohospatch/entry/src/main/ets/demo/PatchablePanelV2#PatchablePanelV2'
+          'com.rickytan.ohospatch/entry/@vendor/business_page/src/main/ets/components/PatchablePanelV2#PatchablePanelV2'
         );
         component.param('message', function (originValue) {
           return 'Patched V2 test parameter, origin=' + originValue + ', count=' + this.tapCount;
@@ -233,10 +249,10 @@ export default function fixitTest(): void {
             return result;
           });
         Fixit.component(
-          'com.rickytan.ohospatch/entry/src/main/ets/demo/ChildParamPanel#ParentChildParamPanel'
+          'com.rickytan.ohospatch/entry/@vendor/business_page/src/main/ets/components/ChildParamPanel#ParentChildParamPanel'
         )
           .node({
-            type: 'com.rickytan.ohospatch/entry/src/main/ets/demo/ChildParamPanel#ChildParamPanel',
+            type: 'com.rickytan.ohospatch/entry/@vendor/business_page/src/main/ets/components/ChildParamPanel#ChildParamPanel',
             occurrence: 1
           })
           .param('title', function (originValue) {
@@ -279,7 +295,7 @@ export default function fixitTest(): void {
       OhosPatch.clear();
       const reinstallScript = `
         Fixit.component(
-          'com.rickytan.ohospatch/entry/src/main/ets/demo/PatchablePanelV2#PatchablePanelV2'
+          'com.rickytan.ohospatch/entry/@vendor/business_page/src/main/ets/component/PatchablePanelV2#PatchablePanelV2'
         ).state('tapCount', 200);
       `;
       expect(OhosPatch.executeScript(reinstallScript)).assertLarger(0);
@@ -287,7 +303,7 @@ export default function fixitTest(): void {
 
     it('invalid full path input fails closed and later valid input still works', 0, () => {
       const invalid = `
-        Fixit.fix('entry/src/main/ets/demo/DemoViewModel#DemoViewModel')
+        Fixit.fix('entry/@vendor/business_page/src/main/ets/ViewModel/DemoViewModel#DemoViewModel')
           .instanceMethod('crashIt', function () { return 'should-not-install'; });
       `;
       expect(OhosPatch.executeScript(invalid)).assertEqual(0);
@@ -302,7 +318,7 @@ export default function fixitTest(): void {
       expect(threw).assertTrue();
 
       const valid = `
-        Fixit.fix('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/DemoViewModel#DemoViewModel')
+        Fixit.fix('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/ViewModel/DemoViewModel#DemoViewModel')
           .instanceMethod('crashIt', function () { return 'valid-after-invalid'; });
       `;
       expect(OhosPatch.executeScript(valid)).assertLarger(0);
@@ -313,7 +329,7 @@ export default function fixitTest(): void {
       // DemoViewModel.locationOf throws on out-of-bounds index.
       // Patch it to return a fallback point instead of throwing.
       const script = `
-        var origin = Fixit.fix('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/DemoViewModel#DemoViewModel')
+        var origin = Fixit.fix('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/ViewModel/DemoViewModel#DemoViewModel')
           .instanceMethod('locationOf', function (locations, index, fallback) {
             if (index < 0 || index >= locations.length) {
               return fallback;
@@ -338,7 +354,7 @@ export default function fixitTest(): void {
 
     it('patched method can catch an exception thrown by origin.apply', 0, () => {
       const script = `
-        var origin = Fixit.fix('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/DemoViewModel#DemoViewModel')
+        var origin = Fixit.fix('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/ViewModel/DemoViewModel#DemoViewModel')
           .instanceMethod('crashIt', function () {
             try {
               return origin.apply(this, arguments);
@@ -358,7 +374,7 @@ export default function fixitTest(): void {
 
     it('patched method can mutate this properties (nested proxy access)', 0, () => {
       const script = `
-        Fixit.fix('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/DemoViewModel#DemoViewModel')
+        Fixit.fix('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/ViewModel/DemoViewModel#DemoViewModel')
           .instanceMethod('revealNote', function () {
             this.buttonTitle = 'mutated by patch';
             this.backgroundColor = '#FF0000';
@@ -376,7 +392,7 @@ export default function fixitTest(): void {
 
     it('patched method can access and mutate multi-level this properties', 0, () => {
       const script = `
-        Fixit.fix('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/DemoViewModel#DemoViewModel')
+        Fixit.fix('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/ViewModel/DemoViewModel#DemoViewModel')
           .instanceMethod('revealNote', function () {
             this.profile.badge.text = 'nested';
             this.profile.badge.advance(3);
@@ -393,8 +409,8 @@ export default function fixitTest(): void {
 
     it('Fixit.import returns a usable proxy for cross-module class access', 0, () => {
       const script = `
-        var Point = Fixit.import('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/Point#Point');
-        Fixit.fix('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/DemoViewModel#DemoViewModel')
+        var Point = Fixit.import('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/ViewModel/Point#Point');
+        Fixit.fix('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/ViewModel/DemoViewModel#DemoViewModel')
           .classMethod('crash', function () {
             var p = new Point(7, 9);
             return Point.textOf(p) + '|' + p.toText() + '|' + p.x + ',' + p.y;
@@ -408,8 +424,8 @@ export default function fixitTest(): void {
 
     it('require is an alias of Fixit.import', 0, () => {
       const script = `
-        var Point = require('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/Point#Point');
-        Fixit.fix('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/DemoViewModel#DemoViewModel')
+        var Point = require('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/ViewModel/Point#Point');
+        Fixit.fix('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/ViewModel/DemoViewModel#DemoViewModel')
           .classMethod('crash', function () {
             var p = new Point(3, 4);
             return p.toText();
@@ -425,7 +441,7 @@ export default function fixitTest(): void {
         console.info('ohtest info message');
         console.warn('ohtest warn message');
         console.error('ohtest error message');
-        Fixit.fix('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/DemoViewModel#DemoViewModel')
+        Fixit.fix('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/ViewModel/DemoViewModel#DemoViewModel')
           .instanceMethod('crashIt', function () { return 'console-ok'; });
       `;
       const count = OhosPatch.executeScript(script);
@@ -438,7 +454,7 @@ export default function fixitTest(): void {
         setTimeout(function (value) {
           timerValue = value;
         }, 10, 'timer-fired');
-        Fixit.fix('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/DemoViewModel#DemoViewModel')
+        Fixit.fix('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/ViewModel/DemoViewModel#DemoViewModel')
           .classMethod('crash', function () {
             return timerValue;
           });
@@ -455,7 +471,7 @@ export default function fixitTest(): void {
 
     it('duplicate patch registration is rejected (returns 0 hooks)', 0, () => {
       const script = `
-        var fix = Fixit.fix('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/DemoViewModel#DemoViewModel');
+        var fix = Fixit.fix('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/ViewModel/DemoViewModel#DemoViewModel');
         fix.instanceMethod('crashIt', function () { return 'first'; });
         fix.instanceMethod('crashIt', function () { return 'second'; });
       `;
@@ -474,7 +490,7 @@ export default function fixitTest(): void {
 
     it('clear removes all patches and original behavior is restored', 0, () => {
       const script = `
-        Fixit.fix('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/DemoViewModel#DemoViewModel')
+        Fixit.fix('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/ViewModel/DemoViewModel#DemoViewModel')
           .instanceMethod('crashIt', function () { return 'patched'; });
       `;
       OhosPatch.executeScript(script);
@@ -495,7 +511,7 @@ export default function fixitTest(): void {
 
     it('DemoScenario.run produces expected results after patching', 0, () => {
       const script = `
-        var fix = Fixit.fix('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/DemoViewModel#DemoViewModel');
+        var fix = Fixit.fix('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/ViewModel/DemoViewModel#DemoViewModel');
         fix.instanceMethod('crashIt', function () { return 'scenario-fixed'; });
         fix.instanceMethod('locationOf', function (locations, index, fallback) {
           return fallback;

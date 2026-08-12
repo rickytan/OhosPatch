@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from '@ohos/hypium';
 import { OhosPatch } from '@rickytan/ohospatch';
-import { DemoViewModel } from '../../../main/ets/demo/DemoViewModel';
+import { DemoViewModel } from '@vendor/business_page';
 
 export default function syntaxErrorTest(): void {
   describe('SyntaxErrorHandling', () => {
@@ -25,7 +25,7 @@ export default function syntaxErrorTest(): void {
 
       // Step 2: valid patch loads successfully.
       const valid = `
-        Fixit.fix('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/DemoViewModel#DemoViewModel')
+        Fixit.fix('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/ViewModel/DemoViewModel#DemoViewModel')
           .instanceMethod('crashIt', function () { return 'recovered'; });
       `;
       const count = OhosPatch.executeScript(valid);
@@ -46,7 +46,7 @@ export default function syntaxErrorTest(): void {
       OhosPatch.executeScript(runtimeError);
 
       const valid = `
-        Fixit.fix('com.rickytan.ohospatch/entry_test/entry/src/main/ets/demo/DemoViewModel#DemoViewModel')
+        Fixit.fix('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/ViewModel/DemoViewModel#DemoViewModel')
           .classMethod('crash', function () { return 'post-error-ok'; });
       `;
       const count = OhosPatch.executeScript(valid);

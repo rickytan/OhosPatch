@@ -222,6 +222,14 @@ Patch 脚本可以引用声明文件获得 IDE 补全：
 bundleName/moduleName/[packageName/]src/main/ets/File#ExportName
 ```
 
+Runtime 解析路径时以 `src/main/ets` 为锚点：前两段固定是 `bundleName/moduleName`，锚点前剩余的所有段都会作为 OH package name。因此 scoped package 可以直接写完整包名：
+
+```text
+com.example.app/entry/@google/somelib/src/main/ets/foo/Bar#Bar
+```
+
+上面会解析为 `moduleInfo = com.example.app/entry`，`modulePath = @google/somelib/src/main/ets/foo/Bar`。
+
 例如 Demo 的 `PatchablePanel` 导出自 `entry/src/main/ets/demo/PatchablePanel.ets`，所以目标为：
 
 ```text
@@ -858,7 +866,7 @@ Patch 后：
 
 ### Demo Patch 为什么这样写
 
-Demo 使用一个真实的远程脚本 [`entry/src/main/resources/rawfile/patch.js`](entry/src/main/resources/rawfile/patch.js) 同时覆盖 Runtime 的主要能力，而不是为截图写一份特殊 Patch。它对应的未侵入业务源码是 [`PatchablePanel.ets`](entry/src/main/ets/demo/PatchablePanel.ets)、[`PatchablePanelV2.ets`](entry/src/main/ets/demo/PatchablePanelV2.ets)、[`DemoViewModel.ets`](entry/src/main/ets/demo/DemoViewModel.ets) 和 [`Point.ets`](entry/src/main/ets/demo/Point.ets)。
+Demo 使用一个真实的远程脚本 [`entry/src/main/resources/rawfile/patch.js`](entry/src/main/resources/rawfile/patch.js) 同时覆盖 Runtime 的主要能力，而不是为截图写一份特殊 Patch。它对应的未侵入业务源码是 [`PatchablePanel.ets`](business_page/src/main/ets/components/PatchablePanel.ets)、[`PatchablePanelV2.ets`](business_page/src/main/ets/components/PatchablePanelV2.ets)、[`DemoViewModel.ets`](business_page/src/main/ets/ViewModel/DemoViewModel.ets) 和 [`Point.ets`](business_page/src/main/ets/ViewModel/Point.ets)。
 
 脚本按以下目的组织：
 
