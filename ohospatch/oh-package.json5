@@ -1,7 +1,7 @@
 {
   "name": "@rickytan/ohospatch",
-  "version": "1.0.3",
-  "description": "Transparent runtime JavaScript patching for HarmonyOS using JSVM.",
+  "version": "1.0.4",
+  "description": "基于 JavaScript 的原生 ArkTS、声明式 ArkUI 热修复方案。Transparent runtime JavaScript patching for HarmonyOS using JSVM.",
   "main": "Index.ets",
   "author": {
     "name": "rickytan",
