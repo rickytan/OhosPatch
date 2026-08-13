@@ -8,7 +8,7 @@
  *
  *   /// <reference path="./fixit.d.js" />
  *
- * @version 1.15.0
+ * @version 1.16.0
  */
 
 /**
@@ -127,17 +127,17 @@
  */
 
 /**
- * @typedef {Object} OhosPatchComponentSlotNodeFix
+ * @typedef {Object} OhosPatchComponentBuilderNodeFix
  * @property {(attributeName: string, value: OhosPatchJsonValue | OhosPatchAttrHandler,
- *   ...args: OhosPatchJsonValue[]) => OhosPatchComponentSlotNodeFix} attr
- *   Override one ArkUI node attribute inside a selected child custom Component's trailing builder or BuilderParam
- *   content. Handler `this` is bound to the parent component instance.
+ *   ...args: OhosPatchJsonValue[]) => OhosPatchComponentBuilderNodeFix} attr
+ *   Override one ArkUI node attribute inside a named BuilderParam passed to a selected child custom Component.
+ *   Handler `this` is bound to the parent component instance.
  * @property {(attributes: Record<string, OhosPatchJsonValue | OhosPatchAttrHandler>) =>
- *   OhosPatchComponentSlotNodeFix} attrs
- *   Override multiple single-argument attributes inside the selected slot content.
+ *   OhosPatchComponentBuilderNodeFix} attrs
+ *   Override multiple single-argument attributes inside the selected BuilderParam content.
  * @property {(eventName: string, handler: OhosPatchComponentEventHandler) =>
- *   OhosPatchOriginalEvent} event Replace a synchronous node event callback inside the selected slot content and
- *   return the original callback proxy. Handler `this` is bound to the parent component instance.
+ *   OhosPatchOriginalEvent} event Replace a synchronous node event callback inside the selected BuilderParam
+ *   content and return the original callback proxy. Handler `this` is bound to the parent component instance.
  */
 
 /**
@@ -157,9 +157,12 @@
  *   OhosPatchComponentNodeFix} param
  *   Replace an incoming parameter on a selected child custom Component. The selector `type` must be the
  *   child's full Component path. Built-in ArkUI nodes do not support this method.
- * @property {(selector: string | OhosPatchNodeSelector) => OhosPatchComponentSlotNodeFix} slot
- *   Select an ArkUI node rendered from the selected child custom Component's trailing builder or BuilderParam
- *   content. The current node selector must be a child custom Component full path.
+ * @property {(((selector: string | OhosPatchNodeSelector) => OhosPatchComponentBuilderNodeFix) &
+ *   ((builderParamName: string, selector: string | OhosPatchNodeSelector) =>
+ *   OhosPatchComponentBuilderNodeFix))} builder
+ *   Select an ArkUI node rendered by a BuilderParam passed to the selected child custom Component. Use the
+ *   one-argument form for trailing-closure Components with one BuilderParam. Pass the BuilderParam property name
+ *   when the child declares multiple BuilderParams. Each named BuilderParam has an independent occurrence scope.
  */
 
 /**
@@ -185,7 +188,7 @@ class Fixit {
   }
 
   /** @readonly @type {string} */
-  static runtimeVersion = '1.15.0';
+  static runtimeVersion = '1.16.0';
 
   /**
    * @param {string} target Full OHM class path.

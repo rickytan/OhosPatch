@@ -29,7 +29,7 @@
 
 ## Current Runtime API
 
-The embedded runtime is `ohospatch/src/main/cpp/runtime/fixit.js`.
+The runtime source is `ohospatch/src/main/cpp/runtime/fixit.js`; Release builds minify it into the HAR rawfile.
 
 - `skills/ohospatch/references/fixit.d.js` is the editor-only JSDoc declaration for every public Patch context API. Keep its `@version`, signatures, constraints, and globals synchronized with the embedded runtime.
 - `skills/ohospatch/` is the portable Codex/Claude authoring Skill source. Keep it and `scripts/install-skill.sh` aligned with `fixit.d.js`, README limitations, and demonstrated Runtime behavior.
@@ -51,11 +51,11 @@ Timer callbacks and arguments remain in JSVM. Native stores only timer IDs and l
 Primary implementation: `ohospatch/src/main/cpp/ohospatch.cpp`.
 
 - One process-wide `JsvmRuntime` owns the independent JSVM.
-- Embedded `fixit.js` is generated into `fixit_runtime.h` by CMake.
+- CMake minifies `fixit.js` into `src/main/resources/rawfile/ohospatch/fixit.min.js`; native loads it through the host resource manager.
 - Patch method registrations are returned from JSVM as JSON specs.
 - Native loads target classes in the ArkTS VM and installs N-API trampolines.
 - Handler arguments still enter JSVM as JSON values. Method handler `this`, Component event handler `this`, nested properties, method calls, Proxy arguments, original-method results, and Proxy returns use invocation-scoped Native handles.
-- Runtime `1.15.0` includes a JS `Proxy` for the ArkTS receiver. `get`, `set`, and `apply` synchronously bridge to the original ArkTS object, preserving nested object identity and prototype method dispatch.
+- Runtime `1.16.0` includes a JS `Proxy` for the ArkTS receiver. `get`, `set`, and `apply` synchronously bridge to the original ArkTS object, preserving nested object identity and prototype method dispatch.
 - Proxy handles are valid only during the current synchronous patch invocation and must not escape to timers, promises, or globals. A call can retain at most 256 handles.
 - Hook failures fall back to the original ArkTS method.
 - Installation failure restores hooks that were already installed.
@@ -123,7 +123,7 @@ Proposed public concepts:
 
 ### Implemented status (2026-08-12)
 
-- Runtime version `1.15.0` implements `Fixit.component`, original-attribute node selectors, parent-scoped child Component parameter patching, and the invocation-scoped ArkTS object Proxy bridge.
+- Runtime version `1.16.0` implements `Fixit.component`, original-attribute node selectors, parent-scoped child Component parameter patching, named multi-`@BuilderParam` patching through `.builder(...)`, and the invocation-scoped ArkTS object Proxy bridge.
 - API 20 state-management V1 and V2 exported custom components are supported through separate native adapters with the same public DSL.
 - Direct `param/state(name, valueOrHandler)` are implemented; no chain-style value-fix API is exposed.
 - Node selection prefers `{ type, occurrence }` for efficient zero-based per-type counting and supports `{ type, where }` when original-attribute matching is needed.

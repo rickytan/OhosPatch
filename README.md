@@ -583,7 +583,7 @@ var originSubmit = panel.node({ // 返回 NodeBuilder。
 
 自定义组件是边界。父组件中的 `<Child />` 只是父组件渲染路径上的一个自定义组件创建点，不会把 `Child` 内部的 `Text/Button` 计入父组件 selector；要修复子组件内部节点，需要对 `Child` 自己再写一条 `Fixit.component(childFullPath)`。
 
-这个边界有一个明确的例外：父组件传给子组件的尾随闭包或 `@BuilderParam` 内容仍归父组件所有，可以通过 `.node(childSelector).slot(nodeSelector)` 修复。原始组件例如：
+这个边界有一个明确的例外：父组件传给子组件的尾随闭包或 `@BuilderParam` 内容仍归父组件所有，可以通过 `.node(childSelector).builder(...)` 修复。原始组件例如：
 
 ```ts
 @Component
@@ -592,7 +592,7 @@ export struct ContentShell {
 
   build() {
     Column() {
-      Text('Shell title') // 子组件自己创建，不属于 slot
+      Text('Shell title') // 子组件自己创建，不属于 contentBuilder
       this.contentBuilder()
     }
   }
@@ -604,8 +604,8 @@ export struct ParentPanel {
 
   build() {
     ContentShell() {
-      Text(`status=${this.statusText}`) // slot Text occurrence 0
-      Button('Action')                 // slot Button occurrence 0
+      Text(`status=${this.statusText}`) // contentBuilder Text occurrence 0
+      Button('Action')                 // contentBuilder Button occurrence 0
         .height(44)
         .onClick(() => {
           this.statusText = 'Original click'
@@ -627,11 +627,11 @@ var child = parent.node({
   occurrence: 0 // 选择第一个 ContentShell 实例。
 }); // 返回 ComponentNodeFix。
 
-child.slot({ type: 'Text', occurrence: 0 }) // 在该实例收到的 BuilderParam 内容中选择第一个 Text。
-  .attrs({ fontColor: '#C44736', fontSize: 18 }); // 返回 ComponentSlotNodeFix。
+child.builder({ type: 'Text', occurrence: 0 }) // 尾随闭包只有一个 BuilderParam，可省略属性名。
+  .attrs({ fontColor: '#C44736', fontSize: 18 }); // 返回 ComponentBuilderNodeFix。
 
-var originClick = child.slot({ type: 'Button', occurrence: 0 }) // slot 内各节点类型独立从 0 计数。
-  .attrs({ height: 52, backgroundColor: '#C44736' }) // 覆盖原 Button 属性；返回 ComponentSlotNodeFix。
+var originClick = child.builder({ type: 'Button', occurrence: 0 }) // BuilderParam 内各节点类型独立从 0 计数。
+  .attrs({ height: 52, backgroundColor: '#C44736' }) // 覆盖原 Button 属性；返回 ComponentBuilderNodeFix。
   .event('onClick', function () { // 返回 OriginEvent；this 是 ParentPanel 当前实例。
     var result = originClick.apply(this, arguments); // 调用并取得原 onClick 返回值。
     this.statusText = 'Patched click'; // 原回调执行后修改父组件状态。
@@ -639,7 +639,61 @@ var originClick = child.slot({ type: 'Button', occurrence: 0 }) // slot 内各�
   });
 ```
 
-`.slot()` 只覆盖由父组件提供的 builder 内容，不会选择 `ContentShell` 自己创建的 `Text('Shell title')`。slot 内的 `occurrence` 每次执行该 BuilderParam 时独立计数，因此上例的 slot Text 是 `0`，不受父组件其他 Text 或子组件标题 Text 影响。slot 节点同样支持 `type + where`；未找到节点时保持 no-op 并输出一次 warning。
+`.builder()` 只覆盖由父组件提供的 BuilderParam 内容，不会选择 `ContentShell` 自己创建的 `Text('Shell title')`。BuilderParam 内的 `occurrence` 每次执行回调时独立计数，因此上例的 Text 是 `0`，不受父组件其他 Text 或子组件标题 Text 影响。BuilderParam 节点同样支持 `type + where`；未找到节点时保持 no-op 并输出一次 warning。
+
+尾随闭包在 ArkTS 中只允许子组件存在一个无入参 `@BuilderParam`，因此只使用单参数形式，不需要传 BuilderParam 属性名：
+
+```js
+child.builder({ type: 'Text', occurrence: 0 });
+```
+
+不使用尾随闭包、显式传入单个 BuilderParam 时，两种 Patch 写法都可以；推荐写出属性名，让规则与组件声明的对应关系更明确：
+
+```ts
+ContentShell({ contentBuilder: this.ContentBuilder })
+```
+
+```js
+child.builder('contentBuilder', { type: 'Text', occurrence: 0 });
+```
+
+如果子组件声明多个 BuilderParam，必须显式传入参数，并在 Patch 中指定属性名：
+
+```ts
+@Component
+export struct MultiContentShell {
+  @BuilderParam headerBuilder: () => void
+  @BuilderParam contentBuilder: () => void
+
+  build() {
+    Column() {
+      this.headerBuilder()
+      this.contentBuilder()
+    }
+  }
+}
+
+// 父组件
+MultiContentShell({
+  headerBuilder: this.HeaderBuilder,
+  contentBuilder: this.ContentBuilder
+})
+```
+
+```js
+var shell = parent.node({
+  type: '@vendor/business/src/main/ets/MultiContentShell#MultiContentShell',
+  occurrence: 0
+});
+
+shell.builder('headerBuilder', { type: 'Text', occurrence: 0 })
+  .attr('fontColor', '#8A3FFC');
+
+shell.builder('contentBuilder', { type: 'Text', occurrence: 0 })
+  .attr('fontColor', '#007D8A');
+```
+
+`headerBuilder` 和 `contentBuilder` 是两个独立计数作用域：即使两者都只创建一个 `Text`，它们各自的 Text 都是 `occurrence: 0`，不会互相累加。带参数的 BuilderParam 回调也会收到原始参数，OhosPatch 只在回调执行期间建立节点匹配作用域，不修改参数和返回值。
 
 条件渲染时，只统计当前状态下实际执行到的分支。`if` 分支里第一个 `Button` 是该分支执行时的 `Button occurrence: 0`；切到 `else` 分支后，`else` 分支里实际创建的同类型节点会重新按执行顺序计数。循环和 `ForEach` 也是同一规则：每个实际执行的迭代都会按顺序贡献节点，因此列表长度、排序或过滤条件变化会改变后续同类型节点的 `occurrence`。
 
@@ -1067,7 +1121,7 @@ CMake 构建也会调用同一个 Gulp task；如果本地没有安装 Node 依�
 - Patch handler 的 `this` Proxy 只在当前同步调用或 `origin` 调用期间有效，不应保存到 timer、Promise 或全局变量后异步访问。
 - `Fixit.import()` 返回的持久 Proxy 可保留到 `OhosPatch.clear()` 或下一次 patch 替换。
 - 普通方法参数和新建 JS 对象仍受 JSON wire 类型限制。
-- Component DSL 当前支持 API 20 状态管理 V1/V2、导出的自定义组件、父组件尾随闭包/`@BuilderParam` slot、首选的 `type + occurrence` 节点选择器、`type + where` 原始属性选择器、JSON 属性参数和同步事件替换。
+- Component DSL 当前支持 API 20 状态管理 V1/V2、导出的自定义组件、父组件尾随闭包/`@BuilderParam` 内容、首选的 `type + occurrence` 节点选择器、`type + where` 原始属性选择器、JSON 属性参数和同步事件替换。
 - 非导出的 `@Entry` 页面、层级选择器、已挂载组件主动刷新，以及 `before/after/around` 事件组合尚未支持。`Resource`、Controller 等不可 JSON 序列化对象不能作为 selector 或静态 attr 参数直接下发。
 - 单个 runtime 最多同时存在 256 个 timer。
 - 单个 patch 最多保留 512 个去重后的动态导入类、实例、方法或嵌套对象句柄。

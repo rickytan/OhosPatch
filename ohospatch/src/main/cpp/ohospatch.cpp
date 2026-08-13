@@ -422,6 +422,7 @@ struct UiRule {
     std::string childExportName;
     std::string childTargetKey;
     uint32_t childOccurrence = 0;
+    std::string builderParamName;
     std::array<UiWhereCondition, kMaxUiWhereAttributesPerNode> whereConditions;
     size_t whereConditionCount = 0;
     bool selectorMissLogged = false;
@@ -469,6 +470,9 @@ std::string DescribeUiRule(const UiRule *rule)
     if (!rule->eventName.empty()) {
         description += ", event='" + rule->eventName + "'";
     }
+    if (!rule->builderParamName.empty()) {
+        description += ", builderParam='" + rule->builderParamName + "'";
+    }
     if (!rule->childClassName.empty()) {
         description += ", childComponent='" + rule->childClassName + "'";
     }
@@ -505,6 +509,7 @@ struct UiNodeCallbackRecord {
     bool hasScopedChild = false;
     std::string childTargetKey;
     uint32_t childOccurrence = 0;
+    std::string builderParamName;
     std::array<std::string, kMaxUiSelectorsPerNode> selectedSelectors;
     size_t selectedSelectorCount = 0;
     std::array<std::string, kMaxUiSelectorsPerNode> resolvedSelectors;
@@ -518,6 +523,7 @@ struct UiBuilderParamCallbackRecord {
     std::string parentTargetKey;
     std::string childTargetKey;
     uint32_t childOccurrence = 0;
+    std::string builderParamName;
 };
 
 struct UiEventCallbackRecord {
@@ -570,6 +576,7 @@ struct UiScopedChildCreationFrame {
     std::string parentTargetKey;
     std::string childTargetKey;
     uint32_t occurrence = 0;
+    std::string builderParamName;
     napi_ref owner = nullptr;
     std::array<UiNodeTypeCounter, kMaxUiNodeTypesPerRender> counters;
     size_t counterCount = 0;
@@ -1527,7 +1534,7 @@ class JsvmRuntime
         if (!first) {
             json.append(",");
         }
-        json.append("\"patchRuntimeVersion\":\"1.15.0\"");
+        json.append("\"patchRuntimeVersion\":\"1.16.0\"");
         json.append("}");
         return ParseJson(json, output);
     }
@@ -1964,7 +1971,7 @@ class JsvmRuntime
         }
 
         bool pushed = PushUiScopedChildCreationFrame(napiEnv, record->parentTargetKey, record->childTargetKey,
-                                                      record->childOccurrence, owner);
+                                                      record->childOccurrence, record->builderParamName, owner);
         napi_value result = nullptr;
         napi_status status = napi_call_function(napiEnv, receiver, original, argc, argv, &result);
         if (pushed) {
@@ -2010,7 +2017,7 @@ class JsvmRuntime
                 NapiOk(napiEnv, napi_get_reference_value(napiEnv, record->owner, &owner),
                        "napi_get_reference_value(scoped child owner)") &&
                 PushUiScopedChildCreationFrame(napiEnv, record->targetKey, record->childTargetKey,
-                                               record->childOccurrence, owner);
+                                               record->childOccurrence, "", owner);
         }
 
         napi_value result = nullptr;
@@ -3643,10 +3650,11 @@ class JsvmRuntime
     }
 
     bool WrapUiBuilderParamValue(napi_env napiEnv, napi_value value, const std::string &parentTargetKey,
-                                 const std::string &childTargetKey, uint32_t occurrence, napi_value owner,
-                                 napi_value *wrapped)
+                                 const std::string &childTargetKey, uint32_t occurrence,
+                                 const std::string &builderParamName, napi_value owner, napi_value *wrapped)
     {
-        if (!value || !wrapped || !owner || !HasActiveSlotRule(parentTargetKey, childTargetKey, occurrence)) {
+        if (!value || !wrapped || !owner ||
+            !HasActiveBuilderRule(parentTargetKey, childTargetKey, occurrence, builderParamName)) {
             return false;
         }
         napi_valuetype valueType = napi_undefined;
@@ -3656,20 +3664,35 @@ class JsvmRuntime
             return false;
         }
 
-        constexpr const char *kWrappedMarker = "__ohospatchBuilderParam";
+        constexpr const char *kWrappedMarker = "__ohospatchBuilderParamScope";
+        constexpr const char *kOriginalBuilder = "__ohospatchOriginalBuilderParam";
+        const std::string scopeKey = parentTargetKey + "|" + childTargetKey + "|" +
+                                     std::to_string(occurrence) + "|" + builderParamName;
         bool isWrapped = false;
         napi_value marker = nullptr;
+        napi_value originalBuilder = value;
         if (NapiOk(napiEnv, napi_has_named_property(napiEnv, value, kWrappedMarker, &isWrapped),
                    "napi_has_named_property(component builder parameter marker)") &&
             isWrapped &&
             NapiOk(napiEnv, napi_get_named_property(napiEnv, value, kWrappedMarker, &marker),
                    "napi_get_named_property(component builder parameter marker)")) {
-            bool markerValue = false;
-            if (NapiOk(napiEnv, napi_get_value_bool(napiEnv, marker, &markerValue),
-                       "napi_get_value_bool(component builder parameter marker)") &&
-                markerValue) {
+            std::string existingScope;
+            if (NapiValueToString(napiEnv, marker, &existingScope) && existingScope == scopeKey) {
                 *wrapped = value;
                 return true;
+            }
+            bool hasOriginal = false;
+            napi_value candidate = nullptr;
+            napi_valuetype candidateType = napi_undefined;
+            if (NapiOk(napiEnv, napi_has_named_property(napiEnv, value, kOriginalBuilder, &hasOriginal),
+                       "napi_has_named_property(original component builder parameter)") &&
+                hasOriginal &&
+                NapiOk(napiEnv, napi_get_named_property(napiEnv, value, kOriginalBuilder, &candidate),
+                       "napi_get_named_property(original component builder parameter)") &&
+                NapiOk(napiEnv, napi_typeof(napiEnv, candidate, &candidateType),
+                       "napi_typeof(original component builder parameter)") &&
+                candidateType == napi_function) {
+                originalBuilder = candidate;
             }
         }
 
@@ -3682,7 +3705,8 @@ class JsvmRuntime
         record->parentTargetKey = parentTargetKey;
         record->childTargetKey = childTargetKey;
         record->childOccurrence = occurrence;
-        if (!NapiOk(napiEnv, napi_create_reference(napiEnv, value, 1, &record->originalBuilder),
+        record->builderParamName = builderParamName;
+        if (!NapiOk(napiEnv, napi_create_reference(napiEnv, originalBuilder, 1, &record->originalBuilder),
                     "napi_create_reference(component builder parameter)") ||
             !NapiOk(napiEnv, napi_create_reference(napiEnv, owner, 0, &record->owner),
                     "napi_create_reference(component builder parameter owner)")) {
@@ -3702,11 +3726,13 @@ class JsvmRuntime
             return false;
         }
         napi_value markerValue = nullptr;
-        if (NapiOk(napiEnv, napi_get_boolean(napiEnv, true, &markerValue),
-                   "napi_get_boolean(component builder parameter marker)")) {
+        if (NapiOk(napiEnv, napi_create_string_utf8(napiEnv, scopeKey.c_str(), scopeKey.size(), &markerValue),
+                   "napi_create_string_utf8(component builder parameter marker)")) {
             NapiOk(napiEnv, napi_set_named_property(napiEnv, wrapper, kWrappedMarker, markerValue),
                    "napi_set_named_property(component builder parameter marker)");
         }
+        NapiOk(napiEnv, napi_set_named_property(napiEnv, wrapper, kOriginalBuilder, originalBuilder),
+               "napi_set_named_property(original component builder parameter)");
         *wrapped = wrapper;
         return true;
     }
@@ -3714,7 +3740,7 @@ class JsvmRuntime
     void WrapUiScopedBuilderParams(napi_env napiEnv, const std::string &childTargetKey, napi_value params,
                                    napi_value childOwner)
     {
-        if (!params || !TargetReceivesSlotRules(childTargetKey)) {
+        if (!params || !TargetReceivesBuilderRules(childTargetKey)) {
             return;
         }
         std::string parentTargetKey;
@@ -3737,12 +3763,14 @@ class JsvmRuntime
             napi_value property = nullptr;
             napi_value value = nullptr;
             napi_value wrapped = nullptr;
+            std::string builderParamName;
             if (!NapiOk(napiEnv, napi_get_element(napiEnv, propertyNames, index, &property),
                         "napi_get_element(component builder parameter name)") ||
+                !NapiValueToString(napiEnv, property, &builderParamName) ||
                 !NapiOk(napiEnv, napi_get_property(napiEnv, params, property, &value),
                         "napi_get_property(component builder parameter)") ||
-                !WrapUiBuilderParamValue(napiEnv, value, parentTargetKey, childTargetKey, occurrence, parentOwner,
-                                         &wrapped)) {
+                !WrapUiBuilderParamValue(napiEnv, value, parentTargetKey, childTargetKey, occurrence,
+                                         builderParamName, parentOwner, &wrapped)) {
                 continue;
             }
             NapiOk(napiEnv, napi_set_property(napiEnv, params, property, wrapped),
@@ -3750,10 +3778,15 @@ class JsvmRuntime
         }
     }
 
-    void WrapUiScopedNamedBuilderParam(napi_env napiEnv, const std::string &childTargetKey, napi_value,
+    void WrapUiScopedNamedBuilderParam(napi_env napiEnv, const std::string &childTargetKey, napi_value nameValue,
                                        napi_value *value, napi_value childOwner)
     {
-        if (!value || !*value || !TargetReceivesSlotRules(childTargetKey)) {
+        if (!nameValue || !value || !*value || !TargetReceivesBuilderRules(childTargetKey)) {
+            return;
+        }
+        std::string builderParamName;
+        if (!NapiValueToString(napiEnv, nameValue, &builderParamName)) {
+            LogError("ComponentV2 BuilderParam hook received an invalid property name");
             return;
         }
         std::string parentTargetKey;
@@ -3762,8 +3795,8 @@ class JsvmRuntime
         napi_value wrapped = nullptr;
         if (ResolveUiScopedChildContext(napiEnv, childTargetKey, childOwner, &parentTargetKey, &occurrence,
                                         &parentOwner) &&
-            WrapUiBuilderParamValue(napiEnv, *value, parentTargetKey, childTargetKey, occurrence, parentOwner,
-                                    &wrapped)) {
+            WrapUiBuilderParamValue(napiEnv, *value, parentTargetKey, childTargetKey, occurrence,
+                                    builderParamName, parentOwner, &wrapped)) {
             *value = wrapped;
         }
     }
@@ -3842,7 +3875,8 @@ class JsvmRuntime
     }
 
     bool PushUiScopedChildCreationFrame(napi_env napiEnv, const std::string &parentTargetKey,
-                                        const std::string &childTargetKey, uint32_t occurrence, napi_value owner)
+                                        const std::string &childTargetKey, uint32_t occurrence,
+                                        const std::string &builderParamName, napi_value owner)
     {
         if (uiScopedChildCreationDepth_ >= uiScopedChildCreationFrames_.size()) {
             LogError("Scoped child component nesting exceeds the OhosPatch limit");
@@ -3852,6 +3886,7 @@ class JsvmRuntime
         frame.parentTargetKey = parentTargetKey;
         frame.childTargetKey = childTargetKey;
         frame.occurrence = occurrence;
+        frame.builderParamName = builderParamName;
         frame.owner = nullptr;
         frame.counterCount = 0;
         if (owner && !NapiOk(napiEnv, napi_create_reference(napiEnv, owner, 0, &frame.owner),
@@ -3859,6 +3894,7 @@ class JsvmRuntime
             frame.parentTargetKey.clear();
             frame.childTargetKey.clear();
             frame.occurrence = 0;
+            frame.builderParamName.clear();
             frame.counterCount = 0;
             --uiScopedChildCreationDepth_;
             return false;
@@ -3876,6 +3912,7 @@ class JsvmRuntime
         frame.parentTargetKey.clear();
         frame.childTargetKey.clear();
         frame.occurrence = 0;
+        frame.builderParamName.clear();
         frame.owner = nullptr;
         frame.counterCount = 0;
     }
@@ -3963,7 +4000,7 @@ class JsvmRuntime
         }
         if (!counter) {
             if (frame->counterCount >= frame->counters.size()) {
-                LogError("Component slot node type count exceeds the OhosPatch limit");
+                LogError("Component BuilderParam node type count exceeds the OhosPatch limit");
                 return false;
             }
             counter = &frame->counters[frame->counterCount++];
@@ -3983,6 +4020,10 @@ class JsvmRuntime
             return false;
         }
         if (!rule->childTargetKey.empty() && rule->childOccurrence != record->childOccurrence) {
+            return false;
+        }
+        if (!rule->childTargetKey.empty() && !rule->builderParamName.empty() &&
+            rule->builderParamName != record->builderParamName) {
             return false;
         }
         return rule->whereConditionCount > 0 || rule->occurrence == record->occurrence;
@@ -4193,24 +4234,30 @@ class JsvmRuntime
         std::string slotParentTargetKey;
         std::string slotChildTargetKey;
         uint32_t slotChildOccurrence = 0;
+        std::string builderParamName;
         napi_value slotOwner = nullptr;
-        if (slotFrame && HasActiveSlotRule(slotFrame->parentTargetKey, targetKey, slotFrame->occurrence)) {
+        if (slotFrame && !slotFrame->builderParamName.empty() &&
+            HasActiveBuilderRule(slotFrame->parentTargetKey, targetKey, slotFrame->occurrence,
+                                 slotFrame->builderParamName)) {
             inSlotScope = true;
             slotParentTargetKey = slotFrame->parentTargetKey;
             slotChildTargetKey = targetKey;
             slotChildOccurrence = slotFrame->occurrence;
+            builderParamName = slotFrame->builderParamName;
             if (slotFrame->owner) {
                 NapiOk(napiEnv, napi_get_reference_value(napiEnv, slotFrame->owner, &slotOwner),
                        "napi_get_reference_value(active slot owner)");
             }
         } else {
             slotFrame = FindActiveParentScopedChildCreationFrame(targetKey);
-            if (slotFrame && HasActiveSlotRule(slotFrame->parentTargetKey, slotFrame->childTargetKey,
-                                               slotFrame->occurrence)) {
+            if (slotFrame && !slotFrame->builderParamName.empty() &&
+                HasActiveBuilderRule(slotFrame->parentTargetKey, slotFrame->childTargetKey,
+                                     slotFrame->occurrence, slotFrame->builderParamName)) {
                 inSlotScope = true;
                 slotParentTargetKey = slotFrame->parentTargetKey;
                 slotChildTargetKey = slotFrame->childTargetKey;
                 slotChildOccurrence = slotFrame->occurrence;
+                builderParamName = slotFrame->builderParamName;
                 if (slotFrame->owner) {
                     NapiOk(napiEnv, napi_get_reference_value(napiEnv, slotFrame->owner, &slotOwner),
                            "napi_get_reference_value(parent slot owner)");
@@ -4223,7 +4270,8 @@ class JsvmRuntime
             if (parentFrame && parentFrame != renderFrame &&
                 ResolveScopedChildOccurrence(napiEnv, parentFrame, targetKey, renderFrame->owner,
                                               &resolvedOccurrence) &&
-                HasActiveSlotRule(parentFrame->targetKey, targetKey, resolvedOccurrence)) {
+                ResolveUniqueBuilderParamName(parentFrame->targetKey, targetKey, resolvedOccurrence,
+                                              &builderParamName)) {
                 inSlotScope = true;
                 slotParentTargetKey = parentFrame->targetKey;
                 slotChildTargetKey = targetKey;
@@ -4249,7 +4297,8 @@ class JsvmRuntime
                     rule->targetKey == ruleTargetKey && rule->nodeType == nodeType &&
                     ((!inSlotScope && rule->childTargetKey.empty()) ||
                      (inSlotScope && rule->childTargetKey == slotChildTargetKey &&
-                      rule->childOccurrence == slotChildOccurrence)) &&
+                      rule->childOccurrence == slotChildOccurrence &&
+                      (rule->builderParamName.empty() || rule->builderParamName == builderParamName))) &&
                     (rule->whereConditionCount > 0 || rule->occurrence == occurrence)) {
                     hasMatchingRule = true;
                     break;
@@ -4307,6 +4356,7 @@ class JsvmRuntime
         record->hasScopedChild = hasScopedChild;
         record->childTargetKey = inSlotScope ? slotChildTargetKey : childTargetKey;
         record->childOccurrence = inSlotScope ? slotChildOccurrence : childOccurrence;
+        record->builderParamName = inSlotScope ? builderParamName : "";
         napi_value owner = inSlotScope ? slotOwner : (renderFrame ? renderFrame->owner : nullptr);
         if (!owner) {
             LogError("Cannot wrap Component node builder because its owner is unavailable. target='" +
@@ -4779,7 +4829,8 @@ class JsvmRuntime
                NapiNamedString(napiEnv, spec, "childModuleInfo", &rule->childModuleInfo) &&
                NapiNamedString(napiEnv, spec, "childExportName", &rule->childExportName) &&
                NapiNamedString(napiEnv, spec, "childTargetKey", &rule->childTargetKey) &&
-               NapiNamedUint32(napiEnv, spec, "childOccurrence", &rule->childOccurrence);
+               NapiNamedUint32(napiEnv, spec, "childOccurrence", &rule->childOccurrence) &&
+               NapiNamedString(napiEnv, spec, "builderParamName", &rule->builderParamName);
     }
 
     bool ParseUiRule(napi_env napiEnv, napi_value spec, std::unique_ptr<UiRule> *output)
@@ -4881,7 +4932,7 @@ class JsvmRuntime
         return false;
     }
 
-    bool TargetReceivesSlotRules(const std::string &targetKey) const
+    bool TargetReceivesBuilderRules(const std::string &targetKey) const
     {
         for (size_t index = 0; index < uiRuleCount_; ++index) {
             UiRule *rule = uiRules_[index].get();
@@ -4893,18 +4944,45 @@ class JsvmRuntime
         return false;
     }
 
-    bool HasActiveSlotRule(const std::string &parentTargetKey, const std::string &childTargetKey,
-                           uint32_t childOccurrence) const
+    bool HasActiveBuilderRule(const std::string &parentTargetKey, const std::string &childTargetKey,
+                              uint32_t childOccurrence, const std::string &builderParamName) const
     {
         for (size_t index = 0; index < uiRuleCount_; ++index) {
             UiRule *rule = uiRules_[index].get();
             if (rule && (rule->kind == UiRuleKind::ATTRIBUTE || rule->kind == UiRuleKind::EVENT) &&
                 rule->targetKey == parentTargetKey && rule->childTargetKey == childTargetKey &&
-                rule->childOccurrence == childOccurrence) {
+                rule->childOccurrence == childOccurrence &&
+                (rule->builderParamName.empty() || rule->builderParamName == builderParamName)) {
                 return true;
             }
         }
         return false;
+    }
+
+    bool ResolveUniqueBuilderParamName(const std::string &parentTargetKey, const std::string &childTargetKey,
+                                       uint32_t childOccurrence, std::string *builderParamName) const
+    {
+        if (!builderParamName) {
+            return false;
+        }
+        builderParamName->clear();
+        bool found = false;
+        for (size_t index = 0; index < uiRuleCount_; ++index) {
+            UiRule *rule = uiRules_[index].get();
+            if (!rule || (rule->kind != UiRuleKind::ATTRIBUTE && rule->kind != UiRuleKind::EVENT) ||
+                rule->targetKey != parentTargetKey || rule->childTargetKey != childTargetKey ||
+                rule->childOccurrence != childOccurrence) {
+                continue;
+            }
+            if (!found) {
+                *builderParamName = rule->builderParamName;
+                found = true;
+            } else if (*builderParamName != rule->builderParamName) {
+                builderParamName->clear();
+                return false;
+            }
+        }
+        return found;
     }
 
     bool IsUiComponentHookInstalled(const std::string &targetKey) const
@@ -5044,11 +5122,11 @@ class JsvmRuntime
         uiComponentHooks_[uiComponentHookCount_++] = std::move(component);
         bool needsParam = TargetNeedsRuleKind(rule->targetKey, UiRuleKind::PARAM) ||
                           TargetReceivesScopedChildParam(rule->targetKey) ||
-                          TargetReceivesSlotRules(rule->targetKey);
+                          TargetReceivesBuilderRules(rule->targetKey);
         bool needsState = TargetNeedsRuleKind(rule->targetKey, UiRuleKind::STATE);
         bool needsNodes = TargetNeedsRuleKind(rule->targetKey, UiRuleKind::ATTRIBUTE) ||
                           TargetNeedsRuleKind(rule->targetKey, UiRuleKind::EVENT) ||
-                          TargetReceivesSlotRules(rule->targetKey);
+                          TargetReceivesBuilderRules(rule->targetKey);
         bool needsChildScope = TargetNeedsRuleKind(rule->targetKey, UiRuleKind::CHILD_PARAM);
         bool hasV1Initializer = false;
         bool hasV2Initializer = false;
@@ -5175,7 +5253,7 @@ class JsvmRuntime
                 !rule->childTargetKey.empty() && !IsUiComponentHookInstalled(rule->childTargetKey)) {
                 std::unique_ptr<UiRule> childRule(new (std::nothrow) UiRule());
                 if (!childRule) {
-                    LogError("Cannot allocate OhosPatch slot component install rule");
+                    LogError("Cannot allocate OhosPatch BuilderParam component install rule");
                     return false;
                 }
                 childRule->kind = UiRuleKind::ATTRIBUTE;

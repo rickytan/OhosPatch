@@ -609,12 +609,15 @@
     this.selector = normalizeNodeSelector(selector);
   }
 
-  function ComponentSlotNodeFix(componentNode, selector) {
-    assertChildNodeSelector(componentNode.selector, 'slot');
+  function ComponentBuilderNodeFix(componentNode, builderParamName, selector) {
+    assertChildNodeSelector(componentNode.selector, 'builder');
     this.component = componentNode.component;
     this.childSelector = componentNode.selector;
+    this.builderParamName = builderParamName
+      ? validateUiName(builderParamName, 'Component BuilderParam name')
+      : '';
     this.selector = normalizeNodeSelector(selector);
-    assertBuiltInNodeSelector(this.selector, 'slot node');
+    assertBuiltInNodeSelector(this.selector, 'builder node');
   }
 
   function assertBuiltInNodeSelector(selector, operation) {
@@ -720,11 +723,17 @@
     return this;
   };
 
-  ComponentNodeFix.prototype.slot = function (selector) {
-    return new ComponentSlotNodeFix(this, selector);
+  ComponentNodeFix.prototype.builder = function (builderParamName, selector) {
+    if (arguments.length === 1) {
+      selector = builderParamName;
+      builderParamName = '';
+    } else if (arguments.length !== 2) {
+      throw new TypeError('Component builder requires a node selector and an optional BuilderParam name');
+    }
+    return new ComponentBuilderNodeFix(this, builderParamName, selector);
   };
 
-  function copySlotScope(rule, childSelector) {
+  function copyBuilderScope(rule, childSelector, builderParamName) {
     var childTarget = childSelector.componentTarget;
     rule.childClassName = childTarget.className;
     rule.childModulePath = childTarget.modulePath;
@@ -732,42 +741,43 @@
     rule.childExportName = childTarget.exportName;
     rule.childTargetKey = targetKey(childTarget);
     rule.childOccurrence = childSelector.occurrence;
+    rule.builderParamName = builderParamName;
   }
 
-  ComponentSlotNodeFix.prototype.attr = function (attributeName) {
-    var name = validateUiName(attributeName, 'Component slot attribute name');
+  ComponentBuilderNodeFix.prototype.attr = function (attributeName) {
+    var name = validateUiName(attributeName, 'Component builder attribute name');
     var args = Array.prototype.slice.call(arguments, 1);
     if (args.length === 0) {
-      throw new TypeError('Component slot attribute requires at least one argument');
+      throw new TypeError('Component builder attribute requires at least one argument');
     }
 
     var target = this.component.target;
     var selector = this.selector;
-    var uniqueKey = targetKey(target) + '|slot|' + this.childSelector.selectorKey + '|node|' +
-      selector.selectorKey + '|attr|' + name;
+    var uniqueKey = targetKey(target) + '|builder|' + this.childSelector.selectorKey + '|param|' +
+      this.builderParamName + '|node|' + selector.selectorKey + '|attr|' + name;
     var rule = copyUiTarget(target);
     rule.kind = 'attribute';
     copyNodeSelector(rule, selector);
-    copySlotScope(rule, this.childSelector);
+    copyBuilderScope(rule, this.childSelector, this.builderParamName);
     rule.attributeName = name;
 
     if (typeof args[0] === 'function') {
       if (args.length !== 1) {
-        throw new TypeError('Component slot attribute handler does not accept extra arguments');
+        throw new TypeError('Component builder attribute handler does not accept extra arguments');
       }
       rule.attrHandler = true;
       registerUiRule(uniqueKey, rule, registry.uiAttrs, args[0]);
     } else {
       rule.attrHandler = false;
-      rule.arguments = copyJsonValue(args, 'Component slot attribute arguments');
+      rule.arguments = copyJsonValue(args, 'Component builder attribute arguments');
       registerUiRule(uniqueKey, rule, null, null);
     }
     return this;
   };
 
-  ComponentSlotNodeFix.prototype.attrs = function (attributes) {
+  ComponentBuilderNodeFix.prototype.attrs = function (attributes) {
     if (!attributes || typeof attributes !== 'object' || Array.isArray(attributes)) {
-      throw new TypeError('Component slot attributes must be an object');
+      throw new TypeError('Component builder attributes must be an object');
     }
     var self = this;
     Object.keys(attributes).forEach(function (name) {
@@ -776,20 +786,20 @@
     return this;
   };
 
-  ComponentSlotNodeFix.prototype.event = function (eventName, handler) {
-    var name = validateUiName(eventName, 'Component slot event name');
+  ComponentBuilderNodeFix.prototype.event = function (eventName, handler) {
+    var name = validateUiName(eventName, 'Component builder event name');
     if (typeof handler !== 'function') {
-      throw new TypeError('Component slot event handler must be a function');
+      throw new TypeError('Component builder event handler must be a function');
     }
 
     var target = this.component.target;
     var selector = this.selector;
-    var uniqueKey = targetKey(target) + '|slot|' + this.childSelector.selectorKey + '|node|' +
-      selector.selectorKey + '|event|' + name;
+    var uniqueKey = targetKey(target) + '|builder|' + this.childSelector.selectorKey + '|param|' +
+      this.builderParamName + '|node|' + selector.selectorKey + '|event|' + name;
     var rule = copyUiTarget(target);
     rule.kind = 'event';
     copyNodeSelector(rule, selector);
-    copySlotScope(rule, this.childSelector);
+    copyBuilderScope(rule, this.childSelector, this.builderParamName);
     rule.eventName = name;
     registerUiRule(uniqueKey, rule, registry.uiEvents, handler);
     return makeUiEventOrigin();
@@ -909,7 +919,7 @@
   };
 
   Object.defineProperty(Fixit, 'runtimeVersion', {
-    value: '1.15.0',
+    value: '1.16.0',
     enumerable: true
   });
 

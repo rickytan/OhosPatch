@@ -1,9 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Renamed the trailing-closure and `@BuilderParam` node API from `node(...).slot(...)` to `node(...).builder(...)`.
+- Added one-argument `builder(nodeSelector)` syntax for trailing closures and named `builder(builderParamName, nodeSelector)` syntax for explicitly passed or multiple BuilderParams.
+- Added independent node occurrence scopes and event patches for multiple named BuilderParams.
+
 ## 1.0.3
 
 - Added parent-scoped patching for custom Component `@BuilderParam` and trailing-closure content through `node(...).slot(...)`.
-- Added slot node attribute and event patches for both method-based builders and inline trailing closures, with event `this` bound to the parent Component instance.
+- Added slot node attribute and event patches for method-based builders and inline trailing closures, with event `this` bound to the parent Component instance.
 - Applied initial Component state patches before `finalizeConstruction` to avoid render-time state mutation warnings while preserving ComponentV2 reuse behavior.
 - Added real HarmonyOS runtime coverage for ComponentV1, ComponentV2, custom child Components, and nested slot content.
 

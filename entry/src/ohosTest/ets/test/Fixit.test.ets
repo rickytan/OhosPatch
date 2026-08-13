@@ -105,7 +105,7 @@ export default function fixitTest(): void {
           });
       `;
       OhosPatch.executeScript(script);
-      expect(DemoViewModel.crash()).assertEqual('1.15.0|function|undefined|undefined|undefined|undefined|undefined|undefined|undefined');
+      expect(DemoViewModel.crash()).assertEqual('1.16.0|function|undefined|undefined|undefined|undefined|undefined|undefined|undefined');
     });
 
     it('patch context can read app resources and runtime information', 0, () => {
@@ -131,7 +131,7 @@ export default function fixitTest(): void {
           });
       `;
       OhosPatch.executeScript(script);
-      expect(DemoViewModel.crash()).assertEqual('OhosPatch|number|number|true|number|true|string|string|string|number|1.15.0');
+      expect(DemoViewModel.crash()).assertEqual('OhosPatch|number|number|true|number|true|string|string|string|number|1.16.0');
     });
 
     it('component DSL validates direct value API and unsupported event rules', 0, () => {
@@ -283,12 +283,12 @@ export default function fixitTest(): void {
         builderRoot.node({
           type: 'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/BuilderParamPanel#BuilderParamShell',
           occurrence: 0
-        }).slot({ type: 'Text', occurrence: 0 })
+        }).builder({ type: 'Text', occurrence: 0 })
           .attr('id', 'patched-builder-slot-text');
         var builderSlotOrigin = builderRoot.node({
           type: 'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/BuilderParamPanel#BuilderParamShell',
           occurrence: 0
-        }).slot({ type: 'Button', occurrence: 0 })
+        }).builder({ type: 'Button', occurrence: 0 })
           .attr('id', 'patched-builder-slot-button')
           .event('onClick', function () {
             var result = builderSlotOrigin.apply(this, arguments);
@@ -298,16 +298,32 @@ export default function fixitTest(): void {
         builderRoot.node({
           type: 'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/BuilderParamPanel#BuilderParamShell',
           occurrence: 1
-        }).slot({ type: 'Text', occurrence: 0 })
+        }).builder({ type: 'Text', occurrence: 0 })
           .attr('id', 'patched-inline-builder-slot-text');
         var inlineBuilderSlotOrigin = builderRoot.node({
           type: 'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/BuilderParamPanel#BuilderParamShell',
           occurrence: 1
-        }).slot({ type: 'Button', occurrence: 0 })
+        }).builder({ type: 'Button', occurrence: 0 })
           .attr('id', 'patched-inline-builder-slot-button')
           .event('onClick', function () {
             var result = inlineBuilderSlotOrigin.apply(this, arguments);
             this.statusText = 'Patched inline BuilderParam slot event';
+            return result;
+          });
+        var multiBuilderNode = builderRoot.node({
+          type: 'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/BuilderParamPanel#MultiBuilderParamShell',
+          occurrence: 0
+        });
+        multiBuilderNode.builder('headerBuilder', { type: 'Text', occurrence: 0 })
+          .attr('id', 'patched-multi-builder-header-text');
+        multiBuilderNode.builder('contentBuilder', { type: 'Text', occurrence: 0 })
+          .attr('id', 'patched-multi-builder-content-text');
+        var multiContentOrigin = multiBuilderNode
+          .builder('contentBuilder', { type: 'Button', occurrence: 0 })
+          .attr('id', 'patched-multi-builder-content-button')
+          .event('onClick', function () {
+            var result = multiContentOrigin.apply(this, arguments);
+            this.statusText = 'Patched explicit contentBuilder event';
             return result;
           });
       `;
@@ -337,7 +353,9 @@ export default function fixitTest(): void {
       expect(secondChild !== undefined).assertTrue();
 
       const eventButton = await driver.waitForComponent(ON.id('patched-v2-primary-action'), 5000);
-      expect(eventButton !== undefined).assertTrue();
+      if (eventButton === undefined || eventButton === null) {
+        throw new Error('patched-v2-primary-action was not found');
+      }
       expect(await eventButton.getText()).assertEqual('V2 primary action');
       await eventButton.click();
       const eventStatus = await driver.waitForComponent(ON.text('status=Patched V2 test event, taps=111'), 5000);
@@ -349,31 +367,46 @@ export default function fixitTest(): void {
       const secondaryStatus = await driver.waitForComponent(ON.text('status=V2 event ran, taps=113'), 5000);
       expect(secondaryStatus !== undefined).assertTrue();
 
-      await driver.swipe(660, 2400, 660, 650, 600);
-      await driver.swipe(660, 2400, 660, 650, 600);
-      await driver.swipe(660, 2400, 660, 650, 600);
-      const builderSlotText = await driver.waitForComponent(ON.id('patched-builder-slot-text'), 5000);
-      expect(builderSlotText !== undefined).assertTrue();
-      expect(await builderSlotText.getText()).assertEqual('slot text=Original builder-param state');
-      const builderSlotButton = await driver.waitForComponent(ON.id('patched-builder-slot-button'), 5000);
-      expect(builderSlotButton !== undefined).assertTrue();
-      await builderSlotButton.click();
-      const builderSlotStatus = await driver.waitForComponent(
+      await driver.swipe(660, 2200, 660, 900, 500);
+      const builderText = await driver.waitForComponent(ON.id('patched-builder-slot-text'), 5000);
+      if (builderText === undefined || builderText === null) {
+        throw new Error('patched-builder-slot-text was not found');
+      }
+      expect(await builderText.getText()).assertEqual('slot text=Original builder-param state');
+      const builderButton = await driver.waitForComponent(ON.id('patched-builder-slot-button'), 5000);
+      expect(builderButton !== undefined).assertTrue();
+      await builderButton.click();
+      const builderStatus = await driver.waitForComponent(
         ON.text('root status=Patched BuilderParam slot event'), 5000
       );
-      expect(builderSlotStatus !== undefined).assertTrue();
-      const inlineBuilderSlotText = await driver.waitForComponent(ON.id('patched-inline-builder-slot-text'), 5000);
-      expect(inlineBuilderSlotText !== undefined).assertTrue();
-      expect(await inlineBuilderSlotText.getText()).assertEqual('inline slot text=Patched BuilderParam slot event');
-      const inlineBuilderSlotButton = await driver.waitForComponent(
-        ON.id('patched-inline-builder-slot-button'), 5000
-      );
-      expect(inlineBuilderSlotButton !== undefined).assertTrue();
-      await inlineBuilderSlotButton.click();
-      const inlineBuilderSlotStatus = await driver.waitForComponent(
+      expect(builderStatus !== undefined).assertTrue();
+      await driver.swipe(660, 2200, 660, 1100, 500);
+      const inlineBuilderText = await driver.waitForComponent(ON.id('patched-inline-builder-slot-text'), 5000);
+      if (inlineBuilderText === undefined || inlineBuilderText === null) {
+        throw new Error('patched-inline-builder-slot-text was not found');
+      }
+      expect(await inlineBuilderText.getText()).assertEqual('inline slot text=Patched BuilderParam slot event');
+      const inlineBuilderButton = await driver.waitForComponent(ON.id('patched-inline-builder-slot-button'), 5000);
+      expect(inlineBuilderButton !== undefined).assertTrue();
+      await inlineBuilderButton.click();
+      const inlineBuilderStatus = await driver.waitForComponent(
         ON.text('root status=Patched inline BuilderParam slot event'), 5000
       );
-      expect(inlineBuilderSlotStatus !== undefined).assertTrue();
+      expect(inlineBuilderStatus !== undefined).assertTrue();
+      await driver.swipe(660, 2200, 660, 900, 500);
+      const multiHeaderText = await driver.waitForComponent(ON.id('patched-multi-builder-header-text'), 5000);
+      expect(multiHeaderText !== undefined).assertTrue();
+      const multiContentText = await driver.waitForComponent(ON.id('patched-multi-builder-content-text'), 5000);
+      expect(multiContentText !== undefined).assertTrue();
+      const originalHeaderButton = await driver.waitForComponent(ON.id('multi-builder-header-button'), 5000);
+      expect(originalHeaderButton !== undefined).assertTrue();
+      const multiContentButton = await driver.waitForComponent(ON.id('patched-multi-builder-content-button'), 5000);
+      expect(multiContentButton !== undefined).assertTrue();
+      await multiContentButton.click();
+      const multiContentStatus = await driver.waitForComponent(
+        ON.text('root status=Patched explicit contentBuilder event'), 5000
+      );
+      expect(multiContentStatus !== undefined).assertTrue();
 
       OhosPatch.clear();
       const reinstallScript = `

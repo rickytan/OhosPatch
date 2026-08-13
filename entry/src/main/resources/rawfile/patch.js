@@ -170,15 +170,14 @@
       return 'scoped patched ' + originValue;
     });
 
-  // --- BuilderParam reproduction: root param/state should work; slot nodes expose whether
-  // current node DSL can see ArkUI nodes built inside a child Component's trailing builder.
+  // --- BuilderParam: patch nodes built by trailing and explicitly passed builders.
   builderParamRoot.param('message', 'Patched builder-param root parameter');
   builderParamRoot.state('statusText', 'Patched builder-param root state');
   builderParamRoot.node({
     type: '@vendor/business_page/src/main/ets/components/BuilderParamPanel#BuilderParamShell',
     occurrence: 0
   })
-    .slot({ type: 'Text', occurrence: 0 })
+    .builder({ type: 'Text', occurrence: 0 })
     .attrs({
       fontColor: '#C44736',
       fontSize: 18
@@ -187,7 +186,7 @@
     type: '@vendor/business_page/src/main/ets/components/BuilderParamPanel#BuilderParamShell',
     occurrence: 0
   })
-    .slot({ type: 'Button', occurrence: 0 })
+    .builder({ type: 'Button', occurrence: 0 })
     .attrs({
       backgroundColor: '#C44736',
       height: 52
@@ -201,7 +200,7 @@
     type: '@vendor/business_page/src/main/ets/components/BuilderParamPanel#BuilderParamShell',
     occurrence: 1
   })
-    .slot({ type: 'Text', occurrence: 0 })
+    .builder({ type: 'Text', occurrence: 0 })
     .attrs({
       fontColor: '#1F6B46',
       fontSize: 18
@@ -210,7 +209,7 @@
     type: '@vendor/business_page/src/main/ets/components/BuilderParamPanel#BuilderParamShell',
     occurrence: 1
   })
-    .slot({ type: 'Button', occurrence: 0 })
+    .builder({ type: 'Button', occurrence: 0 })
     .attrs({
       backgroundColor: '#1F6B46',
       height: 52
@@ -218,6 +217,24 @@
     .event('onClick', /** @this {any} */ function () {
       var result = originInlineBuilderSlotClick.apply(this, arguments);
       this.statusText = 'Patched inline builder slot click';
+      return result;
+    });
+  var multiBuilderNode = builderParamRoot.node({
+    type: '@vendor/business_page/src/main/ets/components/BuilderParamPanel#MultiBuilderParamShell',
+    occurrence: 0
+  });
+  multiBuilderNode
+    .builder('headerBuilder', { type: 'Text', occurrence: 0 })
+    .attrs({ fontColor: '#8A3FFC', fontSize: 18 });
+  multiBuilderNode
+    .builder('contentBuilder', { type: 'Text', occurrence: 0 })
+    .attrs({ fontColor: '#007D8A', fontSize: 18 });
+  var originMultiContentClick = multiBuilderNode
+    .builder('contentBuilder', { type: 'Button', occurrence: 0 })
+    .attrs({ backgroundColor: '#007D8A', height: 52 })
+    .event('onClick', /** @this {any} */ function () {
+      var result = originMultiContentClick.apply(this, arguments);
+      this.statusText = 'Patched explicit contentBuilder click';
       return result;
     });
 
