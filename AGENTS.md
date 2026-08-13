@@ -43,6 +43,9 @@ The runtime source is `ohospatch/src/main/cpp/runtime/fixit.js`; Release builds 
 - `setInterval/clearInterval`
 - `setImmediate/clearImmediate`
 - `queueMicrotask`
+- ArkTS `OhosPatch.executeScript(script, context?)` and `executeFile(path, context?)` return
+  `PatchInstallResult`, currently `{ installedCount: number }`. Do not treat the return value as a bare
+  number. Future installation diagnostics should be added to this interface instead of changing the method shape.
 
 Timer callbacks and arguments remain in JSVM. Native stores only timer IDs and libuv handles. Timers use the host N-API libuv event loop and are cancelled by `clear()`, patch replacement, or VM reset. Native currently allows 256 active timers.
 
@@ -121,11 +124,12 @@ Proposed public concepts:
 - `node.event(name, handler)` for synchronous callback replacement.
 - Event handlers receive only the original ArkUI event arguments. Ordinary `function` handlers receive `this` as the current Component instance Proxy and should read/write state directly through that Proxy.
 
-### Implemented status (2026-08-12)
+### Implemented status (2026-08-13)
 
 - Runtime version `1.16.0` implements `Fixit.component`, original-attribute node selectors, parent-scoped child Component parameter patching, named multi-`@BuilderParam` patching through `.builder(...)`, and the invocation-scoped ArkTS object Proxy bridge.
 - API 20 state-management V1 and V2 exported custom components are supported through separate native adapters with the same public DSL.
 - Direct `param/state(name, valueOrHandler)` are implemented; no chain-style value-fix API is exposed.
+- ComponentV2 initial direct `param(...)` handler execution is deferred until `finalizeConstruction`, after generated local fields are initialized. This lets the handler read `this` reliably; update/reuse paths still apply during `updateParam`/`resetParam`.
 - Node selection prefers `{ type, occurrence }` for efficient zero-based per-type counting and supports `{ type, where }` when original-attribute matching is needed.
 - `attr`, `attrs`, and synchronous `event(name, handler)` are implemented.
 - Component event handlers written with normal `function` syntax receive `this` as the current Component instance Proxy. Arrow functions keep lexical `this`.
@@ -137,6 +141,8 @@ Proposed public concepts:
 - The HAP was installed on a HarmonyOS 6.0.2 API 22 Pura 90 emulator after compiling against API 20.
 - Device screenshots verified patched parameter text, state `40`, Button attributes, and click replacement from `40` to `50`.
 - Hypium launches the real Demo Ability and verifies ComponentV2 parameter, local state, node, event, `this`, and original callback behavior on the simulator.
+- The Demo startup task should call only `OhosPatch.init(context)`. It must not auto-load the fallback patch on startup, otherwise "no patch loaded" baseline UI is polluted.
+- When passing a parent builder method as a `@BuilderParam`, use an arrow wrapper such as `contentBuilder: () => { this.Content() }` if the builder reads parent state. Generated child code can bind the builder to the child receiver, so passing `this.Content` directly can make parent fields read as `undefined`.
 
 Implementation should proceed in explicit capability phases:
 
@@ -176,6 +182,14 @@ Run real-device/runtime tests. This builds and installs the demo HAP plus `entry
 npm test
 ```
 
+For the local TCP emulator, prefer:
+
+```bash
+HDC_TARGET=127.0.0.1:5555 npm test
+```
+
+`hdc` can print `Connect server failed` while returning exit code 0. The test script must treat that output as failure and retry. Do not report "all tests passed" from `OHOS_REPORT_CODE: 0` alone; require the final summary line to contain `Failure: 0, Error: 0`. If only a single suite/class was run manually, state that explicitly.
+
 Build HAR:
 
 ```bash
@@ -209,6 +223,8 @@ Expected result: no matches.
 ## Tests And CI
 
 - Device runtime tests: `entry/src/ohosTest/ets/test/*.ets`
+- Full device verification on 2026-08-13 was run manually through `aa test` without a single-class filter:
+  `Tests run: 29, Failure: 0, Error: 0, Pass: 29`.
 - Do not add Node `vm`-based Patch runtime tests. Runtime behavior must be validated in the real JSVM/N-API/ArkTS environment through Hypium.
 - Do not add source-scanning runtime tests for `ohospatch`. Validate behavior through inputs/outputs, and validate the compiled native binary directly when safety policy matters.
 - GitHub workflow: `.github/workflows/harmonyos-build.yml`

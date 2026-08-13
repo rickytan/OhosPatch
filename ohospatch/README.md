@@ -19,13 +19,14 @@ import { OhosPatch } from '@rickytan/ohospatch';
 
 OhosPatch.init(context);
 
-const hookCountFromFile: number = OhosPatch.executeFile('/data/storage/el2/base/files/patch.js');
-const hookCountFromScript: number = OhosPatch.executeScript(`
+const resultFromFile = OhosPatch.executeFile('/data/storage/el2/base/files/patch.js');
+const resultFromScript = OhosPatch.executeScript(`
   var fix = Fixit.fix('com.example.app/entry/src/main/ets/model/DemoViewModel#DemoViewModel');
   fix.instanceMethod('title', function () {
     return $r('app.string.patched_title');
   });
 `);
+console.info(`OhosPatch installed ${resultFromFile.installedCount + resultFromScript.installedCount} rules`);
 OhosPatch.clear();
 ```
 

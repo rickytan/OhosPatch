@@ -16,6 +16,7 @@ export struct PatchablePanelV2 {
         .fontWeight(FontWeight.Bold)
         .fontColor('#142033')
         .width('100%')
+        .id('v2-message-text')
 
       Text(`tapCount=${this.tapCount}`)
         .fontSize(14)
@@ -23,11 +24,13 @@ export struct PatchablePanelV2 {
         .width('100%')
         .padding(10)
         .backgroundColor('#EEF2F5')
+        .id('v2-state-text')
 
       Text(`status=${this.statusText}`)
         .fontSize(14)
         .fontColor('#27313D')
         .width('100%')
+        .id('v2-status-text')
 
       Button('V2 primary action')
         .width('100%')

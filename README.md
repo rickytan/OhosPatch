@@ -139,7 +139,7 @@ graph LR
   F --> G["下载 patch"]
   G --> H["验签、灰度、熔断、缓存"]
   H --> D
-  D --> I{"hookCount > 0"}
+  D --> I{"installedCount > 0"}
   I -->|是| J["记录版本和成功状态"]
   I -->|否| K["回滚 / 禁用该 patch"]
 ```
@@ -189,13 +189,15 @@ ohpm install @rickytan/ohospatch
 import { OhosPatch } from '@rickytan/ohospatch';
 
 OhosPatch.init(context);
-const hookCount = OhosPatch.executeScript(verifiedPatchScript);
+const installResult = OhosPatch.executeScript(verifiedPatchScript);
+console.info(`OhosPatch installed ${installResult.installedCount} rules`);
 ```
 
 或者执行已下载到本地的完整文件路径：
 
 ```ts
-const hookCount = OhosPatch.executeFile(absolutePatchPath);
+const installResult = OhosPatch.executeFile(absolutePatchPath);
+console.info(`OhosPatch installed ${installResult.installedCount} rules`);
 ```
 
 `init(context)` 建议在宿主 Patch 管理模块或 `StartupTask.init(context)` 中调用一次，用于给 Patch Runtime 绑定宿主 APP 的 `Context`。`executeFile` 只读取绝对路径文件并执行；路径来源、文件权限、验签和缓存策略仍由宿主控制。
@@ -206,7 +208,7 @@ const hookCount = OhosPatch.executeFile(absolutePatchPath);
 OhosPatch.clear();
 ```
 
-`executeScript` 返回已安装的普通方法 hook 数量。Component rule 主要在后续渲染阶段生效，生产侧不应只用 hook 数量判断业务效果，建议同时记录 patch 版本和运行时日志。
+`executeScript` / `executeFile` 返回 `PatchInstallResult`，当前包含 `installedCount: number`，表示本次已安装的普通方法 hook 和 Component rule 数量。后续版本会在这个结构中扩展更多安装诊断信息。Component rule 主要在后续渲染阶段生效，生产侧不应只用安装数量判断业务效果，建议同时记录 patch 版本和运行时日志。
 
 ## Patch 编写
 
@@ -650,7 +652,11 @@ child.builder({ type: 'Text', occurrence: 0 });
 不使用尾随闭包、显式传入单个 BuilderParam 时，两种 Patch 写法都可以；推荐写出属性名，让规则与组件声明的对应关系更明确：
 
 ```ts
-ContentShell({ contentBuilder: this.ContentBuilder })
+ContentShell({
+  contentBuilder: () => {
+    this.ContentBuilder()
+  }
+})
 ```
 
 ```js
@@ -675,10 +681,16 @@ export struct MultiContentShell {
 
 // 父组件
 MultiContentShell({
-  headerBuilder: this.HeaderBuilder,
-  contentBuilder: this.ContentBuilder
+  headerBuilder: () => {
+    this.HeaderBuilder()
+  },
+  contentBuilder: () => {
+    this.ContentBuilder()
+  }
 })
 ```
+
+显式传入 BuilderParam 时应使用箭头闭包捕获父组件实例。ArkUI 生成代码会以子组件实例作为 BuilderParam 函数的调用接收者；直接传 `this.ContentBuilder` 会让 Builder 方法中的 `this` 指向子组件，从而使父组件状态读成 `undefined`。尾随闭包由编译器自动生成同类的捕获闭包，不需要额外处理。
 
 ```js
 var shell = parent.node({

@@ -57,11 +57,11 @@ export default function perfTest(): void {
         });
       `;
       const startedAt = activeTimeNanoseconds();
-      const installedCount = OhosPatch.executeScript(script);
+      const installResult = OhosPatch.executeScript(script);
       const elapsed = activeTimeNanoseconds() - startedAt;
 
       hilog.info(PERF_DOMAIN, PERF_TAG, 'scriptLoad=%{public}d ns', elapsed);
-      expect(installedCount).assertLarger(0);
+      expect(installResult.installedCount).assertLarger(0);
       expect(elapsed <= MAX_SCRIPT_LOAD_NANOSECONDS).assertTrue();
     });
 
@@ -83,7 +83,7 @@ export default function perfTest(): void {
           return origin.apply(this, arguments);
         });
       `;
-      expect(OhosPatch.executeScript(script)).assertLarger(0);
+      expect(OhosPatch.executeScript(script).installedCount).assertLarger(0);
 
       // Warm up the JSVM dispatch and origin bridge before recording patched samples.
       for (let index = 0; index < 3; index++) {

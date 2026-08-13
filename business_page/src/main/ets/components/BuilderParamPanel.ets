@@ -136,8 +136,12 @@ export struct BuilderParamRoot {
 
       MultiBuilderParamShell({
         title: 'Explicit multi BuilderParam shell',
-        headerBuilder: this.MultiHeader,
-        contentBuilder: this.MultiContent
+        headerBuilder: () => {
+          this.MultiHeader()
+        },
+        contentBuilder: () => {
+          this.MultiContent()
+        }
       })
 
       Text(`root status=${this.statusText}`)

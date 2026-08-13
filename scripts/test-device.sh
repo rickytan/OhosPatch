@@ -13,18 +13,33 @@ hvigorw="${HVIGORW:-$deveco_home/tools/hvigor/bin/hvigorw}"
 test -x "$hdc"
 test -x "$hvigorw"
 
+hdc_cmd=("$hdc")
+if [[ -n "${HDC_TARGET:-}" ]]; then
+  hdc_cmd=("$hdc" -t "$HDC_TARGET")
+fi
+
 hdc_retry() {
-  local attempt
-  for attempt in 1 2 3; do
-    if "$hdc" "$@"; then
+  local attempt output status
+  for attempt in 1 2 3 4 5 6; do
+    set +e
+    output="$("${hdc_cmd[@]}" "$@" 2>&1)"
+    status=$?
+    set -e
+    if [[ -n "$output" ]]; then
+      printf '%s\n' "$output"
+    fi
+    if [[ "$status" -eq 0 && "$output" != *"Connect server failed"* ]]; then
       return 0
     fi
-    sleep 1
+    sleep 2
   done
   return 1
 }
 
-hdc_retry list targets
+if [[ -n "${HDC_TARGET:-}" ]]; then
+  "$hdc" tconn "$HDC_TARGET" || true
+fi
+hdc_retry shell echo ok
 
 "$hvigorw" --mode module -p module=entry clean assembleHap --no-daemon
 "$hvigorw" --mode module -p module=entry@ohosTest assembleHap --no-daemon
@@ -38,6 +53,7 @@ trap 'rm -f "$output_file"' EXIT
 hdc_retry shell aa test -b com.rickytan.ohospatch -m entry_test -s unittest OpenHarmonyTestRunner -s timeout 60000 > "$output_file"
 cat "$output_file"
 
-if ! grep -q 'OHOS_REPORT_CODE: 0' "$output_file"; then
+if ! grep -q '^OHOS_REPORT_CODE: 0$' "$output_file" ||
+  ! grep -Eq '^OHOS_REPORT_RESULT: stream=Tests run: [0-9]+, Failure: 0, Error: 0, Pass: [0-9]+$' "$output_file"; then
   exit 1
 fi

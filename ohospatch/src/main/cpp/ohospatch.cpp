@@ -141,6 +141,19 @@ napi_value NapiUint32(napi_env env, uint32_t number)
     return value;
 }
 
+napi_value NapiInstallResult(napi_env env, uint32_t installedCount)
+{
+    napi_value result = nullptr;
+    if (!NapiOk(env, napi_create_object(env, &result), "napi_create_object(install result)")) {
+        return NapiUndefined(env);
+    }
+    if (!NapiOk(env, napi_set_named_property(env, result, "installedCount", NapiUint32(env, installedCount)),
+                "napi_set_named_property(install result installedCount)")) {
+        return result;
+    }
+    return result;
+}
+
 void DeleteNapiReference(napi_env env, napi_ref reference, const char *operation)
 {
     if (!env || !reference) {
@@ -384,7 +397,8 @@ enum class UiRuleKind {
 enum class UiMethodKind {
     PARAM_INITIAL,
     PARAM_UPDATE,
-    PARAM_NAMED,
+    PARAM_NAMED_INITIAL,
+    PARAM_NAMED_UPDATE,
     FINALIZE_CONSTRUCTION,
     STATE_RESET,
     INITIAL_RENDER,
@@ -1925,7 +1939,10 @@ class JsvmRuntime
             ApplyUiValueRules(napiEnv, method->component->targetKey, UiRuleKind::PARAM, argv[0], receiver);
             ApplyUiScopedChildValueRules(napiEnv, method->component->targetKey, UiRuleKind::PARAM, argv[0], receiver);
             WrapUiScopedBuilderParams(napiEnv, method->component->targetKey, argv[0], receiver);
-        } else if (method->kind == UiMethodKind::PARAM_NAMED && argc > 1) {
+        } else if (method->kind == UiMethodKind::PARAM_NAMED_INITIAL && argc > 1) {
+            ApplyUiScopedChildNamedParamRule(napiEnv, method->component->targetKey, argv[0], &argv[1], receiver);
+            WrapUiScopedNamedBuilderParam(napiEnv, method->component->targetKey, argv[0], &argv[1], receiver);
+        } else if (method->kind == UiMethodKind::PARAM_NAMED_UPDATE && argc > 1) {
             ApplyUiNamedParamRule(napiEnv, method->component->targetKey, argv[0], &argv[1], receiver);
             ApplyUiScopedChildNamedParamRule(napiEnv, method->component->targetKey, argv[0], &argv[1], receiver);
             WrapUiScopedNamedBuilderParam(napiEnv, method->component->targetKey, argv[0], &argv[1], receiver);
@@ -1933,6 +1950,7 @@ class JsvmRuntime
 
         bool pushedFrame = false;
         if (method->kind == UiMethodKind::FINALIZE_CONSTRUCTION) {
+            ApplyUiV2InitialParamRules(napiEnv, method->component, receiver);
             ApplyUiValueRules(napiEnv, method->component->targetKey, UiRuleKind::STATE, receiver, receiver);
         } else if (method->kind == UiMethodKind::INITIAL_RENDER) {
             pushedFrame = PushUiRenderFrame(method->component->targetKey, receiver);
@@ -3384,6 +3402,55 @@ class JsvmRuntime
                 *value = replacement;
             }
             return;
+        }
+    }
+
+    void ApplyUiV2InitialParamRules(napi_env napiEnv, UiComponentHook *component, napi_value owner)
+    {
+        if (!component || !owner) {
+            return;
+        }
+        UiMethodHook *updateParam = nullptr;
+        for (size_t index = 0; index < component->methodCount; ++index) {
+            UiMethodHook &candidate = component->methods[index];
+            if (candidate.kind == UiMethodKind::PARAM_NAMED_UPDATE && candidate.methodName == "updateParam") {
+                updateParam = &candidate;
+                break;
+            }
+        }
+        if (!updateParam) {
+            LogError("Cannot apply initial ComponentV2 parameter patch: original updateParam hook is unavailable");
+            return;
+        }
+
+        for (size_t index = 0; index < uiRuleCount_; ++index) {
+            UiRule *rule = uiRules_[index].get();
+            if (!rule || rule->kind != UiRuleKind::PARAM || rule->targetKey != component->targetKey) {
+                continue;
+            }
+            napi_value current = nullptr;
+            if (!NapiOk(napiEnv, napi_get_named_property(napiEnv, owner, rule->propertyName.c_str(), &current),
+                        "napi_get_named_property(initial ComponentV2 parameter)")) {
+                continue;
+            }
+            napi_value envelope = nullptr;
+            bool handled = false;
+            if (!CallUiValueHandler(napiEnv, rule->ruleId, current, owner, &envelope, &handled) || !handled) {
+                continue;
+            }
+            napi_value name = nullptr;
+            napi_value replacement = nullptr;
+            if (!NapiOk(napiEnv,
+                        napi_create_string_utf8(napiEnv, rule->propertyName.c_str(), rule->propertyName.size(), &name),
+                        "napi_create_string_utf8(initial ComponentV2 parameter name)") ||
+                !NapiOk(napiEnv, napi_get_named_property(napiEnv, envelope, "value", &replacement),
+                        "napi_get_named_property(initial ComponentV2 replacement value)")) {
+                continue;
+            }
+            napi_value args[2] = {name, replacement};
+            if (!CallUiOriginal(napiEnv, updateParam, owner, 2, args)) {
+                return;
+            }
         }
     }
 
@@ -5169,9 +5236,12 @@ class JsvmRuntime
                              "target points to the right Component class.");
                     return false;
                 }
-                if (!InstallUiMethod(napiEnv, componentPointer, holder, "initParam", UiMethodKind::PARAM_NAMED) ||
-                    !InstallUiMethod(napiEnv, componentPointer, holder, "updateParam", UiMethodKind::PARAM_NAMED) ||
-                    !InstallUiMethod(napiEnv, componentPointer, holder, "resetParam", UiMethodKind::PARAM_NAMED)) {
+                if (!InstallUiMethod(napiEnv, componentPointer, holder, "initParam",
+                                     UiMethodKind::PARAM_NAMED_INITIAL) ||
+                    !InstallUiMethod(napiEnv, componentPointer, holder, "updateParam",
+                                     UiMethodKind::PARAM_NAMED_UPDATE) ||
+                    !InstallUiMethod(napiEnv, componentPointer, holder, "resetParam",
+                                     UiMethodKind::PARAM_NAMED_UPDATE)) {
                     return false;
                 }
             }
@@ -5181,7 +5251,7 @@ class JsvmRuntime
                 return false;
             }
         }
-        if (needsState &&
+        if ((needsState || (!hasV1Initializer && needsParam)) &&
             !InstallUiMethod(napiEnv, componentPointer, holder, "finalizeConstruction",
                              UiMethodKind::FINALIZE_CONSTRUCTION)) {
             return false;
@@ -5788,12 +5858,12 @@ napi_value ExecuteScript(napi_env env, napi_callback_info info)
     if (!NapiOk(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr), "napi_get_cb_info(executeScript)") ||
         argc < 1) {
         LogError("executeScript requires a JavaScript string");
-        return NapiUint32(env, 0);
+        return NapiInstallResult(env, 0);
     }
 
     std::string script;
     if (!NapiString(env, args[0], &script)) {
-        return NapiUint32(env, 0);
+        return NapiInstallResult(env, 0);
     }
     if (argc >= 2 && args[1]) {
         Runtime().ConfigureContext(env, args[1]);
@@ -5804,7 +5874,7 @@ napi_value ExecuteScript(napi_env env, napi_callback_info info)
     const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now() - startedAt);
     LogScriptLoad(static_cast<uint64_t>(elapsed.count()), script.size(), count);
-    return NapiUint32(env, static_cast<uint32_t>(count));
+    return NapiInstallResult(env, static_cast<uint32_t>(count));
 }
 
 napi_value Clear(napi_env env, napi_callback_info info)

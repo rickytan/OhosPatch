@@ -16,6 +16,14 @@ Runtime behavior tests run on a connected HarmonyOS/OpenHarmony emulator or devi
 npm test
 ```
 
+For the local TCP emulator, prefer:
+
+```bash
+HDC_TARGET=127.0.0.1:5555 npm test
+```
+
+`hdc` can print `Connect server failed` while still returning exit code 0, so scripts must inspect command output as well as exit status. Never claim "all tests passed" from `OHOS_REPORT_CODE: 0` alone. Require the final Hypium summary to contain `Failure: 0, Error: 0`, and say so explicitly if only one class/suite was run. The latest full manual device run on 2026-08-13 used the aggregate `aa test` entry and reported `Tests run: 29, Failure: 0, Error: 0, Pass: 29`.
+
 Build the reusable HAR (output: `ohospatch/build/default/outputs/default/ohospatch.har`):
 
 ```bash
@@ -64,7 +72,7 @@ prototype[methodName] = native trampoline ──▶ calls into JSVM handler
 
 1. `OhosPatch.ets` (ArkTS facade) forwards to `libohospatch.so` native `executeScript`/`clear`.
 2. Native `JsvmRuntime` (one process-wide instance, in `ohospatch.cpp`) creates an independent JSVM via `OH_JSVM_CreateVM`. **JSVM and the ArkTS main VM do not share object heap or prototype chain** — editing `DemoViewModel.prototype` inside JSVM alone does nothing to ArkTS objects.
-3. The built-in `fixit.js` runtime is embedded into the `.so` at build time (CMake reads `runtime/fixit.js` → generates `fixit_runtime.h` via `fixit_runtime.h.in`). It runs first, then the host patch. Host and patch never load it themselves.
+3. The built-in `fixit.js` runtime is minified by the CMake/Gulp build flow into the HAR rawfile path `ohospatch/fixit.min.js`. Native loads it through the host resource manager before running the host patch.
 4. A patch calls `Fixit.fix(fullPath)` / `Fixit.component(fullPath)`, which parse the OHM path internally and return JSON hook specs to Native.
 5. Native loads the target ArkTS module with `napi_load_module_with_info` in the **main** VM, then replaces instance methods on `constructor.prototype[methodName]` and static methods on `constructor[methodName]`. The original function is held as a `napi_ref`; the replacement is a Native trampoline back into JSVM.
 6. On each call, Native builds an invocation-scoped ArkTS handle table. The JSVM handler's `this` is a `Proxy`; `get`/`set`/`apply` synchronously bridge to the original ArkTS instance, preserving nested object identity and prototype dispatch. `origin.apply(this, arguments)` calls the saved original.
@@ -90,7 +98,7 @@ Do **not** move download, signature, URL, cache, or startup policy into `ohospat
 - Every JSVM value creation/retrieval must run inside an explicit `JSVM_OpenHandleScope`/`OH_JSVM_OpenHandleScope`.
 - `JSVM_CallbackStruct` passed to `OH_JSVM_CreateFunction` needs **stable process/VM lifetime** — declare them `static`, never on a temporary stack frame.
 - Timers use the host N-API libuv event loop (`napi_get_uv_event_loop`); callback + args stay in JSVM, Native holds only timer IDs. Max 256 active timers; `clear()`/replacement/VM reset cancels them.
-- Failure behavior: JSVM/NAPI bridge errors → error-level HiLog (tag `OhosPatch`), never crash. Patch execution failure → fall back to original ArkTS method. Hook install failure → roll back already-installed hooks. `executeScript` returns `0` on failure.
+- Failure behavior: JSVM/NAPI bridge errors → error-level HiLog (tag `OhosPatch`), never crash. Patch execution failure → fall back to original ArkTS method. Hook install failure → roll back already-installed hooks. `executeScript` / `executeFile` return `PatchInstallResult`, currently `{ installedCount: number }`; failure returns `installedCount: 0`.
 - Plain fallback calls preserve original ArkTS pending exceptions. Explicit Patch `origin.apply(...)` calls convert a pending ArkTS exception into a catchable JSVM `Error`; if uncaught, OhosPatch falls back to the original ArkTS behavior.
 
 ## Cross-file sync invariants
@@ -107,6 +115,10 @@ Several files must stay mutually consistent; a change in one usually requires th
 Targets API 20 state-management V1 and V2 **exported** custom components through separate native adapters. `build()` becomes generated `initialRender()` and nodes use `observeComponentCreation2`; V1 params use `setInitiallyProvidedValue`/`updateStateVars`, while V2 params use `initParam`/`updateParam`/`resetParam` and reuse resets through `resetStateVarsOnReuse`. **The public DSL must not expose generated names**. When changing component behavior beyond an established pattern, inspect the generated ArkTS output (`entry/build/.../cache/.../esmodule/.../*.ts`); source syntax alone is insufficient. Fail closed (log error, leave business behavior untouched) when a shape/selector/attribute/event can't be verified.
 
 Parameter and state rules use `param/state(name, value)` or `param/state(name, function (originValue) { ... })`; the function receives the original value and `this` is the synchronous current-component Proxy. This is the only public value-replacement DSL.
+
+ComponentV2 initial direct `param(...)` callbacks are applied at `finalizeConstruction`, after generated local fields are initialized, so callback `this` can read state reliably. For `@BuilderParam`, do not pass a parent builder method directly if it reads parent fields; wrap it with an arrow, for example `contentBuilder: () => { this.Content() }`, because generated child code may bind direct function values to the child receiver.
+
+The Demo startup task should only initialize OhosPatch. It must not auto-load the bundled fallback patch, otherwise "patch not loaded" baseline tests and manual UI checks become contaminated.
 
 ## Working rules
 

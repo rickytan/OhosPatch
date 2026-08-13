@@ -1,6 +1,5 @@
 import { OhosPatch } from '@rickytan/ohospatch';
 import { loadPatch } from '../patch/PatchLoader';
-import { DemoResult, DemoScenario } from '@vendor/business_page/src/main/ets/ViewModel/DemoScenario';
 import { MainPage } from '@vendor/business_page';
 
 @Entry

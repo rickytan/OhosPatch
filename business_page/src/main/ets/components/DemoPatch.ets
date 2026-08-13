@@ -68,6 +68,7 @@ struct DemoPatchScreen {
     .width('100%')
     .height('100%')
     .backgroundColor('#F7F8FA')
+    .id('patch-target-scroll')
   }
 }
 

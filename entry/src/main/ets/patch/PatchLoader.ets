@@ -104,8 +104,8 @@ export async function loadPatch(
   if (!options.forceNetwork) {
     const cached = readCache(path);
     if (cached !== null) {
-      const count = OhosPatch.executeScript(cached);
-      return { source: PatchSource.Cache, hookCount: count, detail: 'loaded from local cache' };
+      const result = OhosPatch.executeScript(cached);
+      return { source: PatchSource.Cache, hookCount: result.installedCount, detail: 'loaded from local cache' };
     }
   }
 
@@ -113,21 +113,29 @@ export async function loadPatch(
   try {
     const script = await fetchNetwork(context);
     writeCache(path, script);
-    const count = OhosPatch.executeScript(script);
-    return { source: PatchSource.Network, hookCount: count, detail: 'loaded from network' };
+    const result = OhosPatch.executeScript(script);
+    return { source: PatchSource.Network, hookCount: result.installedCount, detail: 'loaded from network' };
   } catch (err) {
     const message = (err as Error).message;
     // Force-network callers fall back to a stale cache before the builtin.
     if (options.forceNetwork) {
       const cached = readCache(path);
       if (cached !== null) {
-        const count = OhosPatch.executeScript(cached);
-        return { source: PatchSource.Cache, hookCount: count, detail: `network failed, fell back to cache: ${message}` };
+        const result = OhosPatch.executeScript(cached);
+        return {
+          source: PatchSource.Cache,
+          hookCount: result.installedCount,
+          detail: `network failed, fell back to cache: ${message}`
+        };
       }
     }
     // Last resort: the patch shipped inside the HAP.
     const builtin = readBuiltin(context);
-    const count = OhosPatch.executeScript(builtin);
-    return { source: PatchSource.Builtin, hookCount: count, detail: `network failed, used builtin fallback: ${message}` };
+    const result = OhosPatch.executeScript(builtin);
+    return {
+      source: PatchSource.Builtin,
+      hookCount: result.installedCount,
+      detail: `network failed, used builtin fallback: ${message}`
+    };
   }
 }

@@ -41,6 +41,7 @@ export struct PatchablePanel {
         .padding(10)
         .backgroundColor('#EEF2F5')
         .borderRadius(8)
+        .id('v1-state-text')
 
       Text(`status=${this.statusText}`)
         .fontSize(14)
@@ -49,6 +50,7 @@ export struct PatchablePanel {
         .padding(10)
         .backgroundColor('#FFFFFF')
         .borderRadius(8)
+        .id('v1-status-text')
 
       Row({ space: 10 }) {
         Button('Primary action')

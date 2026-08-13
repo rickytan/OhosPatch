@@ -1,8 +1,30 @@
 import { afterEach, beforeEach, describe, expect, it } from '@ohos/hypium';
 import { Want } from '@kit.AbilityKit';
-import { abilityDelegatorRegistry, Driver, ON } from '@kit.TestKit';
+import { abilityDelegatorRegistry, Component, Driver, ON, On, Point as UiPoint } from '@kit.TestKit';
 import { OhosPatch } from '@rickytan/ohospatch';
 import { DemoScenario, DemoViewModel, Point } from '@vendor/business_page';
+
+async function findWithForwardScroll(driver: Driver, on: On, label: string, displaySize: UiPoint): Promise<Component> {
+  const swipeX = Math.floor(displaySize.x * 0.5);
+  const startY = Math.floor(displaySize.y * 0.68);
+  const endY = Math.floor(displaySize.y * 0.53);
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const component = await driver.findComponent(on);
+    if (component !== undefined && component !== null) {
+      return component;
+    }
+    await driver.swipe(swipeX, startY, swipeX, endY, 5000);
+  }
+  const textComponents = await driver.findComponents(ON.type('Text'));
+  const visibleTexts: Array<string> = [];
+  for (let index = 0; index < textComponents.length; index++) {
+    visibleTexts.push(await textComponents[index].getText());
+  }
+  throw new Error(
+    `${label} was not found after scrolling; display=${displaySize.x}x${displaySize.y}; ` +
+    `visibleTexts=${visibleTexts.join(' | ')}`
+  );
+}
 
 export default function fixitTest(): void {
   describe('FixitRuntime', () => {
@@ -23,8 +45,8 @@ export default function fixitTest(): void {
             return 'patched by ohtest';
           });
       `;
-      const hookCount = OhosPatch.executeScript(script);
-      expect(hookCount).assertLarger(0);
+      const result = OhosPatch.executeScript(script);
+      expect(result.installedCount).assertLarger(0);
 
       const vm = new DemoViewModel();
       expect(vm.crashIt()).assertEqual('patched by ohtest');
@@ -51,7 +73,7 @@ export default function fixitTest(): void {
             return Point.textOf(new Point(7, 9));
           });
       `;
-      expect(OhosPatch.executeScript(script)).assertLarger(0);
+      expect(OhosPatch.executeScript(script).installedCount).assertLarger(0);
       expect(DemoViewModel.crash()).assertEqual('(7, 9)');
     });
 
@@ -69,7 +91,7 @@ export default function fixitTest(): void {
               scopedImportError.indexOf('Fixit.import cannot load target module') !== -1;
           });
       `;
-      expect(OhosPatch.executeScript(script)).assertLarger(0);
+      expect(OhosPatch.executeScript(script).installedCount).assertLarger(0);
       expect(DemoViewModel.crash()).assertTrue();
     });
 
@@ -83,7 +105,7 @@ export default function fixitTest(): void {
             return 'short-path-ok';
           });
       `;
-      expect(OhosPatch.executeScript(script)).assertLarger(0);
+      expect(OhosPatch.executeScript(script).installedCount).assertLarger(0);
       expect(DemoViewModel.crash()).assertEqual('short-path-ok');
     });
 
@@ -219,7 +241,7 @@ export default function fixitTest(): void {
               childAttrRejected;
           });
       `;
-      expect(OhosPatch.executeScript(script)).assertLarger(0);
+      expect(OhosPatch.executeScript(script).installedCount).assertLarger(0);
       expect(DemoViewModel.crash()).assertEqual('function|true|true|true|true|true|true|true|true');
     });
 
@@ -233,8 +255,32 @@ export default function fixitTest(): void {
       await delegator.startAbility(want);
 
       const driver = Driver.create();
-      const openButton = await driver.waitForComponent(ON.text('Open patch target screen'), 5000);
-      expect(openButton !== undefined).assertTrue();
+      let openButton = await driver.waitForComponent(ON.text('Open patch target screen'), 2000);
+      if (openButton === undefined || openButton === null) {
+        await driver.pressBack();
+        openButton = await driver.waitForComponent(ON.text('Open patch target screen'), 5000);
+      }
+      if (openButton === undefined || openButton === null) {
+        throw new Error('Open patch target screen button was not found');
+      }
+
+      await openButton.click();
+      const displaySize = await driver.getDisplaySize();
+      const baselineScroll = await driver.waitForComponent(ON.id('patch-target-scroll'), 5000);
+      if (baselineScroll === undefined || baselineScroll === null) {
+        throw new Error('patch-target-scroll was not found before patch installation');
+      }
+      await baselineScroll.scrollToBottom(5000);
+      const baselineMultiContent = await driver.waitForComponent(ON.id('multi-builder-content-text'), 5000);
+      if (baselineMultiContent === undefined || baselineMultiContent === null) {
+        throw new Error('multi-builder-content-text was not found before patch installation');
+      }
+      expect(await baselineMultiContent.getText()).assertEqual('multi content text=Original builder-param state');
+      await driver.pressBack();
+      openButton = await driver.waitForComponent(ON.text('Open patch target screen'), 5000);
+      if (openButton === undefined || openButton === null) {
+        throw new Error('Open patch target screen button was not found after baseline verification');
+      }
 
       const script = `
         var componentV1 = Fixit.component(
@@ -327,86 +373,95 @@ export default function fixitTest(): void {
             return result;
           });
       `;
-      expect(OhosPatch.executeScript(script)).assertLarger(0);
+      expect(OhosPatch.executeScript(script).installedCount).assertLarger(0);
       await openButton.click();
-
-      const v1State = await driver.waitForComponent(ON.text('tapCount=40, secondary=1'), 5000);
-      expect(v1State !== undefined).assertTrue();
-      const v1Status = await driver.waitForComponent(ON.text('status=Patched V1 state before render'), 5000);
-      expect(v1Status !== undefined).assertTrue();
-
-      const parameter = await driver.waitForComponent(
-        ON.text('Patched V2 test parameter, origin=Original V2 component parameter, count=0'), 5000
-      );
-      expect(parameter !== undefined).assertTrue();
-      const initialState = await driver.waitForComponent(ON.text('tapCount=100'), 5000);
-      expect(initialState !== undefined).assertTrue();
-      const initialStatus = await driver.waitForComponent(
-        ON.text('status=Patched V2 state callback, origin=0'), 5000
-      );
-      expect(initialStatus !== undefined).assertTrue();
-
-      const firstChild = await driver.waitForComponent(ON.text('first:static child'), 5000);
-      expect(firstChild !== undefined).assertTrue();
-
-      const secondChild = await driver.waitForComponent(ON.text('second:scoped patched dynamic child'), 5000);
-      expect(secondChild !== undefined).assertTrue();
-
-      const eventButton = await driver.waitForComponent(ON.id('patched-v2-primary-action'), 5000);
-      if (eventButton === undefined || eventButton === null) {
-        throw new Error('patched-v2-primary-action was not found');
+      const patchedScroll = await driver.waitForComponent(ON.id('patch-target-scroll'), 5000);
+      if (patchedScroll === undefined || patchedScroll === null) {
+        throw new Error('patch-target-scroll was not found after patch installation');
       }
+      await patchedScroll.scrollToTop(5000);
+
+      const v1State = await findWithForwardScroll(driver, ON.id('v1-state-text'), 'patched V1 state', displaySize);
+      expect(await v1State.getText()).assertEqual('tapCount=40, secondary=1');
+      const v1Status = await findWithForwardScroll(driver, ON.id('v1-status-text'), 'patched V1 status', displaySize);
+      expect(await v1Status.getText()).assertEqual('status=Patched V1 state before render');
+
+      const parameter = await findWithForwardScroll(
+        driver, ON.id('v2-message-text'), 'patched V2 parameter', displaySize
+      );
+      expect(await parameter.getText())
+        .assertEqual('Patched V2 test parameter, origin=Original V2 component parameter, count=0');
+      const initialState = await findWithForwardScroll(
+        driver, ON.id('v2-state-text'), 'patched V2 state', displaySize
+      );
+      expect(await initialState.getText()).assertEqual('tapCount=100');
+      const initialStatus = await findWithForwardScroll(
+        driver, ON.id('v2-status-text'), 'patched V2 status', displaySize
+      );
+      expect(await initialStatus.getText()).assertEqual('status=Patched V2 state callback, origin=0');
+
+      const eventButton = await findWithForwardScroll(
+        driver, ON.id('patched-v2-primary-action'), 'patched-v2-primary-action', displaySize
+      );
       expect(await eventButton.getText()).assertEqual('V2 primary action');
       await eventButton.click();
-      const eventStatus = await driver.waitForComponent(ON.text('status=Patched V2 test event, taps=111'), 5000);
-      expect(eventStatus !== undefined).assertTrue();
+      const eventStatus = await findWithForwardScroll(
+        driver, ON.id('v2-status-text'), 'patched V2 event status', displaySize
+      );
+      expect(await eventStatus.getText()).assertEqual('status=Patched V2 test event, taps=111');
 
-      const secondaryButton = await driver.waitForComponent(ON.id('v2-secondary-action'), 5000);
-      expect(secondaryButton !== undefined).assertTrue();
+      const secondaryButton = await findWithForwardScroll(
+        driver, ON.id('v2-secondary-action'), 'v2-secondary-action', displaySize
+      );
       await secondaryButton.click();
-      const secondaryStatus = await driver.waitForComponent(ON.text('status=V2 event ran, taps=113'), 5000);
-      expect(secondaryStatus !== undefined).assertTrue();
+      const secondaryStatus = await findWithForwardScroll(
+        driver, ON.id('v2-status-text'), 'V2 secondary event status', displaySize
+      );
+      expect(await secondaryStatus.getText()).assertEqual('status=V2 event ran, taps=113');
 
-      await driver.swipe(660, 2200, 660, 900, 500);
-      const builderText = await driver.waitForComponent(ON.id('patched-builder-slot-text'), 5000);
-      if (builderText === undefined || builderText === null) {
-        throw new Error('patched-builder-slot-text was not found');
-      }
+      await findWithForwardScroll(driver, ON.text('first:static child'), 'first child parameter', displaySize);
+      await findWithForwardScroll(
+        driver, ON.text('second:scoped patched dynamic child'), 'scoped second child parameter', displaySize
+      );
+
+      const builderText = await findWithForwardScroll(
+        driver, ON.id('patched-builder-slot-text'), 'patched-builder-slot-text', displaySize
+      );
       expect(await builderText.getText()).assertEqual('slot text=Original builder-param state');
-      const builderButton = await driver.waitForComponent(ON.id('patched-builder-slot-button'), 5000);
-      expect(builderButton !== undefined).assertTrue();
+      const builderButton = await findWithForwardScroll(
+        driver, ON.id('patched-builder-slot-button'), 'patched-builder-slot-button', displaySize
+      );
       await builderButton.click();
-      const builderStatus = await driver.waitForComponent(
-        ON.text('root status=Patched BuilderParam slot event'), 5000
+      const inlineBuilderText = await findWithForwardScroll(
+        driver, ON.id('patched-inline-builder-slot-text'), 'patched-inline-builder-slot-text', displaySize
       );
-      expect(builderStatus !== undefined).assertTrue();
-      await driver.swipe(660, 2200, 660, 1100, 500);
-      const inlineBuilderText = await driver.waitForComponent(ON.id('patched-inline-builder-slot-text'), 5000);
-      if (inlineBuilderText === undefined || inlineBuilderText === null) {
-        throw new Error('patched-inline-builder-slot-text was not found');
-      }
       expect(await inlineBuilderText.getText()).assertEqual('inline slot text=Patched BuilderParam slot event');
-      const inlineBuilderButton = await driver.waitForComponent(ON.id('patched-inline-builder-slot-button'), 5000);
-      expect(inlineBuilderButton !== undefined).assertTrue();
+      const inlineBuilderButton = await findWithForwardScroll(
+        driver, ON.id('patched-inline-builder-slot-button'), 'patched-inline-builder-slot-button', displaySize
+      );
       await inlineBuilderButton.click();
-      const inlineBuilderStatus = await driver.waitForComponent(
-        ON.text('root status=Patched inline BuilderParam slot event'), 5000
+      const multiHeaderText = await findWithForwardScroll(
+        driver, ON.id('patched-multi-builder-header-text'), 'patched-multi-builder-header-text', displaySize
       );
-      expect(inlineBuilderStatus !== undefined).assertTrue();
-      await driver.swipe(660, 2200, 660, 900, 500);
-      const multiHeaderText = await driver.waitForComponent(ON.id('patched-multi-builder-header-text'), 5000);
-      expect(multiHeaderText !== undefined).assertTrue();
-      const multiContentText = await driver.waitForComponent(ON.id('patched-multi-builder-content-text'), 5000);
-      expect(multiContentText !== undefined).assertTrue();
-      const originalHeaderButton = await driver.waitForComponent(ON.id('multi-builder-header-button'), 5000);
-      expect(originalHeaderButton !== undefined).assertTrue();
-      const multiContentButton = await driver.waitForComponent(ON.id('patched-multi-builder-content-button'), 5000);
-      expect(multiContentButton !== undefined).assertTrue();
+      const originalHeaderButton = await findWithForwardScroll(
+        driver, ON.id('multi-builder-header-button'), 'unpatched multi-builder-header-button', displaySize
+      );
+      expect(await originalHeaderButton.getText()).assertEqual('Multi header action');
+      const multiContentText = await findWithForwardScroll(
+        driver, ON.id('patched-multi-builder-content-text'), 'patched-multi-builder-content-text', displaySize
+      );
+      expect(await multiContentText.getText())
+        .assertEqual('multi content text=Patched inline BuilderParam slot event');
+      const multiContentButton = await findWithForwardScroll(
+        driver, ON.id('patched-multi-builder-content-button'), 'patched-multi-builder-content-button', displaySize
+      );
       await multiContentButton.click();
-      const multiContentStatus = await driver.waitForComponent(
-        ON.text('root status=Patched explicit contentBuilder event'), 5000
+      await findWithForwardScroll(
+        driver,
+        ON.text('root status=Patched explicit contentBuilder event'),
+        'patched explicit contentBuilder event status',
+        displaySize
       );
-      expect(multiContentStatus !== undefined).assertTrue();
 
       OhosPatch.clear();
       const reinstallScript = `
@@ -414,7 +469,7 @@ export default function fixitTest(): void {
           'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/PatchablePanelV2#PatchablePanelV2'
         ).state('tapCount', 200);
       `;
-      expect(OhosPatch.executeScript(reinstallScript)).assertLarger(0);
+      expect(OhosPatch.executeScript(reinstallScript).installedCount).assertLarger(0);
     });
 
     it('invalid full path input fails closed and later valid input still works', 0, () => {
@@ -431,7 +486,7 @@ export default function fixitTest(): void {
           throw new Error('invalid path was accepted');
         }
       `;
-      expect(OhosPatch.executeScript(invalid)).assertEqual(0);
+      expect(OhosPatch.executeScript(invalid).installedCount).assertEqual(0);
 
       const vm = new DemoViewModel();
       let threw = false;
@@ -446,7 +501,7 @@ export default function fixitTest(): void {
         Fixit.fix('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/ViewModel/DemoViewModel#DemoViewModel')
           .instanceMethod('crashIt', function () { return 'valid-after-invalid'; });
       `;
-      expect(OhosPatch.executeScript(valid)).assertLarger(0);
+      expect(OhosPatch.executeScript(valid).installedCount).assertLarger(0);
       expect(vm.crashIt()).assertEqual('valid-after-invalid');
     });
 
@@ -569,8 +624,8 @@ export default function fixitTest(): void {
         Fixit.fix('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/ViewModel/DemoViewModel#DemoViewModel')
           .instanceMethod('crashIt', function () { return 'console-ok'; });
       `;
-      const count = OhosPatch.executeScript(script);
-      expect(count).assertLarger(0);
+      const result = OhosPatch.executeScript(script);
+      expect(result.installedCount).assertLarger(0);
     });
 
     it('timer callbacks run in the real Patch JSVM and can update later patch results', 0, async () => {
@@ -584,7 +639,7 @@ export default function fixitTest(): void {
             return timerValue;
           });
       `;
-      expect(OhosPatch.executeScript(script)).assertLarger(0);
+      expect(OhosPatch.executeScript(script).installedCount).assertLarger(0);
       expect(DemoViewModel.crash()).assertEqual('pending');
 
       await new Promise<void>((resolve) => {
@@ -600,8 +655,8 @@ export default function fixitTest(): void {
         fix.instanceMethod('crashIt', function () { return 'first'; });
         fix.instanceMethod('crashIt', function () { return 'second'; });
       `;
-      const count = OhosPatch.executeScript(script);
-      expect(count).assertEqual(0);
+      const result = OhosPatch.executeScript(script);
+      expect(result.installedCount).assertEqual(0);
 
       const vm = new DemoViewModel();
       let threw = false;
