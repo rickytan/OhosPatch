@@ -66,11 +66,25 @@ export default function fixitTest(): void {
         Fixit.fix('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/ViewModel/DemoViewModel#DemoViewModel')
           .classMethod('crash', function () {
             return scopedImportError.indexOf('OhosPatch path must use') === -1 &&
-              scopedImportError.indexOf('could not load the target module') !== -1;
+              scopedImportError.indexOf('Fixit.import cannot load target module') !== -1;
           });
       `;
       expect(OhosPatch.executeScript(script)).assertLarger(0);
       expect(DemoViewModel.crash()).assertTrue();
+    });
+
+    it('target parser accepts host package and host module shorthand paths', 0, () => {
+      const script = `
+        try {
+          Fixit.import('/src/main/ets/patch/DemoPatchStartupTask#default');
+        } catch (_) {}
+        Fixit.fix('@vendor/business_page/src/main/ets/ViewModel/DemoViewModel#DemoViewModel')
+          .classMethod('crash', function () {
+            return 'short-path-ok';
+          });
+      `;
+      expect(OhosPatch.executeScript(script)).assertLarger(0);
+      expect(DemoViewModel.crash()).assertEqual('short-path-ok');
     });
 
     it('patch context exposes builtin helpers with observable values', 0, () => {
@@ -223,8 +237,13 @@ export default function fixitTest(): void {
       expect(openButton !== undefined).assertTrue();
 
       const script = `
+        var componentV1 = Fixit.component(
+          'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/PatchablePanel#PatchablePanel'
+        );
+        componentV1.state('tapCount', 40);
+        componentV1.state('statusText', 'Patched V1 state before render');
         var component = Fixit.component(
-          'com.rickytan.ohospatch/entry/@vendor/business_page/src/main/ets/components/PatchablePanelV2#PatchablePanelV2'
+          'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/PatchablePanelV2#PatchablePanelV2'
         );
         component.param('message', function (originValue) {
           return 'Patched V2 test parameter, origin=' + originValue + ', count=' + this.tapCount;
@@ -249,18 +268,56 @@ export default function fixitTest(): void {
             return result;
           });
         Fixit.component(
-          'com.rickytan.ohospatch/entry/@vendor/business_page/src/main/ets/components/ChildParamPanel#ParentChildParamPanel'
+          'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/ChildParamPanel#ParentChildParamPanel'
         )
           .node({
-            type: 'com.rickytan.ohospatch/entry/@vendor/business_page/src/main/ets/components/ChildParamPanel#ChildParamPanel',
+            type: 'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/ChildParamPanel#ChildParamPanel',
             occurrence: 1
           })
           .param('title', function (originValue) {
             return 'scoped patched ' + originValue;
           });
+        var builderRoot = Fixit.component(
+          'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/BuilderParamPanel#BuilderParamRoot'
+        );
+        builderRoot.node({
+          type: 'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/BuilderParamPanel#BuilderParamShell',
+          occurrence: 0
+        }).slot({ type: 'Text', occurrence: 0 })
+          .attr('id', 'patched-builder-slot-text');
+        var builderSlotOrigin = builderRoot.node({
+          type: 'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/BuilderParamPanel#BuilderParamShell',
+          occurrence: 0
+        }).slot({ type: 'Button', occurrence: 0 })
+          .attr('id', 'patched-builder-slot-button')
+          .event('onClick', function () {
+            var result = builderSlotOrigin.apply(this, arguments);
+            this.statusText = 'Patched BuilderParam slot event';
+            return result;
+          });
+        builderRoot.node({
+          type: 'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/BuilderParamPanel#BuilderParamShell',
+          occurrence: 1
+        }).slot({ type: 'Text', occurrence: 0 })
+          .attr('id', 'patched-inline-builder-slot-text');
+        var inlineBuilderSlotOrigin = builderRoot.node({
+          type: 'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/BuilderParamPanel#BuilderParamShell',
+          occurrence: 1
+        }).slot({ type: 'Button', occurrence: 0 })
+          .attr('id', 'patched-inline-builder-slot-button')
+          .event('onClick', function () {
+            var result = inlineBuilderSlotOrigin.apply(this, arguments);
+            this.statusText = 'Patched inline BuilderParam slot event';
+            return result;
+          });
       `;
       expect(OhosPatch.executeScript(script)).assertLarger(0);
       await openButton.click();
+
+      const v1State = await driver.waitForComponent(ON.text('tapCount=40, secondary=1'), 5000);
+      expect(v1State !== undefined).assertTrue();
+      const v1Status = await driver.waitForComponent(ON.text('status=Patched V1 state before render'), 5000);
+      expect(v1Status !== undefined).assertTrue();
 
       const parameter = await driver.waitForComponent(
         ON.text('Patched V2 test parameter, origin=Original V2 component parameter, count=0'), 5000
@@ -292,10 +349,36 @@ export default function fixitTest(): void {
       const secondaryStatus = await driver.waitForComponent(ON.text('status=V2 event ran, taps=113'), 5000);
       expect(secondaryStatus !== undefined).assertTrue();
 
+      await driver.swipe(660, 2400, 660, 650, 600);
+      await driver.swipe(660, 2400, 660, 650, 600);
+      await driver.swipe(660, 2400, 660, 650, 600);
+      const builderSlotText = await driver.waitForComponent(ON.id('patched-builder-slot-text'), 5000);
+      expect(builderSlotText !== undefined).assertTrue();
+      expect(await builderSlotText.getText()).assertEqual('slot text=Original builder-param state');
+      const builderSlotButton = await driver.waitForComponent(ON.id('patched-builder-slot-button'), 5000);
+      expect(builderSlotButton !== undefined).assertTrue();
+      await builderSlotButton.click();
+      const builderSlotStatus = await driver.waitForComponent(
+        ON.text('root status=Patched BuilderParam slot event'), 5000
+      );
+      expect(builderSlotStatus !== undefined).assertTrue();
+      const inlineBuilderSlotText = await driver.waitForComponent(ON.id('patched-inline-builder-slot-text'), 5000);
+      expect(inlineBuilderSlotText !== undefined).assertTrue();
+      expect(await inlineBuilderSlotText.getText()).assertEqual('inline slot text=Patched BuilderParam slot event');
+      const inlineBuilderSlotButton = await driver.waitForComponent(
+        ON.id('patched-inline-builder-slot-button'), 5000
+      );
+      expect(inlineBuilderSlotButton !== undefined).assertTrue();
+      await inlineBuilderSlotButton.click();
+      const inlineBuilderSlotStatus = await driver.waitForComponent(
+        ON.text('root status=Patched inline BuilderParam slot event'), 5000
+      );
+      expect(inlineBuilderSlotStatus !== undefined).assertTrue();
+
       OhosPatch.clear();
       const reinstallScript = `
         Fixit.component(
-          'com.rickytan.ohospatch/entry/@vendor/business_page/src/main/ets/component/PatchablePanelV2#PatchablePanelV2'
+          'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/PatchablePanelV2#PatchablePanelV2'
         ).state('tapCount', 200);
       `;
       expect(OhosPatch.executeScript(reinstallScript)).assertLarger(0);
@@ -303,8 +386,17 @@ export default function fixitTest(): void {
 
     it('invalid full path input fails closed and later valid input still works', 0, () => {
       const invalid = `
-        Fixit.fix('entry/@vendor/business_page/src/main/ets/ViewModel/DemoViewModel#DemoViewModel')
-          .instanceMethod('crashIt', function () { return 'should-not-install'; });
+        var rejected = false;
+        try {
+          Fixit.fix('entry/@vendor/business_page/src/main/ets/ViewModel/DemoViewModel#DemoViewModel')
+            .instanceMethod('crashIt', function () { return 'should-not-install'; });
+        } catch (err) {
+          rejected = String(err && err.message ? err.message : err)
+            .indexOf('bundleName/moduleName before package path') !== -1;
+        }
+        if (!rejected) {
+          throw new Error('invalid path was accepted');
+        }
       `;
       expect(OhosPatch.executeScript(invalid)).assertEqual(0);
 

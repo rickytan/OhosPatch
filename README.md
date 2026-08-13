@@ -168,7 +168,7 @@ ohpm install @rickytan/ohospatch
 ```json5
 {
   "dependencies": {
-    "@rickytan/ohospatch": "^1.0.0"
+    "@rickytan/ohospatch": "^1.0.3"
   }
 }
 ```
@@ -219,10 +219,12 @@ Patch 脚本可以引用声明文件获得 IDE 补全：
 完整目标路径格式是：
 
 ```text
-bundleName/moduleName/[packageName/]src/main/ets/File#ExportName
+bundleName/moduleName/[packagePath/]src/main/ets/File#ExportName
+@package/name/src/main/ets/File#ExportName
+/src/main/ets/File#ExportName
 ```
 
-Runtime 解析路径时以 `src/main/ets` 为锚点：前两段固定是 `bundleName/moduleName`，锚点前剩余的所有段都会作为 OH package name。因此 scoped package 可以直接写完整包名：
+Runtime 解析路径时以 `src/main/ets` 为锚点。完整路径里前两段是 `bundleName/moduleName`，锚点前剩余的所有段都会作为 OH package path：
 
 ```text
 com.example.app/entry/@google/somelib/src/main/ets/foo/Bar#Bar
@@ -230,10 +232,19 @@ com.example.app/entry/@google/somelib/src/main/ets/foo/Bar#Bar
 
 上面会解析为 `moduleInfo = com.example.app/entry`，`modulePath = @google/somelib/src/main/ets/foo/Bar`。
 
-例如 Demo 的 `PatchablePanel` 导出自 `entry/src/main/ets/demo/PatchablePanel.ets`，所以目标为：
+`#ExportName` 必须对应 ArkTS 文件中实际 `export` 出来的类、函数或自定义 Component。OhosPatch 通过 `napi_load_module_with_info` 加载模块后只能从模块导出对象上取值；没有 `export` 的内部类型、文件内局部类、未导出的 `@Entry` 页面或只在文件内部使用的 helper，运行时无法定位，也就不能作为 `Fixit.fix()`、`Fixit.component()` 或 `Fixit.import()` 的目标。需要被 patch 的业务类或 Component 应保持稳定导出名，并在开启混淆时为这些导出和需要 hook 的方法配置 keep 规则。
+
+如果目标在当前运行的 APP/module 中，可以省略 `bundleName/moduleName`。`@` 开头表示当前 host module 下的 OH package path；`/` 开头表示当前 host module 自己的源码路径。host 信息来自 `OhosPatch.init(context)`：
 
 ```text
-com.rickytan.ohospatch/entry/src/main/ets/demo/PatchablePanel#PatchablePanel
+@vendor/business_page/src/main/ets/components/PatchablePanel#PatchablePanel
+/src/main/ets/pages/Index#Index
+```
+
+例如 Demo 的 `PatchablePanel` 来自 `@vendor/business_page` 包，因此推荐写法为：
+
+```text
+@vendor/business_page/src/main/ets/components/PatchablePanel#PatchablePanel
 ```
 
 下面每个示例都先列出已经发布在 APP 中、无需为 OhosPatch 修改的原始 ArkTS 代码，再列出下发的 JavaScript Patch。
@@ -571,6 +582,64 @@ var originSubmit = panel.node({ // 返回 NodeBuilder。
 同一个 Component 内的多层 `Column`、`Row`、`Stack` 等 ArkUI 内置容器不会创建新的计数作用域。只要还在同一个 `Fixit.component(fullPath)` 指向的组件 builder 里，同类型节点都会按实际执行顺序统一递增。
 
 自定义组件是边界。父组件中的 `<Child />` 只是父组件渲染路径上的一个自定义组件创建点，不会把 `Child` 内部的 `Text/Button` 计入父组件 selector；要修复子组件内部节点，需要对 `Child` 自己再写一条 `Fixit.component(childFullPath)`。
+
+这个边界有一个明确的例外：父组件传给子组件的尾随闭包或 `@BuilderParam` 内容仍归父组件所有，可以通过 `.node(childSelector).slot(nodeSelector)` 修复。原始组件例如：
+
+```ts
+@Component
+export struct ContentShell {
+  @BuilderParam contentBuilder: () => void
+
+  build() {
+    Column() {
+      Text('Shell title') // 子组件自己创建，不属于 slot
+      this.contentBuilder()
+    }
+  }
+}
+
+@Component
+export struct ParentPanel {
+  @State statusText: string = 'Original'
+
+  build() {
+    ContentShell() {
+      Text(`status=${this.statusText}`) // slot Text occurrence 0
+      Button('Action')                 // slot Button occurrence 0
+        .height(44)
+        .onClick(() => {
+          this.statusText = 'Original click'
+        })
+    }
+  }
+}
+```
+
+对应 Patch：
+
+```js
+var parent = Fixit.component(
+  '@vendor/business/src/main/ets/ParentPanel#ParentPanel'
+); // 返回 ComponentFix，目标是拥有尾随闭包的父组件。
+
+var child = parent.node({
+  type: '@vendor/business/src/main/ets/ContentShell#ContentShell', // 选择父组件创建的自定义子组件。
+  occurrence: 0 // 选择第一个 ContentShell 实例。
+}); // 返回 ComponentNodeFix。
+
+child.slot({ type: 'Text', occurrence: 0 }) // 在该实例收到的 BuilderParam 内容中选择第一个 Text。
+  .attrs({ fontColor: '#C44736', fontSize: 18 }); // 返回 ComponentSlotNodeFix。
+
+var originClick = child.slot({ type: 'Button', occurrence: 0 }) // slot 内各节点类型独立从 0 计数。
+  .attrs({ height: 52, backgroundColor: '#C44736' }) // 覆盖原 Button 属性；返回 ComponentSlotNodeFix。
+  .event('onClick', function () { // 返回 OriginEvent；this 是 ParentPanel 当前实例。
+    var result = originClick.apply(this, arguments); // 调用并取得原 onClick 返回值。
+    this.statusText = 'Patched click'; // 原回调执行后修改父组件状态。
+    return result; // 保持原事件返回语义。
+  });
+```
+
+`.slot()` 只覆盖由父组件提供的 builder 内容，不会选择 `ContentShell` 自己创建的 `Text('Shell title')`。slot 内的 `occurrence` 每次执行该 BuilderParam 时独立计数，因此上例的 slot Text 是 `0`，不受父组件其他 Text 或子组件标题 Text 影响。slot 节点同样支持 `type + where`；未找到节点时保持 no-op 并输出一次 warning。
 
 条件渲染时，只统计当前状态下实际执行到的分支。`if` 分支里第一个 `Button` 是该分支执行时的 `Button occurrence: 0`；切到 `else` 分支后，`else` 分支里实际创建的同类型节点会重新按执行顺序计数。循环和 `ForEach` 也是同一规则：每个实际执行的迭代都会按顺序贡献节点，因此列表长度、排序或过滤条件变化会改变后续同类型节点的 `occurrence`。
 
@@ -978,13 +1047,27 @@ $HOME/Library/OpenHarmony/Sdk
 
 路径不同时，通过环境或仓库变量 `DEVECO_STUDIO_HOME`、`OHOS_BASE_SDK_HOME` 覆盖。
 
+## 构建产物
+
+`ohospatch` 的内置 Patch Runtime 源码位于 `ohospatch/src/main/cpp/runtime/fixit.js`。构建 HAR/HAP 时会通过 Gulp 调用 Terser，把它压缩为 `ohospatch/src/main/resources/rawfile/ohospatch/fixit.min.js` 后打进 rawfile。
+
+当前压缩不是简单删除注释和空白，而是使用 Terser 的 `compress` 和 `mangle` 能力：
+
+```bash
+npm install --prefix tools/fixit-runtime-build
+npm run build:fixit-runtime -- --input ohospatch/src/main/cpp/runtime/fixit.js --output ohospatch/src/main/resources/rawfile/ohospatch/fixit.min.js
+```
+
+CMake 构建也会调用同一个 Gulp task；如果本地没有安装 Node 依赖，会明确提示先在项目根目录执行 `npm install --prefix tools/fixit-runtime-build`。
+
 ## 当前边界
 
 - prototype hook 不覆盖构造函数、实例字段箭头函数、私有实现或不经过属性查找的调用点。
+- 只有从 ArkTS 模块 `export` 出来的类、函数和自定义 Component 能被 patch；未导出的内部类型无法通过运行时模块导出表定位。
 - Patch handler 的 `this` Proxy 只在当前同步调用或 `origin` 调用期间有效，不应保存到 timer、Promise 或全局变量后异步访问。
 - `Fixit.import()` 返回的持久 Proxy 可保留到 `OhosPatch.clear()` 或下一次 patch 替换。
 - 普通方法参数和新建 JS 对象仍受 JSON wire 类型限制。
-- Component DSL 当前支持 API 20 状态管理 V1/V2、导出的自定义组件、首选的 `type + occurrence` 节点选择器、`type + where` 原始属性选择器、JSON 属性参数和同步事件替换。
+- Component DSL 当前支持 API 20 状态管理 V1/V2、导出的自定义组件、父组件尾随闭包/`@BuilderParam` slot、首选的 `type + occurrence` 节点选择器、`type + where` 原始属性选择器、JSON 属性参数和同步事件替换。
 - 非导出的 `@Entry` 页面、层级选择器、已挂载组件主动刷新，以及 `before/after/around` 事件组合尚未支持。`Resource`、Controller 等不可 JSON 序列化对象不能作为 selector 或静态 attr 参数直接下发。
 - 单个 runtime 最多同时存在 256 个 timer。
 - 单个 patch 最多保留 512 个去重后的动态导入类、实例、方法或嵌套对象句柄。

@@ -1,6 +1,14 @@
 {
   "apiType": "stageMode",
   "buildOption": {
+    "arkOptions": {
+      "autoLazyImport": true,
+      "runtimeOnly": {
+        "packages": [
+          "@vendor/business_page"
+        ]
+      }
+    },
     "resOptions": {
       "copyCodeResource": {
         "enable": false

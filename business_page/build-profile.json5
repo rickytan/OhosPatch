@@ -1,6 +1,9 @@
 {
   "apiType": "stageMode",
   "buildOption": {
+    "arkOptions": {
+      "autoLazyImport": true
+    },
     "resOptions": {
       "copyCodeResource": {
         "enable": false

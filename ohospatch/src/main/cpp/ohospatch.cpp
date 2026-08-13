@@ -1,8 +1,8 @@
 #include "ark_runtime/jsvm.h"
 #include "bundle/native_interface_bundle.h"
-#include "fixit_runtime.h"
 #include "hilog/log.h"
 #include "napi/native_api.h"
+#include "rawfile/raw_file_manager.h"
 #include "uv.h"
 
 #include <array>
@@ -11,11 +11,13 @@
 #include <memory>
 #include <new>
 #include <string>
+#include <vector>
 
 namespace {
 
 constexpr unsigned int kLogDomain = 0x3900;
 constexpr const char *kLogTag = "[OhosPatch]";
+constexpr const char *kFixitRuntimeRawFile = "ohospatch/fixit.min.js";
 
 void LogError(const char *operation, int status)
 {
@@ -31,6 +33,53 @@ void LogError(const std::string &message)
 void LogWarn(const std::string &message)
 {
     OH_LOG_Print(LOG_APP, LOG_WARN, kLogDomain, kLogTag, "%{public}s", message.c_str());
+}
+
+std::string EmptyAsDefault(const std::string &value, const char *fallback)
+{
+    return value.empty() ? fallback : value;
+}
+
+std::string DescribePatchTarget(const std::string &modulePath, const std::string &moduleInfo,
+                                const std::string &exportName)
+{
+    return "modulePath='" + EmptyAsDefault(modulePath, "<empty>") + "', moduleInfo='" +
+           EmptyAsDefault(moduleInfo, "<host>") + "', export='" + EmptyAsDefault(exportName, "<default>") + "'";
+}
+
+std::string DescribePatchTarget(const std::string &modulePath, const std::string &moduleInfo,
+                                const std::string &exportName, const std::string &methodName)
+{
+    return DescribePatchTarget(modulePath, moduleInfo, exportName) + ", method='" +
+           EmptyAsDefault(methodName, "<empty>") + "'";
+}
+
+std::string DescribeNapiType(napi_valuetype type)
+{
+    switch (type) {
+        case napi_undefined:
+            return "undefined";
+        case napi_null:
+            return "null";
+        case napi_boolean:
+            return "boolean";
+        case napi_number:
+            return "number";
+        case napi_string:
+            return "string";
+        case napi_symbol:
+            return "symbol";
+        case napi_object:
+            return "object";
+        case napi_function:
+            return "function";
+        case napi_external:
+            return "external";
+        case napi_bigint:
+            return "bigint";
+        default:
+            return "unknown";
+    }
 }
 
 void LogScriptLoad(uint64_t elapsedMicroseconds, size_t scriptBytes, size_t installedCount)
@@ -336,6 +385,7 @@ enum class UiMethodKind {
     PARAM_INITIAL,
     PARAM_UPDATE,
     PARAM_NAMED,
+    FINALIZE_CONSTRUCTION,
     STATE_RESET,
     INITIAL_RENDER,
     OBSERVE_CREATION,
@@ -347,6 +397,7 @@ constexpr size_t kMaxUiWhereAttributesPerNode = 16;
 constexpr size_t kMaxUiSelectorsPerNode = 32;
 constexpr size_t kMaxUiSelectorsPerRender = 256;
 constexpr size_t kMaxUiChildInstancesPerRender = 128;
+constexpr size_t kMaxUiScopedChildCreationDepth = 16;
 
 struct UiWhereCondition {
     std::string attributeName;
@@ -370,6 +421,7 @@ struct UiRule {
     std::string childModuleInfo;
     std::string childExportName;
     std::string childTargetKey;
+    uint32_t childOccurrence = 0;
     std::array<UiWhereCondition, kMaxUiWhereAttributesPerNode> whereConditions;
     size_t whereConditionCount = 0;
     bool selectorMissLogged = false;
@@ -378,6 +430,50 @@ struct UiRule {
     bool hasAttrHandler = false;
     std::string eventName;
 };
+
+std::string DescribeUiRuleKind(UiRuleKind kind)
+{
+    switch (kind) {
+        case UiRuleKind::PARAM:
+            return "param";
+        case UiRuleKind::STATE:
+            return "state";
+        case UiRuleKind::ATTRIBUTE:
+            return "attribute";
+        case UiRuleKind::EVENT:
+            return "event";
+        case UiRuleKind::CHILD_PARAM:
+            return "childParam";
+        default:
+            return "unknown";
+    }
+}
+
+std::string DescribeUiRule(const UiRule *rule)
+{
+    if (!rule) {
+        return "<null rule>";
+    }
+    std::string description = "component='" + EmptyAsDefault(rule->className, "<empty>") + "', kind='" +
+                              DescribeUiRuleKind(rule->kind) + "', target={" +
+                              DescribePatchTarget(rule->modulePath, rule->moduleInfo, rule->exportName) + "}";
+    if (!rule->selectorKey.empty()) {
+        description += ", selector=" + rule->selectorKey;
+    }
+    if (!rule->propertyName.empty()) {
+        description += ", property='" + rule->propertyName + "'";
+    }
+    if (!rule->attributeName.empty()) {
+        description += ", attribute='" + rule->attributeName + "'";
+    }
+    if (!rule->eventName.empty()) {
+        description += ", event='" + rule->eventName + "'";
+    }
+    if (!rule->childClassName.empty()) {
+        description += ", childComponent='" + rule->childClassName + "'";
+    }
+    return description;
+}
 
 struct UiComponentHook;
 
@@ -394,7 +490,7 @@ struct UiComponentHook {
     napi_ref holder = nullptr;
     std::string className;
     std::string targetKey;
-    std::array<UiMethodHook, 6> methods;
+    std::array<UiMethodHook, 8> methods;
     size_t methodCount = 0;
 };
 
@@ -406,10 +502,22 @@ struct UiNodeCallbackRecord {
     std::string targetKey;
     std::string nodeType;
     uint32_t occurrence = 0;
+    bool hasScopedChild = false;
+    std::string childTargetKey;
+    uint32_t childOccurrence = 0;
     std::array<std::string, kMaxUiSelectorsPerNode> selectedSelectors;
     size_t selectedSelectorCount = 0;
     std::array<std::string, kMaxUiSelectorsPerNode> resolvedSelectors;
     size_t resolvedSelectorCount = 0;
+};
+
+struct UiBuilderParamCallbackRecord {
+    napi_env env = nullptr;
+    napi_ref originalBuilder = nullptr;
+    napi_ref owner = nullptr;
+    std::string parentTargetKey;
+    std::string childTargetKey;
+    uint32_t childOccurrence = 0;
 };
 
 struct UiEventCallbackRecord {
@@ -458,6 +566,15 @@ struct UiRenderFrame {
     size_t selectedSelectorCount = 0;
 };
 
+struct UiScopedChildCreationFrame {
+    std::string parentTargetKey;
+    std::string childTargetKey;
+    uint32_t occurrence = 0;
+    napi_ref owner = nullptr;
+    std::array<UiNodeTypeCounter, kMaxUiNodeTypesPerRender> counters;
+    size_t counterCount = 0;
+};
+
 class JsvmRuntime;
 
 struct TimerRecord {
@@ -486,12 +603,17 @@ class JsvmRuntime
             initialized_ = true;
         }
 
+        std::string runtimeScript;
+        if (!LoadFixitRuntimeScript(&runtimeScript)) {
+            return false;
+        }
+
         JSVM_CreateVMOptions vmOptions{};
         if (!JsvmOk(OH_JSVM_CreateVM(&vmOptions, &vm_), "OH_JSVM_CreateVM", nullptr) ||
             !JsvmOk(OH_JSVM_OpenVMScope(vm_, &vmScope_), "OH_JSVM_OpenVMScope", nullptr) ||
             !JsvmOk(OH_JSVM_CreateEnv(vm_, 0, nullptr, &env_), "OH_JSVM_CreateEnv", nullptr) ||
             !JsvmOk(OH_JSVM_OpenEnvScope(env_, &envScope_), "OH_JSVM_OpenEnvScope", env_) ||
-            !InstallNativeFunctionsWithScope() || !Run(kFixitRuntimeScript)) {
+            !InstallNativeFunctionsWithScope() || !Run(runtimeScript)) {
             ResetVm();
             return false;
         }
@@ -506,7 +628,6 @@ class JsvmRuntime
             return 0;
         }
         if (!Run(script)) {
-            LogError("OhosPatch ExecuteAndInstall: Run(script) failed");
             ClearRegistry();
             ClearImportedValues();
             return 0;
@@ -521,12 +642,6 @@ class JsvmRuntime
         bool uiInstalled = hooksInstalled && InstallUiRules(napiEnv);
         bool scopeClosed = JsvmOk(OH_JSVM_CloseHandleScope(env_, scope),
                                   "OH_JSVM_CloseHandleScope(patch install)", env_);
-        if (!hooksInstalled) {
-            LogError("OhosPatch ExecuteAndInstall: InstallHooks failed");
-        }
-        if (hooksInstalled && !uiInstalled) {
-            LogError("OhosPatch ExecuteAndInstall: InstallUiRules failed");
-        }
         if (!hooksInstalled || !uiInstalled || !scopeClosed) {
             RestoreUiHooks();
             ClearUiRules();
@@ -760,6 +875,7 @@ class JsvmRuntime
     napi_env hostEnv_ = nullptr;
     napi_env contextEnv_ = nullptr;
     napi_ref contextRef_ = nullptr;
+    NativeResourceManager *nativeResourceManager_ = nullptr;
     std::string hostBundleName_;
     std::string hostModuleName_;
     std::string hostModuleInfo_;
@@ -777,9 +893,15 @@ class JsvmRuntime
     size_t uiComponentHookCount_ = 0;
     std::array<UiRenderFrame, kMaxUiRenderDepth> uiRenderFrames_;
     size_t uiRenderDepth_ = 0;
+    std::array<UiScopedChildCreationFrame, kMaxUiScopedChildCreationDepth> uiScopedChildCreationFrames_;
+    size_t uiScopedChildCreationDepth_ = 0;
 
     void ReleaseContext()
     {
+        if (nativeResourceManager_) {
+            OH_ResourceManager_ReleaseNativeResourceManager(nativeResourceManager_);
+            nativeResourceManager_ = nullptr;
+        }
         if (contextEnv_ && contextRef_) {
             DeleteNapiReference(contextEnv_, contextRef_, "napi_delete_reference(context)");
         }
@@ -810,6 +932,42 @@ class JsvmRuntime
         return true;
     }
 
+    bool LoadFixitRuntimeScript(std::string *script)
+    {
+        if (!script) {
+            LogError("LoadFixitRuntimeScript received an invalid output pointer");
+            return false;
+        }
+        script->clear();
+        if (!nativeResourceManager_) {
+            LogError("OhosPatch.init(context) must be called before loading the patch runtime");
+            return false;
+        }
+
+        RawFile *rawFile = OH_ResourceManager_OpenRawFile(nativeResourceManager_, kFixitRuntimeRawFile);
+        if (!rawFile) {
+            LogError(std::string("OhosPatch could not open runtime rawfile: ") + kFixitRuntimeRawFile);
+            return false;
+        }
+
+        long rawSize = OH_ResourceManager_GetRawFileSize(rawFile);
+        if (rawSize <= 0) {
+            LogError(std::string("OhosPatch runtime rawfile is empty: ") + kFixitRuntimeRawFile);
+            OH_ResourceManager_CloseRawFile(rawFile);
+            return false;
+        }
+
+        script->resize(static_cast<size_t>(rawSize));
+        int readSize = OH_ResourceManager_ReadRawFile(rawFile, script->data(), script->size());
+        OH_ResourceManager_CloseRawFile(rawFile);
+        if (readSize != rawSize) {
+            LogError("OhosPatch failed to read the complete runtime rawfile");
+            script->clear();
+            return false;
+        }
+        return true;
+    }
+
     bool SetContext(napi_env napiEnv, napi_value context)
     {
         if (!context) {
@@ -834,6 +992,13 @@ class JsvmRuntime
         }
         contextEnv_ = napiEnv;
         contextRef_ = reference;
+        napi_value resourceManager = nullptr;
+        if (GetResourceManager(napiEnv, &resourceManager)) {
+            nativeResourceManager_ = OH_ResourceManager_InitNativeResourceManager(napiEnv, resourceManager);
+            if (!nativeResourceManager_) {
+                LogError("OhosPatch could not initialize native resource manager");
+            }
+        }
         CaptureHostModuleInfo(napiEnv, context);
         return true;
     }
@@ -867,21 +1032,21 @@ class JsvmRuntime
 
         bool hasValue = false;
         OH_NativeBundle_ApplicationInfo applicationInfo = OH_NativeBundle_GetCurrentApplicationInfo();
-        if (applicationInfo.bundleName) {
+        if (applicationInfo.bundleName && bundleName->empty()) {
             *bundleName = applicationInfo.bundleName;
             hasValue = true;
         }
 
         OH_NativeBundle_ElementName elementName = OH_NativeBundle_GetMainElementName();
-        if (elementName.moduleName) {
+        if (elementName.moduleName && moduleName->empty()) {
             *moduleName = elementName.moduleName;
             hasValue = true;
         }
         if (elementName.bundleName) {
             if (bundleName->empty()) {
                 *bundleName = elementName.bundleName;
+                hasValue = true;
             }
-            hasValue = true;
         }
         return hasValue;
     }
@@ -894,20 +1059,20 @@ class JsvmRuntime
 
         std::string bundleName;
         std::string moduleName;
-        ReadNativeBundleInfo(&bundleName, &moduleName);
-
-        if (bundleName.empty() && !TryNapiNamedString(napiEnv, context, "bundleName", &bundleName) &&
+        if (!TryNapiNamedString(napiEnv, context, "bundleName", &bundleName) &&
             !TryNapiNestedNamedString(napiEnv, context, "abilityInfo", "bundleName", &bundleName) &&
             !TryNapiNestedNamedString(napiEnv, context, "applicationInfo", "name", &bundleName)) {
             ReadSelfBundleName(napiEnv, &bundleName);
         }
 
-        if (moduleName.empty()) {
-            TryNapiNamedString(napiEnv, context, "moduleName", &moduleName) ||
-                TryNapiNestedNamedString(napiEnv, context, "abilityInfo", "moduleName", &moduleName) ||
-                TryNapiNestedNamedString(napiEnv, context, "currentHapModuleInfo", "name", &moduleName) ||
-                TryNapiNestedNamedString(napiEnv, context, "hapModuleInfo", "name", &moduleName) ||
-                TryNapiNestedNamedString(napiEnv, context, "moduleInfo", "name", &moduleName);
+        TryNapiNamedString(napiEnv, context, "moduleName", &moduleName) ||
+            TryNapiNestedNamedString(napiEnv, context, "abilityInfo", "moduleName", &moduleName) ||
+            TryNapiNestedNamedString(napiEnv, context, "currentHapModuleInfo", "name", &moduleName) ||
+            TryNapiNestedNamedString(napiEnv, context, "hapModuleInfo", "name", &moduleName) ||
+            TryNapiNestedNamedString(napiEnv, context, "moduleInfo", "name", &moduleName);
+
+        if (bundleName.empty() || moduleName.empty()) {
+            ReadNativeBundleInfo(&bundleName, &moduleName);
         }
 
         if (bundleName.empty() || moduleName.empty()) {
@@ -928,37 +1093,84 @@ class JsvmRuntime
             return false;
         }
         *module = nullptr;
-        napi_status status = moduleInfo.empty()
-                                 ? napi_load_module(napiEnv, modulePath.c_str(), module)
-                                 : napi_load_module_with_info(napiEnv, modulePath.c_str(), moduleInfo.c_str(),
-                                                              module);
-        if (status == napi_ok) {
-            return true;
-        }
-        ClearPendingNapiException(napiEnv);
-
-        if (!hostModuleInfo_.empty() && hostModuleInfo_ != moduleInfo) {
-            status = napi_load_module_with_info(napiEnv, modulePath.c_str(), hostModuleInfo_.c_str(), module);
-            if (status == napi_ok) {
-                LogWarn("OhosPatch loaded target with host moduleInfo fallback: " + modulePath + " via " +
-                        hostModuleInfo_);
-                return true;
+        std::string effectiveModulePath = modulePath;
+        std::string effectiveModuleInfo = moduleInfo;
+        size_t packageInfoOffset = effectiveModuleInfo.empty() ? std::string::npos : effectiveModuleInfo.find('@');
+        if (packageInfoOffset != std::string::npos && (packageInfoOffset == 0 || effectiveModuleInfo[packageInfoOffset - 1] == '/') &&
+            (effectiveModulePath.empty() || effectiveModulePath[0] != '@')) {
+            std::string packageInfo = effectiveModuleInfo.substr(packageInfoOffset);
+            std::string packageLeaf = packageInfo;
+            size_t packageSlash = packageLeaf.rfind('/');
+            if (packageSlash != std::string::npos) {
+                packageLeaf = packageLeaf.substr(packageSlash + 1);
             }
-            ClearPendingNapiException(napiEnv);
+            if (!packageLeaf.empty() && effectiveModulePath.rfind(packageLeaf + "/", 0) == 0) {
+                effectiveModulePath = effectiveModulePath.substr(packageLeaf.size() + 1);
+            }
+            effectiveModulePath = packageInfo + "/" + effectiveModulePath;
+            effectiveModuleInfo.clear();
+        }
+        if (!effectiveModulePath.empty() && effectiveModulePath[0] == '/') {
+            if (hostModuleName_.empty()) {
+                LogError("OhosPatch cannot resolve host-relative module path before OhosPatch.init(context)");
+                return false;
+            }
+            effectiveModulePath = hostModuleName_ + effectiveModulePath;
+        }
+        if (effectiveModuleInfo.empty()) {
+            if (hostModuleInfo_.empty()) {
+                LogError("OhosPatch cannot resolve moduleInfo before OhosPatch.init(context)");
+                return false;
+            }
+            effectiveModuleInfo = hostModuleInfo_;
         }
 
-        if (!moduleInfo.empty()) {
-            status = napi_load_module(napiEnv, modulePath.c_str(), module);
+        std::vector<std::string> moduleInfoCandidates;
+        moduleInfoCandidates.push_back(effectiveModuleInfo);
+        if (!hostModuleInfo_.empty() && hostModuleInfo_ != effectiveModuleInfo) {
+            moduleInfoCandidates.push_back(hostModuleInfo_);
+        }
+        if (!hostBundleName_.empty() && hostModuleName_ != "entry_test") {
+            std::string testModuleInfo = hostBundleName_ + "/entry_test";
+            bool alreadyAdded = false;
+            for (const auto &candidate : moduleInfoCandidates) {
+                if (candidate == testModuleInfo) {
+                    alreadyAdded = true;
+                    break;
+                }
+            }
+            if (!alreadyAdded) {
+                moduleInfoCandidates.push_back(testModuleInfo);
+            }
+        }
+
+        napi_status status = napi_generic_failure;
+        std::string attemptedModuleInfos;
+        for (const auto &candidateModuleInfo : moduleInfoCandidates) {
+            if (!attemptedModuleInfos.empty()) {
+                attemptedModuleInfos += ", ";
+            }
+            attemptedModuleInfos += "'" + candidateModuleInfo + "'";
+            status = napi_load_module_with_info(napiEnv, effectiveModulePath.c_str(), candidateModuleInfo.c_str(),
+                                                module);
             if (status == napi_ok) {
-                LogWarn("OhosPatch loaded target without moduleInfo fallback: " + modulePath);
+                if (candidateModuleInfo != effectiveModuleInfo) {
+                    LogWarn("OhosPatch loaded target with moduleInfo fallback: " + effectiveModulePath + " via " +
+                            candidateModuleInfo);
+                }
                 return true;
             }
             ClearPendingNapiException(napiEnv);
         }
 
         LogError(operation, static_cast<int>(status));
-        LogError("OhosPatch could not load ArkTS module; modulePath=" + modulePath + ", moduleInfo=" + moduleInfo +
-                 ", hostModuleInfo=" + hostModuleInfo_);
+        LogError("OhosPatch cannot load target ArkTS module. requested={" +
+                 DescribePatchTarget(modulePath, moduleInfo, "") + "}, resolvedModulePath='" +
+                 EmptyAsDefault(effectiveModulePath, "<empty>") + "', triedModuleInfo=[" + attemptedModuleInfos +
+                 "], hostModuleInfo='" + EmptyAsDefault(hostModuleInfo_, "<unknown>") +
+                 "'. Check that the patch target path matches the compiled module path, the module/HSP name is "
+                 "correct, the target module is packaged in the app, and OhosPatch.init(context) was called before "
+                 "executeScript.");
         return false;
     }
 
@@ -972,25 +1184,64 @@ class JsvmRuntime
         return false;
     }
 
+    static bool JsvmValueToString(JSVM_Env env, JSVM_Value value, std::string *output)
+    {
+        if (!env || !value || !output) {
+            return false;
+        }
+        JSVM_Value textValue = nullptr;
+        if (OH_JSVM_CoerceToString(env, value, &textValue) != JSVM_OK) {
+            return false;
+        }
+        size_t length = 0;
+        if (OH_JSVM_GetValueStringUtf8(env, textValue, nullptr, 0, &length) != JSVM_OK) {
+            return false;
+        }
+        std::string text(length + 1, '\0');
+        if (OH_JSVM_GetValueStringUtf8(env, textValue, text.data(), text.size(), &length) != JSVM_OK) {
+            return false;
+        }
+        text.resize(length);
+        *output = std::move(text);
+        return true;
+    }
+
+    static void LogAndClearPendingJsvmException(JSVM_Env env, const char *operation)
+    {
+        if (!env) {
+            return;
+        }
+        bool pending = false;
+        JSVM_Status pendingStatus = OH_JSVM_IsExceptionPending(env, &pending);
+        if (pendingStatus != JSVM_OK) {
+            LogError("OH_JSVM_IsExceptionPending", static_cast<int>(pendingStatus));
+            return;
+        }
+        if (!pending) {
+            return;
+        }
+        JSVM_Value exception = nullptr;
+        JSVM_Status clearStatus = OH_JSVM_GetAndClearLastException(env, &exception);
+        if (clearStatus != JSVM_OK) {
+            LogError("OH_JSVM_GetAndClearLastException", static_cast<int>(clearStatus));
+            return;
+        }
+        std::string message;
+        if (!JsvmValueToString(env, exception, &message) || message.empty()) {
+            message = "<unable to stringify JSVM exception>";
+        }
+        LogError(std::string("Patch script exception while ") + (operation ? operation : "executing script") +
+                 ": " + message +
+                 ". Check the patch JavaScript syntax, target path strings, and DSL argument types.");
+    }
+
     static bool JsvmOk(JSVM_Status status, const char *operation, JSVM_Env env)
     {
         if (status == JSVM_OK) {
             return true;
         }
         LogError(operation, static_cast<int>(status));
-        if (env) {
-            bool pending = false;
-            JSVM_Status pendingStatus = OH_JSVM_IsExceptionPending(env, &pending);
-            if (pendingStatus != JSVM_OK) {
-                LogError("OH_JSVM_IsExceptionPending", static_cast<int>(pendingStatus));
-            } else if (pending) {
-                JSVM_Value exception = nullptr;
-                JSVM_Status clearStatus = OH_JSVM_GetAndClearLastException(env, &exception);
-                if (clearStatus != JSVM_OK) {
-                    LogError("OH_JSVM_GetAndClearLastException", static_cast<int>(clearStatus));
-                }
-            }
-        }
+        LogAndClearPendingJsvmException(env, operation);
         return false;
     }
 
@@ -1467,6 +1718,28 @@ class JsvmRuntime
                                              argv.data());
     }
 
+    static napi_value UiBuilderParamCallback(napi_env env, napi_callback_info info)
+    {
+        size_t argc = kMaxArguments;
+        napi_value receiver = nullptr;
+        void *data = nullptr;
+        std::array<napi_value, kMaxArguments> argv{};
+        if (!NapiOk(env, napi_get_cb_info(env, info, &argc, argv.data(), &receiver, &data),
+                    "napi_get_cb_info(component builder parameter)")) {
+            return NapiUndefined(env);
+        }
+        if (!data) {
+            LogError("OhosPatch component builder parameter callback has no context");
+            return NapiUndefined(env);
+        }
+        if (argc > kMaxArguments) {
+            LogError("Component builder parameter arguments were truncated to the OhosPatch limit");
+            argc = kMaxArguments;
+        }
+        return Runtime().InvokeUiBuilderParam(env, static_cast<UiBuilderParamCallbackRecord *>(data), receiver,
+                                              argc, argv.data());
+    }
+
     static napi_value UiEventCaptureCallback(napi_env env, napi_callback_info info)
     {
         size_t argc = kMaxArguments;
@@ -1584,6 +1857,18 @@ class JsvmRuntime
         delete record;
     }
 
+    static void FinalizeUiBuilderParamCallback(napi_env env, void *data, void *)
+    {
+        UiBuilderParamCallbackRecord *record = static_cast<UiBuilderParamCallbackRecord *>(data);
+        if (!record) {
+            return;
+        }
+        DeleteNapiReference(env, record->originalBuilder,
+                            "napi_delete_reference(original component builder parameter)");
+        DeleteNapiReference(env, record->owner, "napi_delete_reference(component builder parameter owner)");
+        delete record;
+    }
+
     static void FinalizeUiEventCallback(napi_env env, void *data, void *)
     {
         UiEventCallbackRecord *record = static_cast<UiEventCallbackRecord *>(data);
@@ -1610,7 +1895,9 @@ class JsvmRuntime
         napi_value result = nullptr;
         napi_status status = napi_call_function(env, receiver, original, argc, argv, &result);
         if (status == napi_pending_exception) {
-            LogError("Original ArkUI component method threw an exception");
+            LogError("Original ArkUI Component method threw an exception while applying patch. component='" +
+                     method->component->className + "', method='" + method->methodName + "', targetKey='" +
+                     method->component->targetKey + "'.");
             return nullptr;
         }
         if (!NapiOk(env, status, "napi_call_function(component original)")) {
@@ -1630,14 +1917,17 @@ class JsvmRuntime
         if ((method->kind == UiMethodKind::PARAM_INITIAL || method->kind == UiMethodKind::PARAM_UPDATE) && argc > 0) {
             ApplyUiValueRules(napiEnv, method->component->targetKey, UiRuleKind::PARAM, argv[0], receiver);
             ApplyUiScopedChildValueRules(napiEnv, method->component->targetKey, UiRuleKind::PARAM, argv[0], receiver);
+            WrapUiScopedBuilderParams(napiEnv, method->component->targetKey, argv[0], receiver);
         } else if (method->kind == UiMethodKind::PARAM_NAMED && argc > 1) {
             ApplyUiNamedParamRule(napiEnv, method->component->targetKey, argv[0], &argv[1], receiver);
             ApplyUiScopedChildNamedParamRule(napiEnv, method->component->targetKey, argv[0], &argv[1], receiver);
+            WrapUiScopedNamedBuilderParam(napiEnv, method->component->targetKey, argv[0], &argv[1], receiver);
         }
 
         bool pushedFrame = false;
-        if (method->kind == UiMethodKind::INITIAL_RENDER) {
+        if (method->kind == UiMethodKind::FINALIZE_CONSTRUCTION) {
             ApplyUiValueRules(napiEnv, method->component->targetKey, UiRuleKind::STATE, receiver, receiver);
+        } else if (method->kind == UiMethodKind::INITIAL_RENDER) {
             pushedFrame = PushUiRenderFrame(method->component->targetKey, receiver);
         } else if (method->kind == UiMethodKind::OBSERVE_CREATION) {
             WrapUiNodeBuilder(napiEnv, method->component->targetKey, argc, argv);
@@ -1647,11 +1937,46 @@ class JsvmRuntime
         if (result &&
             (method->kind == UiMethodKind::PARAM_INITIAL || method->kind == UiMethodKind::PARAM_UPDATE) && argc > 0) {
             ApplyUiParamValuesToOwner(napiEnv, method->component->targetKey, argv[0], receiver);
+            ApplyUiScopedChildParamValuesToOwner(napiEnv, method->component->targetKey, argv[0], receiver);
         } else if (result && method->kind == UiMethodKind::STATE_RESET) {
             ApplyUiValueRules(napiEnv, method->component->targetKey, UiRuleKind::STATE, receiver, receiver);
         }
         if (pushedFrame) {
             PopUiRenderFrame();
+        }
+        return result;
+    }
+
+    napi_value InvokeUiBuilderParam(napi_env napiEnv, UiBuilderParamCallbackRecord *record, napi_value receiver,
+                                    size_t argc, napi_value *argv)
+    {
+        if (!record || !record->originalBuilder) {
+            LogError("Cannot invoke an unavailable component builder parameter");
+            return NapiUndefined(napiEnv);
+        }
+        napi_value original = nullptr;
+        napi_value owner = nullptr;
+        if (!NapiOk(napiEnv, napi_get_reference_value(napiEnv, record->originalBuilder, &original),
+                    "napi_get_reference_value(component builder parameter)") ||
+            !NapiOk(napiEnv, napi_get_reference_value(napiEnv, record->owner, &owner),
+                    "napi_get_reference_value(component builder parameter owner)")) {
+            return NapiUndefined(napiEnv);
+        }
+
+        bool pushed = PushUiScopedChildCreationFrame(napiEnv, record->parentTargetKey, record->childTargetKey,
+                                                      record->childOccurrence, owner);
+        napi_value result = nullptr;
+        napi_status status = napi_call_function(napiEnv, receiver, original, argc, argv, &result);
+        if (pushed) {
+            PopUiScopedChildCreationFrame();
+        }
+        if (status == napi_pending_exception) {
+            LogError("Original Component @BuilderParam callback threw an exception. parentTarget='" +
+                     record->parentTargetKey + "', childTarget='" + record->childTargetKey + "'.");
+            return nullptr;
+        }
+        if (!NapiOk(napiEnv, status, "napi_call_function(component builder parameter)")) {
+            return NapiUndefined(napiEnv);
         }
         return result;
     }
@@ -1678,8 +2003,21 @@ class JsvmRuntime
         size_t eventCaptureCount =
             PrepareUiEventCaptures(napiEnv, record, componentApi, eventCaptures.data(), eventCaptures.size());
 
+        bool pushedScopedChild = false;
+        if (record->hasScopedChild) {
+            napi_value owner = nullptr;
+            pushedScopedChild =
+                NapiOk(napiEnv, napi_get_reference_value(napiEnv, record->owner, &owner),
+                       "napi_get_reference_value(scoped child owner)") &&
+                PushUiScopedChildCreationFrame(napiEnv, record->targetKey, record->childTargetKey,
+                                               record->childOccurrence, owner);
+        }
+
         napi_value result = nullptr;
         napi_status status = napi_call_function(napiEnv, receiver, builder, argc, argv, &result);
+        if (pushedScopedChild) {
+            PopUiScopedChildCreationFrame();
+        }
         RestoreUiEventCaptures(napiEnv, componentApi, eventCaptures.data(), eventCaptureCount);
         RestoreUiWhereCaptures(napiEnv, componentApi, whereCaptures.data(), whereCaptureCount);
         if (status == napi_pending_exception) {
@@ -2225,7 +2563,9 @@ class JsvmRuntime
         napi_value module = nullptr;
         if (!runtime->LoadArkTsModule(napiEnv, modulePath, moduleInfo, "napi_load_module_with_info(import target)",
                                       &module)) {
-            return runtime->ProxyError("Fixit.import could not load the target module");
+            return runtime->ProxyError(
+                ("Fixit.import cannot load target module: " + DescribePatchTarget(modulePath, moduleInfo, exportName))
+                    .c_str());
         }
 
         napi_value imported = nullptr;
@@ -2233,11 +2573,19 @@ class JsvmRuntime
         if (!NapiOk(napiEnv, napi_get_named_property(napiEnv, module, exportName.c_str(), &imported),
                     "napi_get_named_property(import export)") ||
             !NapiOk(napiEnv, napi_typeof(napiEnv, imported, &importedType), "napi_typeof(import export)")) {
-            return runtime->ProxyError("Fixit.import could not resolve the exported class");
+            return runtime->ProxyError(
+                ("Fixit.import cannot find export '" + exportName + "' in target module. Target={" +
+                 DescribePatchTarget(modulePath, moduleInfo, exportName) +
+                 "}. Check the class/export name after # and confirm it is exported from the ArkTS file.")
+                    .c_str());
         }
         if (importedType != napi_function) {
-            LogError("Fixit.import target is not a class or callable export: " + exportName);
-            return runtime->ProxyError("Fixit.import target must be a class or callable export");
+            std::string message = "Fixit.import target export '" + exportName + "' is " +
+                                  DescribeNapiType(importedType) +
+                                  ", expected function/class. Target={" +
+                                  DescribePatchTarget(modulePath, moduleInfo, exportName) + "}.";
+            LogError(message);
+            return runtime->ProxyError(message.c_str());
         }
         return runtime->ImportedNapiValue(imported);
     }
@@ -2683,7 +3031,9 @@ class JsvmRuntime
         }
         napi_status status = napi_call_function(env, receiver, original, argc, argv, result);
         if (status == napi_pending_exception) {
-            LogError("Original ArkTS method threw an exception");
+            LogError("Original ArkTS method threw an exception while calling origin for patch hook. class='" +
+                     hook->className + "', method='" + hook->methodName + "', classMethod=" +
+                     (hook->classMethod ? "true" : "false") + ", targetKey='" + hook->targetKey + "'.");
             if (exceptionPending) {
                 *exceptionPending = true;
             }
@@ -3036,8 +3386,9 @@ class JsvmRuntime
             UiRenderFrame &frame = uiRenderFrames_[frameIndex - 1];
             for (size_t ruleIndex = 0; ruleIndex < uiRuleCount_; ++ruleIndex) {
                 UiRule *rule = uiRules_[ruleIndex].get();
-                if (rule && rule->kind == UiRuleKind::CHILD_PARAM && rule->targetKey == frame.targetKey &&
-                    rule->childTargetKey == childTargetKey) {
+                if (rule && rule->targetKey == frame.targetKey && rule->childTargetKey == childTargetKey &&
+                    (rule->kind == UiRuleKind::CHILD_PARAM || rule->kind == UiRuleKind::ATTRIBUTE ||
+                     rule->kind == UiRuleKind::EVENT)) {
                     return &frame;
                 }
             }
@@ -3067,6 +3418,19 @@ class JsvmRuntime
                 *occurrence = instance.occurrence;
                 return true;
             }
+        }
+
+        for (size_t index = 0; index < frame->childInstanceCount; ++index) {
+            UiChildInstanceOccurrence &instance = frame->childInstances[index];
+            if (instance.childTargetKey != childTargetKey || instance.owner) {
+                continue;
+            }
+            if (!NapiOk(napiEnv, napi_create_reference(napiEnv, owner, 0, &instance.owner),
+                        "napi_create_reference(pending child component owner)")) {
+                return false;
+            }
+            *occurrence = instance.occurrence;
+            return true;
         }
 
         UiNodeTypeCounter *counter = nullptr;
@@ -3105,6 +3469,28 @@ class JsvmRuntime
         return true;
     }
 
+    bool TrackScopedChildOccurrence(UiRenderFrame *frame, const std::string &childTargetKey, uint32_t occurrence)
+    {
+        if (!frame) {
+            return false;
+        }
+        for (size_t index = 0; index < frame->childInstanceCount; ++index) {
+            const UiChildInstanceOccurrence &instance = frame->childInstances[index];
+            if (instance.childTargetKey == childTargetKey && instance.occurrence == occurrence) {
+                return true;
+            }
+        }
+        if (frame->childInstanceCount >= frame->childInstances.size()) {
+            LogError("Component child instance count exceeds the OhosPatch limit");
+            return false;
+        }
+        UiChildInstanceOccurrence &instance = frame->childInstances[frame->childInstanceCount++];
+        instance.childTargetKey = childTargetKey;
+        instance.owner = nullptr;
+        instance.occurrence = occurrence;
+        return true;
+    }
+
     void ApplyUiScopedChildValueRules(napi_env napiEnv, const std::string &childTargetKey, UiRuleKind kind,
                                       napi_value target, napi_value owner)
     {
@@ -3112,17 +3498,23 @@ class JsvmRuntime
             return;
         }
         UiRenderFrame *frame = FindScopedChildFrame(childTargetKey);
+        UiScopedChildCreationFrame *creationFrame = FindActiveScopedChildCreationFrame(childTargetKey);
         uint32_t occurrence = 0;
-        if (!ResolveScopedChildOccurrence(napiEnv, frame, childTargetKey, owner, &occurrence)) {
+        const std::string *parentTargetKey = nullptr;
+        if (creationFrame) {
+            occurrence = creationFrame->occurrence;
+            parentTargetKey = &creationFrame->parentTargetKey;
+        } else if (ResolveScopedChildOccurrence(napiEnv, frame, childTargetKey, owner, &occurrence)) {
+            parentTargetKey = &frame->targetKey;
+        } else {
             return;
         }
         for (size_t index = 0; index < uiRuleCount_; ++index) {
             UiRule *rule = uiRules_[index].get();
-            if (!rule || rule->kind != UiRuleKind::CHILD_PARAM || rule->targetKey != frame->targetKey ||
+            if (!rule || rule->kind != UiRuleKind::CHILD_PARAM || rule->targetKey != *parentTargetKey ||
                 rule->childTargetKey != childTargetKey || rule->occurrence != occurrence) {
                 continue;
             }
-
             napi_value current = nullptr;
             if (!NapiOk(napiEnv, napi_get_named_property(napiEnv, target, rule->propertyName.c_str(), &current),
                         "napi_get_named_property(scoped child component parameter)")) {
@@ -3143,6 +3535,41 @@ class JsvmRuntime
         }
     }
 
+    void ApplyUiScopedChildParamValuesToOwner(napi_env napiEnv, const std::string &childTargetKey, napi_value params,
+                                              napi_value owner)
+    {
+        if (!params || !owner) {
+            return;
+        }
+        UiRenderFrame *frame = FindScopedChildFrame(childTargetKey);
+        UiScopedChildCreationFrame *creationFrame = FindActiveScopedChildCreationFrame(childTargetKey);
+        uint32_t occurrence = 0;
+        const std::string *parentTargetKey = nullptr;
+        if (creationFrame) {
+            occurrence = creationFrame->occurrence;
+            parentTargetKey = &creationFrame->parentTargetKey;
+        } else if (ResolveScopedChildOccurrence(napiEnv, frame, childTargetKey, owner, &occurrence)) {
+            parentTargetKey = &frame->targetKey;
+        } else {
+            return;
+        }
+
+        for (size_t index = 0; index < uiRuleCount_; ++index) {
+            UiRule *rule = uiRules_[index].get();
+            if (!rule || rule->kind != UiRuleKind::CHILD_PARAM || rule->targetKey != *parentTargetKey ||
+                rule->childTargetKey != childTargetKey || rule->occurrence != occurrence) {
+                continue;
+            }
+            napi_value value = nullptr;
+            if (NapiOk(napiEnv, napi_get_named_property(napiEnv, params, rule->propertyName.c_str(), &value),
+                       "napi_get_named_property(scoped child component parameter)") &&
+                NapiOk(napiEnv, napi_set_named_property(napiEnv, owner, rule->propertyName.c_str(), value),
+                       "napi_set_named_property(scoped child component parameter)")) {
+                continue;
+            }
+        }
+    }
+
     void ApplyUiScopedChildNamedParamRule(napi_env napiEnv, const std::string &childTargetKey, napi_value nameValue,
                                           napi_value *value, napi_value owner)
     {
@@ -3159,13 +3586,20 @@ class JsvmRuntime
         }
 
         UiRenderFrame *frame = FindScopedChildFrame(childTargetKey);
+        UiScopedChildCreationFrame *creationFrame = FindActiveScopedChildCreationFrame(childTargetKey);
         uint32_t occurrence = 0;
-        if (!ResolveScopedChildOccurrence(napiEnv, frame, childTargetKey, owner, &occurrence)) {
+        const std::string *parentTargetKey = nullptr;
+        if (creationFrame) {
+            occurrence = creationFrame->occurrence;
+            parentTargetKey = &creationFrame->parentTargetKey;
+        } else if (ResolveScopedChildOccurrence(napiEnv, frame, childTargetKey, owner, &occurrence)) {
+            parentTargetKey = &frame->targetKey;
+        } else {
             return;
         }
         for (size_t index = 0; index < uiRuleCount_; ++index) {
             UiRule *rule = uiRules_[index].get();
-            if (!rule || rule->kind != UiRuleKind::CHILD_PARAM || rule->targetKey != frame->targetKey ||
+            if (!rule || rule->kind != UiRuleKind::CHILD_PARAM || rule->targetKey != *parentTargetKey ||
                 rule->childTargetKey != childTargetKey || rule->occurrence != occurrence ||
                 rule->propertyName != propertyName) {
                 continue;
@@ -3181,6 +3615,156 @@ class JsvmRuntime
                 *value = replacement;
             }
             return;
+        }
+    }
+
+    bool ResolveUiScopedChildContext(napi_env napiEnv, const std::string &childTargetKey, napi_value childOwner,
+                                     std::string *parentTargetKey, uint32_t *occurrence, napi_value *parentOwner)
+    {
+        if (!parentTargetKey || !occurrence || !parentOwner) {
+            return false;
+        }
+        UiScopedChildCreationFrame *creationFrame = FindActiveScopedChildCreationFrame(childTargetKey);
+        if (creationFrame) {
+            *parentTargetKey = creationFrame->parentTargetKey;
+            *occurrence = creationFrame->occurrence;
+            return creationFrame->owner &&
+                   NapiOk(napiEnv, napi_get_reference_value(napiEnv, creationFrame->owner, parentOwner),
+                          "napi_get_reference_value(scoped builder parameter owner)");
+        }
+
+        UiRenderFrame *frame = FindScopedChildFrame(childTargetKey);
+        if (!frame || !ResolveScopedChildOccurrence(napiEnv, frame, childTargetKey, childOwner, occurrence)) {
+            return false;
+        }
+        *parentTargetKey = frame->targetKey;
+        *parentOwner = frame->owner;
+        return *parentOwner != nullptr;
+    }
+
+    bool WrapUiBuilderParamValue(napi_env napiEnv, napi_value value, const std::string &parentTargetKey,
+                                 const std::string &childTargetKey, uint32_t occurrence, napi_value owner,
+                                 napi_value *wrapped)
+    {
+        if (!value || !wrapped || !owner || !HasActiveSlotRule(parentTargetKey, childTargetKey, occurrence)) {
+            return false;
+        }
+        napi_valuetype valueType = napi_undefined;
+        if (!NapiOk(napiEnv, napi_typeof(napiEnv, value, &valueType),
+                    "napi_typeof(component builder parameter)") ||
+            valueType != napi_function) {
+            return false;
+        }
+
+        constexpr const char *kWrappedMarker = "__ohospatchBuilderParam";
+        bool isWrapped = false;
+        napi_value marker = nullptr;
+        if (NapiOk(napiEnv, napi_has_named_property(napiEnv, value, kWrappedMarker, &isWrapped),
+                   "napi_has_named_property(component builder parameter marker)") &&
+            isWrapped &&
+            NapiOk(napiEnv, napi_get_named_property(napiEnv, value, kWrappedMarker, &marker),
+                   "napi_get_named_property(component builder parameter marker)")) {
+            bool markerValue = false;
+            if (NapiOk(napiEnv, napi_get_value_bool(napiEnv, marker, &markerValue),
+                       "napi_get_value_bool(component builder parameter marker)") &&
+                markerValue) {
+                *wrapped = value;
+                return true;
+            }
+        }
+
+        UiBuilderParamCallbackRecord *record = new (std::nothrow) UiBuilderParamCallbackRecord();
+        if (!record) {
+            LogError("Cannot allocate OhosPatch UiBuilderParamCallbackRecord");
+            return false;
+        }
+        record->env = napiEnv;
+        record->parentTargetKey = parentTargetKey;
+        record->childTargetKey = childTargetKey;
+        record->childOccurrence = occurrence;
+        if (!NapiOk(napiEnv, napi_create_reference(napiEnv, value, 1, &record->originalBuilder),
+                    "napi_create_reference(component builder parameter)") ||
+            !NapiOk(napiEnv, napi_create_reference(napiEnv, owner, 0, &record->owner),
+                    "napi_create_reference(component builder parameter owner)")) {
+            FinalizeUiBuilderParamCallback(napiEnv, record, nullptr);
+            return false;
+        }
+
+        napi_value wrapper = nullptr;
+        if (!NapiOk(napiEnv,
+                    napi_create_function(napiEnv, "ohospatchBuilderParam", NAPI_AUTO_LENGTH,
+                                         UiBuilderParamCallback, record, &wrapper),
+                    "napi_create_function(component builder parameter)") ||
+            !NapiOk(napiEnv,
+                    napi_add_finalizer(napiEnv, wrapper, record, FinalizeUiBuilderParamCallback, nullptr, nullptr),
+                    "napi_add_finalizer(component builder parameter)")) {
+            FinalizeUiBuilderParamCallback(napiEnv, record, nullptr);
+            return false;
+        }
+        napi_value markerValue = nullptr;
+        if (NapiOk(napiEnv, napi_get_boolean(napiEnv, true, &markerValue),
+                   "napi_get_boolean(component builder parameter marker)")) {
+            NapiOk(napiEnv, napi_set_named_property(napiEnv, wrapper, kWrappedMarker, markerValue),
+                   "napi_set_named_property(component builder parameter marker)");
+        }
+        *wrapped = wrapper;
+        return true;
+    }
+
+    void WrapUiScopedBuilderParams(napi_env napiEnv, const std::string &childTargetKey, napi_value params,
+                                   napi_value childOwner)
+    {
+        if (!params || !TargetReceivesSlotRules(childTargetKey)) {
+            return;
+        }
+        std::string parentTargetKey;
+        uint32_t occurrence = 0;
+        napi_value parentOwner = nullptr;
+        if (!ResolveUiScopedChildContext(napiEnv, childTargetKey, childOwner, &parentTargetKey, &occurrence,
+                                         &parentOwner)) {
+            return;
+        }
+
+        napi_value propertyNames = nullptr;
+        uint32_t propertyCount = 0;
+        if (!NapiOk(napiEnv, napi_get_property_names(napiEnv, params, &propertyNames),
+                    "napi_get_property_names(component builder parameters)") ||
+            !NapiOk(napiEnv, napi_get_array_length(napiEnv, propertyNames, &propertyCount),
+                    "napi_get_array_length(component builder parameters)")) {
+            return;
+        }
+        for (uint32_t index = 0; index < propertyCount; ++index) {
+            napi_value property = nullptr;
+            napi_value value = nullptr;
+            napi_value wrapped = nullptr;
+            if (!NapiOk(napiEnv, napi_get_element(napiEnv, propertyNames, index, &property),
+                        "napi_get_element(component builder parameter name)") ||
+                !NapiOk(napiEnv, napi_get_property(napiEnv, params, property, &value),
+                        "napi_get_property(component builder parameter)") ||
+                !WrapUiBuilderParamValue(napiEnv, value, parentTargetKey, childTargetKey, occurrence, parentOwner,
+                                         &wrapped)) {
+                continue;
+            }
+            NapiOk(napiEnv, napi_set_property(napiEnv, params, property, wrapped),
+                   "napi_set_property(component builder parameter)");
+        }
+    }
+
+    void WrapUiScopedNamedBuilderParam(napi_env napiEnv, const std::string &childTargetKey, napi_value,
+                                       napi_value *value, napi_value childOwner)
+    {
+        if (!value || !*value || !TargetReceivesSlotRules(childTargetKey)) {
+            return;
+        }
+        std::string parentTargetKey;
+        uint32_t occurrence = 0;
+        napi_value parentOwner = nullptr;
+        napi_value wrapped = nullptr;
+        if (ResolveUiScopedChildContext(napiEnv, childTargetKey, childOwner, &parentTargetKey, &occurrence,
+                                        &parentOwner) &&
+            WrapUiBuilderParamValue(napiEnv, *value, parentTargetKey, childTargetKey, occurrence, parentOwner,
+                                    &wrapped)) {
+            *value = wrapped;
         }
     }
 
@@ -3232,7 +3816,9 @@ class JsvmRuntime
                 ContainsSelector(frame.selectedSelectors.data(), frame.selectedSelectorCount, rule->selectorKey)) {
                 continue;
             }
-            LogWarn("Component node selector did not match: " + rule->selectorKey);
+            LogWarn("Cannot find component node for patch selector. Rule={" + DescribeUiRule(rule) +
+                    "}. Check the node type, occurrence index, where attributes, and whether conditional rendering "
+                    "actually creates this node in the current render pass.");
             for (size_t candidateIndex = index; candidateIndex < uiRuleCount_; ++candidateIndex) {
                 UiRule *candidate = uiRules_[candidateIndex].get();
                 if (candidate && candidate->targetKey == rule->targetKey &&
@@ -3253,6 +3839,67 @@ class JsvmRuntime
         frame.counterCount = 0;
         frame.childInstanceCount = 0;
         frame.selectedSelectorCount = 0;
+    }
+
+    bool PushUiScopedChildCreationFrame(napi_env napiEnv, const std::string &parentTargetKey,
+                                        const std::string &childTargetKey, uint32_t occurrence, napi_value owner)
+    {
+        if (uiScopedChildCreationDepth_ >= uiScopedChildCreationFrames_.size()) {
+            LogError("Scoped child component nesting exceeds the OhosPatch limit");
+            return false;
+        }
+        UiScopedChildCreationFrame &frame = uiScopedChildCreationFrames_[uiScopedChildCreationDepth_++];
+        frame.parentTargetKey = parentTargetKey;
+        frame.childTargetKey = childTargetKey;
+        frame.occurrence = occurrence;
+        frame.owner = nullptr;
+        frame.counterCount = 0;
+        if (owner && !NapiOk(napiEnv, napi_create_reference(napiEnv, owner, 0, &frame.owner),
+                             "napi_create_reference(scoped child owner)")) {
+            frame.parentTargetKey.clear();
+            frame.childTargetKey.clear();
+            frame.occurrence = 0;
+            frame.counterCount = 0;
+            --uiScopedChildCreationDepth_;
+            return false;
+        }
+        return true;
+    }
+
+    void PopUiScopedChildCreationFrame()
+    {
+        if (uiScopedChildCreationDepth_ == 0) {
+            return;
+        }
+        UiScopedChildCreationFrame &frame = uiScopedChildCreationFrames_[--uiScopedChildCreationDepth_];
+        DeleteNapiReference(hostEnv_, frame.owner, "napi_delete_reference(scoped child owner)");
+        frame.parentTargetKey.clear();
+        frame.childTargetKey.clear();
+        frame.occurrence = 0;
+        frame.owner = nullptr;
+        frame.counterCount = 0;
+    }
+
+    UiScopedChildCreationFrame *FindActiveScopedChildCreationFrame(const std::string &childTargetKey)
+    {
+        for (size_t index = uiScopedChildCreationDepth_; index > 0; --index) {
+            UiScopedChildCreationFrame &frame = uiScopedChildCreationFrames_[index - 1];
+            if (frame.childTargetKey == childTargetKey) {
+                return &frame;
+            }
+        }
+        return nullptr;
+    }
+
+    UiScopedChildCreationFrame *FindActiveParentScopedChildCreationFrame(const std::string &parentTargetKey)
+    {
+        for (size_t index = uiScopedChildCreationDepth_; index > 0; --index) {
+            UiScopedChildCreationFrame &frame = uiScopedChildCreationFrames_[index - 1];
+            if (frame.parentTargetKey == parentTargetKey) {
+                return &frame;
+            }
+        }
+        return nullptr;
     }
 
     static bool ContainsSelector(const std::string *selectors, size_t count, const std::string &selector)
@@ -3276,9 +3923,66 @@ class JsvmRuntime
         return nullptr;
     }
 
+    bool ResolveUiOccurrence(UiRenderFrame *frame, const std::string &nodeType, uint32_t *occurrence)
+    {
+        if (!frame || !occurrence) {
+            return false;
+        }
+        UiNodeTypeCounter *counter = nullptr;
+        for (size_t index = 0; index < frame->counterCount; ++index) {
+            if (frame->counters[index].nodeType == nodeType) {
+                counter = &frame->counters[index];
+                break;
+            }
+        }
+        if (!counter) {
+            if (frame->counterCount >= frame->counters.size()) {
+                LogError("Component node type count exceeds the OhosPatch limit");
+                return false;
+            }
+            counter = &frame->counters[frame->counterCount++];
+            counter->nodeType = nodeType;
+            counter->count = 0;
+        }
+        *occurrence = counter->count++;
+        return true;
+    }
+
+    bool ResolveUiScopedOccurrence(UiScopedChildCreationFrame *frame, const std::string &nodeType,
+                                   uint32_t *occurrence)
+    {
+        if (!frame || !occurrence) {
+            return false;
+        }
+        UiNodeTypeCounter *counter = nullptr;
+        for (size_t index = 0; index < frame->counterCount; ++index) {
+            if (frame->counters[index].nodeType == nodeType) {
+                counter = &frame->counters[index];
+                break;
+            }
+        }
+        if (!counter) {
+            if (frame->counterCount >= frame->counters.size()) {
+                LogError("Component slot node type count exceeds the OhosPatch limit");
+                return false;
+            }
+            counter = &frame->counters[frame->counterCount++];
+            counter->nodeType = nodeType;
+            counter->count = 0;
+        }
+        *occurrence = counter->count++;
+        return true;
+    }
+
     bool RuleCouldMatchNode(const UiRule *rule, const UiNodeCallbackRecord *record) const
     {
         if (!rule || !record || rule->targetKey != record->targetKey || rule->nodeType != record->nodeType) {
+            return false;
+        }
+        if (rule->childTargetKey != record->childTargetKey) {
+            return false;
+        }
+        if (!rule->childTargetKey.empty() && rule->childOccurrence != record->childOccurrence) {
             return false;
         }
         return rule->whereConditionCount > 0 || rule->occurrence == record->occurrence;
@@ -3473,9 +4177,10 @@ class JsvmRuntime
 
     void WrapUiNodeBuilder(napi_env napiEnv, const std::string &targetKey, size_t argc, napi_value *argv)
     {
-        if (uiRenderDepth_ == 0 || argc < 2 || !argv || uiRenderFrames_[uiRenderDepth_ - 1].targetKey != targetKey) {
+        if (argc < 2 || !argv) {
             return;
         }
+        UiRenderFrame *renderFrame = FindUiRenderFrame(targetKey);
         napi_valuetype builderType = napi_undefined;
         if (!NapiOk(napiEnv, napi_typeof(napiEnv, argv[0], &builderType), "napi_typeof(component node builder)") ||
             builderType != napi_function) {
@@ -3483,39 +4188,110 @@ class JsvmRuntime
         }
 
         std::string nodeType;
-        if (!ResolveUiNodeType(napiEnv, targetKey, argv[1], &nodeType)) {
+        UiScopedChildCreationFrame *slotFrame = FindActiveScopedChildCreationFrame(targetKey);
+        bool inSlotScope = false;
+        std::string slotParentTargetKey;
+        std::string slotChildTargetKey;
+        uint32_t slotChildOccurrence = 0;
+        napi_value slotOwner = nullptr;
+        if (slotFrame && HasActiveSlotRule(slotFrame->parentTargetKey, targetKey, slotFrame->occurrence)) {
+            inSlotScope = true;
+            slotParentTargetKey = slotFrame->parentTargetKey;
+            slotChildTargetKey = targetKey;
+            slotChildOccurrence = slotFrame->occurrence;
+            if (slotFrame->owner) {
+                NapiOk(napiEnv, napi_get_reference_value(napiEnv, slotFrame->owner, &slotOwner),
+                       "napi_get_reference_value(active slot owner)");
+            }
+        } else {
+            slotFrame = FindActiveParentScopedChildCreationFrame(targetKey);
+            if (slotFrame && HasActiveSlotRule(slotFrame->parentTargetKey, slotFrame->childTargetKey,
+                                               slotFrame->occurrence)) {
+                inSlotScope = true;
+                slotParentTargetKey = slotFrame->parentTargetKey;
+                slotChildTargetKey = slotFrame->childTargetKey;
+                slotChildOccurrence = slotFrame->occurrence;
+                if (slotFrame->owner) {
+                    NapiOk(napiEnv, napi_get_reference_value(napiEnv, slotFrame->owner, &slotOwner),
+                           "napi_get_reference_value(parent slot owner)");
+                }
+            }
+        }
+        if (!inSlotScope) {
+            UiRenderFrame *parentFrame = renderFrame ? FindScopedChildFrame(targetKey) : nullptr;
+            uint32_t resolvedOccurrence = 0;
+            if (parentFrame && parentFrame != renderFrame &&
+                ResolveScopedChildOccurrence(napiEnv, parentFrame, targetKey, renderFrame->owner,
+                                              &resolvedOccurrence) &&
+                HasActiveSlotRule(parentFrame->targetKey, targetKey, resolvedOccurrence)) {
+                inSlotScope = true;
+                slotParentTargetKey = parentFrame->targetKey;
+                slotChildTargetKey = targetKey;
+                slotChildOccurrence = resolvedOccurrence;
+                slotOwner = parentFrame->owner;
+            }
+        }
+        if (!inSlotScope && !renderFrame) {
             return;
         }
-        UiRenderFrame &frame = uiRenderFrames_[uiRenderDepth_ - 1];
-        UiNodeTypeCounter *counter = nullptr;
-        for (size_t index = 0; index < frame.counterCount; ++index) {
-            if (frame.counters[index].nodeType == nodeType) {
-                counter = &frame.counters[index];
-                break;
-            }
-        }
-        if (!counter) {
-            if (frame.counterCount >= frame.counters.size()) {
-                LogError("Component node type count exceeds the OhosPatch limit");
-                return;
-            }
-            counter = &frame.counters[frame.counterCount++];
-            counter->nodeType = nodeType;
-            counter->count = 0;
-        }
-        uint32_t occurrence = counter->count++;
-
+        const std::string &ruleTargetKey = inSlotScope ? slotParentTargetKey : targetKey;
+        bool hasNativeNode = ResolveUiNodeType(napiEnv, ruleTargetKey, argv[1], &nodeType);
+        uint32_t occurrence = 0;
+        bool hasNativeOccurrence = hasNativeNode &&
+                                   (inSlotScope && slotFrame
+                                        ? ResolveUiScopedOccurrence(slotFrame, nodeType, &occurrence)
+                                        : ResolveUiOccurrence(renderFrame, nodeType, &occurrence));
         bool hasMatchingRule = false;
-        for (size_t index = 0; index < uiRuleCount_; ++index) {
-            UiRule *rule = uiRules_[index].get();
-            if (rule && (rule->kind == UiRuleKind::ATTRIBUTE || rule->kind == UiRuleKind::EVENT) &&
-                rule->targetKey == targetKey && rule->nodeType == nodeType &&
-                (rule->whereConditionCount > 0 || rule->occurrence == occurrence)) {
-                hasMatchingRule = true;
-                break;
+        if (hasNativeOccurrence) {
+            for (size_t index = 0; index < uiRuleCount_; ++index) {
+                UiRule *rule = uiRules_[index].get();
+                if (rule && (rule->kind == UiRuleKind::ATTRIBUTE || rule->kind == UiRuleKind::EVENT) &&
+                    rule->targetKey == ruleTargetKey && rule->nodeType == nodeType &&
+                    ((!inSlotScope && rule->childTargetKey.empty()) ||
+                     (inSlotScope && rule->childTargetKey == slotChildTargetKey &&
+                      rule->childOccurrence == slotChildOccurrence)) &&
+                    (rule->whereConditionCount > 0 || rule->occurrence == occurrence)) {
+                    hasMatchingRule = true;
+                    break;
+                }
             }
         }
-        if (!hasMatchingRule) {
+
+        std::string customNodeName;
+        bool hasCustomNodeName = TryNapiNamedString(napiEnv, argv[1], "name", &customNodeName);
+        std::string childTargetKey;
+        uint32_t childOccurrence = 0;
+        bool hasScopedChild = false;
+        if (hasCustomNodeName && renderFrame) {
+            for (size_t index = 0; index < uiRuleCount_; ++index) {
+                UiRule *rule = uiRules_[index].get();
+                bool supportsScopedChild =
+                    rule && rule->targetKey == targetKey && rule->childClassName == customNodeName &&
+                    (rule->kind == UiRuleKind::CHILD_PARAM ||
+                     ((rule->kind == UiRuleKind::ATTRIBUTE || rule->kind == UiRuleKind::EVENT) &&
+                      !rule->childTargetKey.empty()));
+                if (!supportsScopedChild) {
+                    continue;
+                }
+                if (!hasScopedChild) {
+                    childTargetKey = rule->childTargetKey;
+                    if (!ResolveUiOccurrence(renderFrame, childTargetKey, &childOccurrence)) {
+                        return;
+                    }
+                    if (!TrackScopedChildOccurrence(renderFrame, childTargetKey, childOccurrence)) {
+                        return;
+                    }
+                    hasScopedChild = true;
+                }
+                if (rule->childTargetKey == childTargetKey &&
+                    (rule->kind == UiRuleKind::CHILD_PARAM || rule->childOccurrence == childOccurrence)) {
+                    hasMatchingRule = true;
+                    break;
+                }
+            }
+        }
+
+        if (!hasMatchingRule || (!hasNativeOccurrence && !hasScopedChild)) {
             return;
         }
 
@@ -3525,14 +4301,24 @@ class JsvmRuntime
             return;
         }
         record->env = napiEnv;
-        record->targetKey = targetKey;
+        record->targetKey = ruleTargetKey;
         record->nodeType = nodeType;
         record->occurrence = occurrence;
+        record->hasScopedChild = hasScopedChild;
+        record->childTargetKey = inSlotScope ? slotChildTargetKey : childTargetKey;
+        record->childOccurrence = inSlotScope ? slotChildOccurrence : childOccurrence;
+        napi_value owner = inSlotScope ? slotOwner : (renderFrame ? renderFrame->owner : nullptr);
+        if (!owner) {
+            LogError("Cannot wrap Component node builder because its owner is unavailable. target='" +
+                     ruleTargetKey + "'.");
+            delete record;
+            return;
+        }
         if (!NapiOk(napiEnv, napi_create_reference(napiEnv, argv[0], 1, &record->originalBuilder),
                     "napi_create_reference(component node builder)") ||
             !NapiOk(napiEnv, napi_create_reference(napiEnv, argv[1], 1, &record->componentApi),
                     "napi_create_reference(component API)") ||
-            !NapiOk(napiEnv, napi_create_reference(napiEnv, frame.owner, 0, &record->owner),
+            !NapiOk(napiEnv, napi_create_reference(napiEnv, owner, 0, &record->owner),
                     "napi_create_reference(component owner)")) {
             FinalizeUiNodeCallback(napiEnv, record, nullptr);
             return;
@@ -3584,7 +4370,10 @@ class JsvmRuntime
                     !NapiOk(napiEnv, napi_typeof(napiEnv, attribute, &attributeType),
                             "napi_typeof(component where attribute)") ||
                     attributeType != napi_function) {
-                    LogError(record->nodeType + "." + attributeName + " is not an attribute function");
+                    LogError("Cannot capture Component node selector condition: attribute '" + attributeName +
+                             "' is not callable on node type '" + record->nodeType +
+                             "'. Check the where selector; only compile-time fixed attributes that are invoked in "
+                             "the builder can be used for matching.");
                     continue;
                 }
 
@@ -3733,7 +4522,10 @@ class JsvmRuntime
                 !NapiOk(napiEnv, napi_typeof(napiEnv, registrar, &registrarType),
                         "napi_typeof(component event registrar)") ||
                 registrarType != napi_function) {
-                LogError(rule->nodeType + "." + rule->eventName + " is not an event registrar");
+                LogError("Cannot patch Component event: node type '" + rule->nodeType + "' does not expose event '" +
+                         rule->eventName + "' as a callable registrar. Rule={" + DescribeUiRule(rule) +
+                         "}. Check the event name, for example onClick/onChange, and confirm this ArkUI node supports "
+                         "it.");
                 continue;
             }
 
@@ -3819,7 +4611,10 @@ class JsvmRuntime
                 !NapiOk(napiEnv, napi_typeof(napiEnv, attribute, &attributeType),
                         "napi_typeof(component attribute)") ||
                 attributeType != napi_function) {
-                LogError(rule->nodeType + "." + rule->attributeName + " is not an attribute function");
+                LogError("Cannot patch Component attribute: node type '" + rule->nodeType +
+                         "' does not expose attribute '" + rule->attributeName +
+                         "' as a callable function. Rule={" + DescribeUiRule(rule) +
+                         "}. Check the attribute name and confirm this ArkUI node supports it.");
                 continue;
             }
 
@@ -3966,6 +4761,27 @@ class JsvmRuntime
         return true;
     }
 
+    bool ParseUiOptionalChildScope(napi_env napiEnv, napi_value spec, UiRule *rule)
+    {
+        if (!rule) {
+            return false;
+        }
+        bool hasChildTarget = false;
+        if (!NapiOk(napiEnv, napi_has_named_property(napiEnv, spec, "childTargetKey", &hasChildTarget),
+                    "napi_has_named_property(component child scope)")) {
+            return false;
+        }
+        if (!hasChildTarget) {
+            return true;
+        }
+        return NapiNamedString(napiEnv, spec, "childClassName", &rule->childClassName) &&
+               NapiNamedString(napiEnv, spec, "childModulePath", &rule->childModulePath) &&
+               NapiNamedString(napiEnv, spec, "childModuleInfo", &rule->childModuleInfo) &&
+               NapiNamedString(napiEnv, spec, "childExportName", &rule->childExportName) &&
+               NapiNamedString(napiEnv, spec, "childTargetKey", &rule->childTargetKey) &&
+               NapiNamedUint32(napiEnv, spec, "childOccurrence", &rule->childOccurrence);
+    }
+
     bool ParseUiRule(napi_env napiEnv, napi_value spec, std::unique_ptr<UiRule> *output)
     {
         std::unique_ptr<UiRule> rule(new (std::nothrow) UiRule());
@@ -4001,6 +4817,7 @@ class JsvmRuntime
             napi_value attrHandler = nullptr;
             bool hasAttrHandler = false;
             if (!ParseUiNodeSelector(napiEnv, spec, rule.get()) ||
+                !ParseUiOptionalChildScope(napiEnv, spec, rule.get()) ||
                 !NapiNamedString(napiEnv, spec, "attributeName", &rule->attributeName) ||
                 !NapiOk(napiEnv, napi_get_named_property(napiEnv, spec, "attrHandler", &attrHandler),
                         "napi_get_named_property(component attribute handler flag)") ||
@@ -4018,6 +4835,7 @@ class JsvmRuntime
         } else if (kind == "event") {
             rule->kind = UiRuleKind::EVENT;
             if (!ParseUiNodeSelector(napiEnv, spec, rule.get()) ||
+                !ParseUiOptionalChildScope(napiEnv, spec, rule.get()) ||
                 !NapiNamedString(napiEnv, spec, "eventName", &rule->eventName)) {
                 return false;
             }
@@ -4063,6 +4881,32 @@ class JsvmRuntime
         return false;
     }
 
+    bool TargetReceivesSlotRules(const std::string &targetKey) const
+    {
+        for (size_t index = 0; index < uiRuleCount_; ++index) {
+            UiRule *rule = uiRules_[index].get();
+            if (rule && (rule->kind == UiRuleKind::ATTRIBUTE || rule->kind == UiRuleKind::EVENT) &&
+                rule->childTargetKey == targetKey) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool HasActiveSlotRule(const std::string &parentTargetKey, const std::string &childTargetKey,
+                           uint32_t childOccurrence) const
+    {
+        for (size_t index = 0; index < uiRuleCount_; ++index) {
+            UiRule *rule = uiRules_[index].get();
+            if (rule && (rule->kind == UiRuleKind::ATTRIBUTE || rule->kind == UiRuleKind::EVENT) &&
+                rule->targetKey == parentTargetKey && rule->childTargetKey == childTargetKey &&
+                rule->childOccurrence == childOccurrence) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     bool IsUiComponentHookInstalled(const std::string &targetKey) const
     {
         for (size_t componentIndex = 0; componentIndex < uiComponentHookCount_; ++componentIndex) {
@@ -4089,7 +4933,10 @@ class JsvmRuntime
             return false;
         }
         if (originalType != napi_function) {
-            LogError(component->className + "." + methodName + " is not available for component patching");
+            LogError("Cannot patch Component '" + component->className + "': required lifecycle method '" +
+                     methodName + "' is " + DescribeNapiType(originalType) +
+                     ", expected function. This usually means the target is not the generated Component class you "
+                     "intended, or the app was built with an incompatible Component/ComponentV2 shape.");
             return false;
         }
 
@@ -4150,14 +4997,33 @@ class JsvmRuntime
         napi_value module = nullptr;
         if (!LoadArkTsModule(napiEnv, rule->modulePath, rule->moduleInfo,
                              "napi_load_module_with_info(component target)", &module)) {
+            LogError("Cannot install Component patch because target module was not found. Rule={" +
+                     DescribeUiRule(rule) + "}.");
             return false;
         }
         napi_value constructor = nullptr;
         napi_value holder = nullptr;
         if (!NapiOk(napiEnv, napi_get_named_property(napiEnv, module, rule->exportName.c_str(), &constructor),
-                    "napi_get_named_property(component export)") ||
-            !NapiOk(napiEnv, napi_get_named_property(napiEnv, constructor, "prototype", &holder),
+                    "napi_get_named_property(component export)")) {
+            LogError("Cannot find Component export '" + rule->exportName + "'. Rule={" + DescribeUiRule(rule) +
+                     "}. Check the class name after # and confirm the Component class is exported.");
+            return false;
+        }
+        napi_valuetype constructorType = napi_undefined;
+        if (!NapiOk(napiEnv, napi_typeof(napiEnv, constructor, &constructorType),
+                    "napi_typeof(component export)")) {
+            return false;
+        }
+        if (constructorType != napi_function) {
+            LogError("Cannot patch Component export '" + rule->exportName + "': resolved value is " +
+                     DescribeNapiType(constructorType) + ", expected class/function. Rule={" +
+                     DescribeUiRule(rule) + "}.");
+            return false;
+        }
+        if (!NapiOk(napiEnv, napi_get_named_property(napiEnv, constructor, "prototype", &holder),
                     "napi_get_named_property(component prototype)")) {
+            LogError("Cannot patch Component export '" + rule->exportName +
+                     "': prototype is unavailable. Rule={" + DescribeUiRule(rule) + "}.");
             return false;
         }
 
@@ -4176,11 +5042,13 @@ class JsvmRuntime
 
         UiComponentHook *componentPointer = component.get();
         uiComponentHooks_[uiComponentHookCount_++] = std::move(component);
-        bool needsParam =
-            TargetNeedsRuleKind(rule->targetKey, UiRuleKind::PARAM) || TargetReceivesScopedChildParam(rule->targetKey);
+        bool needsParam = TargetNeedsRuleKind(rule->targetKey, UiRuleKind::PARAM) ||
+                          TargetReceivesScopedChildParam(rule->targetKey) ||
+                          TargetReceivesSlotRules(rule->targetKey);
         bool needsState = TargetNeedsRuleKind(rule->targetKey, UiRuleKind::STATE);
         bool needsNodes = TargetNeedsRuleKind(rule->targetKey, UiRuleKind::ATTRIBUTE) ||
-                          TargetNeedsRuleKind(rule->targetKey, UiRuleKind::EVENT);
+                          TargetNeedsRuleKind(rule->targetKey, UiRuleKind::EVENT) ||
+                          TargetReceivesSlotRules(rule->targetKey);
         bool needsChildScope = TargetNeedsRuleKind(rule->targetKey, UiRuleKind::CHILD_PARAM);
         bool hasV1Initializer = false;
         bool hasV2Initializer = false;
@@ -4206,14 +5074,21 @@ class JsvmRuntime
             }
         } else {
             if (!hasV2Initializer || !hasV2StateReset) {
-                LogError(componentPointer->className + " is not a supported ComponentV1 or ComponentV2 target");
+                LogError("Cannot patch Component '" + componentPointer->className +
+                         "': it does not look like a supported ComponentV1 or ComponentV2 generated class. Rule={" +
+                         DescribeUiRule(rule) +
+                         "}. Check that the target path points to the generated custom Component class, not a model "
+                         "or helper class.");
                 return false;
             }
             if (needsParam) {
                 if (!HasUiMethod(napiEnv, holder, "updateParam", &hasV2Updater) ||
                     !HasUiMethod(napiEnv, holder, "resetParam", &hasV2Resetter) || !hasV2Updater ||
                     !hasV2Resetter) {
-                    LogError(componentPointer->className + " does not expose the ComponentV2 parameter adapter");
+                    LogError("Cannot patch ComponentV2 parameter for '" + componentPointer->className +
+                             "': updateParam/resetParam adapter methods are missing. Rule={" + DescribeUiRule(rule) +
+                             "}. Check whether this ComponentV2 actually declares @Param fields, and whether the "
+                             "target points to the right Component class.");
                     return false;
                 }
                 if (!InstallUiMethod(napiEnv, componentPointer, holder, "initParam", UiMethodKind::PARAM_NAMED) ||
@@ -4228,11 +5103,16 @@ class JsvmRuntime
                 return false;
             }
         }
-        if ((needsState || needsNodes || needsChildScope) &&
+        if (needsState &&
+            !InstallUiMethod(napiEnv, componentPointer, holder, "finalizeConstruction",
+                             UiMethodKind::FINALIZE_CONSTRUCTION)) {
+            return false;
+        }
+        if ((needsNodes || needsChildScope) &&
             !InstallUiMethod(napiEnv, componentPointer, holder, "initialRender", UiMethodKind::INITIAL_RENDER)) {
             return false;
         }
-        if (needsNodes &&
+        if ((needsNodes || needsChildScope) &&
             !InstallUiMethod(napiEnv, componentPointer, holder, "observeComponentCreation2",
                              UiMethodKind::OBSERVE_CREATION)) {
             return false;
@@ -4282,6 +5162,23 @@ class JsvmRuntime
                     return false;
                 }
                 childRule->kind = UiRuleKind::PARAM;
+                childRule->className = rule->childClassName;
+                childRule->modulePath = rule->childModulePath;
+                childRule->moduleInfo = rule->childModuleInfo;
+                childRule->exportName = rule->childExportName;
+                childRule->targetKey = rule->childTargetKey;
+                if (!InstallUiComponentHook(napiEnv, childRule.get())) {
+                    return false;
+                }
+            }
+            if ((rule->kind == UiRuleKind::ATTRIBUTE || rule->kind == UiRuleKind::EVENT) &&
+                !rule->childTargetKey.empty() && !IsUiComponentHookInstalled(rule->childTargetKey)) {
+                std::unique_ptr<UiRule> childRule(new (std::nothrow) UiRule());
+                if (!childRule) {
+                    LogError("Cannot allocate OhosPatch slot component install rule");
+                    return false;
+                }
+                childRule->kind = UiRuleKind::ATTRIBUTE;
                 childRule->className = rule->childClassName;
                 childRule->modulePath = rule->childModulePath;
                 childRule->moduleInfo = rule->childModuleInfo;
@@ -4513,13 +5410,6 @@ class JsvmRuntime
             if (exceptionPending) {
                 JSVM_Value exception = nullptr;
                 OH_JSVM_GetAndClearLastException(env_, &exception);
-                JSVM_Value messageValue = nullptr;
-                if (OH_JSVM_GetNamedProperty(env_, exception, "message", &messageValue) == JSVM_OK) {
-                    std::string message;
-                    if (JsvmString(messageValue, &message) && !message.empty()) {
-                        LogError("OhosPatch Run exception: " + message);
-                    }
-                }
             }
         }
         bool closed = JsvmOk(OH_JSVM_CloseHandleScope(env_, scope), "OH_JSVM_CloseHandleScope", env_);
@@ -4589,17 +5479,36 @@ class JsvmRuntime
 
         napi_value module = nullptr;
         if (!LoadArkTsModule(napiEnv, modulePath, moduleInfo, "napi_load_module_with_info(patch target)", &module)) {
+            LogError("Cannot install method patch because target module was not found. Target={" +
+                     DescribePatchTarget(modulePath, moduleInfo, exportName, methodName) + "}.");
             return false;
         }
 
         napi_value constructor = nullptr;
         if (!NapiOk(napiEnv, napi_get_named_property(napiEnv, module, exportName.c_str(), &constructor),
                     "napi_get_named_property(class export)")) {
+            LogError("Cannot install method patch: export '" + exportName + "' was not found. Target={" +
+                     DescribePatchTarget(modulePath, moduleInfo, exportName, methodName) +
+                     "}. Check the class name after # and confirm the ArkTS file exports it.");
+            return false;
+        }
+        napi_valuetype constructorType = napi_undefined;
+        if (!NapiOk(napiEnv, napi_typeof(napiEnv, constructor, &constructorType),
+                    "napi_typeof(class export)")) {
+            return false;
+        }
+        if (constructorType != napi_function) {
+            LogError("Cannot install method patch: export '" + exportName + "' is " +
+                     DescribeNapiType(constructorType) + ", expected a class/function. Target={" +
+                     DescribePatchTarget(modulePath, moduleInfo, exportName, methodName) + "}.");
             return false;
         }
         napi_value holder = constructor;
         if (!classMethod && !NapiOk(napiEnv, napi_get_named_property(napiEnv, constructor, "prototype", &holder),
                                     "napi_get_named_property(prototype)")) {
+            LogError("Cannot install instance method patch: export '" + exportName +
+                     "' has no prototype. Target={" +
+                     DescribePatchTarget(modulePath, moduleInfo, exportName, methodName) + "}.");
             return false;
         }
 
@@ -4611,7 +5520,11 @@ class JsvmRuntime
             return false;
         }
         if (originalType != napi_function) {
-            LogError(className + "." + methodName + " is not a function");
+            LogError("Cannot find method '" + methodName + "' on " + (classMethod ? "class" : "instance") +
+                     " target '" + className + "'; resolved value is " + DescribeNapiType(originalType) +
+                     ". Target={" + DescribePatchTarget(modulePath, moduleInfo, exportName, methodName) +
+                     "}. Check whether the method name is misspelled, whether it is static vs instance, and whether "
+                     "build obfuscation renamed it.");
             return false;
         }
 
@@ -4847,4 +5760,7 @@ static napi_module g_ohospatchModule = {
     .reserved = {0},
 };
 
-extern "C" __attribute__((constructor)) void RegisterOhosPatchModule(void) { napi_module_register(&g_ohospatchModule); }
+extern "C" __attribute__((constructor, visibility("default"))) void RegisterOhosPatchModule(void)
+{
+    napi_module_register(&g_ohospatchModule);
+}

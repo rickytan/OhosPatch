@@ -14,15 +14,20 @@
       "copyCodeResource": {
         "enable": false
       }
-    },
-    "nativeLib": {
-      "filter": {
-        "excludes": [
-//          "**/libc++_shared.so"
-        ]
-      }
     }
   },
+  "buildOptionSet": [
+    {
+      "name": "release",
+      "nativeLib": {
+        "filter": {
+          "excludes": [
+            "**/libc++_shared.so"
+          ]
+        }
+      }
+    }
+  ],
   "targets": [
     {
       "name": "default"

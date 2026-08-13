@@ -1,6 +1,6 @@
 {
   "name": "@rickytan/ohospatch",
-  "version": "1.0.1",
+  "version": "1.0.3",
   "description": "Transparent runtime JavaScript patching for HarmonyOS using JSVM.",
   "main": "Index.ets",
   "author": {

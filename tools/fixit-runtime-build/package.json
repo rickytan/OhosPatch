@@ -1,0 +1,13 @@
+{
+  "name": "ohospatch-fixit-runtime-build",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "gulp fixitRuntime"
+  },
+  "devDependencies": {
+    "gulp": "^5.0.1",
+    "terser": "^5.43.1"
+  }
+}

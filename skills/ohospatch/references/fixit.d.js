@@ -28,7 +28,6 @@
  * @property {string=} exportName Export name; defaults to `className`.
  * @property {string=} bundleName Parsed bundle name.
  * @property {string=} moduleName Parsed HarmonyOS module name.
- * @property {string=} packageName Parsed OH package name.
  */
 
 /**
@@ -128,6 +127,20 @@
  */
 
 /**
+ * @typedef {Object} OhosPatchComponentSlotNodeFix
+ * @property {(attributeName: string, value: OhosPatchJsonValue | OhosPatchAttrHandler,
+ *   ...args: OhosPatchJsonValue[]) => OhosPatchComponentSlotNodeFix} attr
+ *   Override one ArkUI node attribute inside a selected child custom Component's trailing builder or BuilderParam
+ *   content. Handler `this` is bound to the parent component instance.
+ * @property {(attributes: Record<string, OhosPatchJsonValue | OhosPatchAttrHandler>) =>
+ *   OhosPatchComponentSlotNodeFix} attrs
+ *   Override multiple single-argument attributes inside the selected slot content.
+ * @property {(eventName: string, handler: OhosPatchComponentEventHandler) =>
+ *   OhosPatchOriginalEvent} event Replace a synchronous node event callback inside the selected slot content and
+ *   return the original callback proxy. Handler `this` is bound to the parent component instance.
+ */
+
+/**
  * @typedef {Object} OhosPatchComponentNodeFix
  * @property {(attributeName: string, value: OhosPatchJsonValue | OhosPatchAttrHandler,
  *   ...args: OhosPatchJsonValue[]) => OhosPatchComponentNodeFix} attr
@@ -144,6 +157,9 @@
  *   OhosPatchComponentNodeFix} param
  *   Replace an incoming parameter on a selected child custom Component. The selector `type` must be the
  *   child's full Component path. Built-in ArkUI nodes do not support this method.
+ * @property {(selector: string | OhosPatchNodeSelector) => OhosPatchComponentSlotNodeFix} slot
+ *   Select an ArkUI node rendered from the selected child custom Component's trailing builder or BuilderParam
+ *   content. The current node selector must be a child custom Component full path.
  */
 
 /**
@@ -232,9 +248,11 @@ class Fixit {
 
 /**
  * Alias of `Fixit.import()`. Synchronously load an exported ArkTS class from
- * `bundleName/moduleName/[packageName/]src/main/ets/File#ExportName`.
- * Scoped package names such as `@google/somelib` are written as normal path
- * segments before `src/main/ets`.
+ * `bundleName/moduleName/[packagePath/]src/main/ets/File#ExportName`,
+ * `@package/name/src/main/ets/File#ExportName`, or
+ * `/src/main/ets/File#ExportName`.
+ * The shorthand forms use the current host bundle/module captured by
+ * `OhosPatch.init(context)`.
  *
  * @param {string} fullPath
  * @returns {OhosPatchImportedClass}

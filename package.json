@@ -9,6 +9,7 @@
   "description": "ArkTS patch dispatch demo inspired by FIXiT.",
   "license": "MIT",
   "scripts": {
+    "build:fixit-runtime": "npm --prefix tools/fixit-runtime-build run build --",
     "install:skill": "./scripts/install-skill.sh",
     "test": "./scripts/test-device.sh",
     "test:device": "./scripts/test-device.sh"

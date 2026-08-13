@@ -3,18 +3,21 @@
 (function (Fixit) {
   // --- Import: 跨模块加载 ArkTS 类（返回持久 Proxy，可 new / 静态 / 实例调用）---
   var Point = Fixit.import(
-    'com.rickytan.ohospatch/entry/@vendor/business_page/src/main/ets/ViewModel/Point#Point'
+    '@vendor/business_page/src/main/ets/ViewModel/Point#Point'
   );
 
   // --- Patch 目标 ---
   var fix = Fixit.fix(
-    'com.rickytan.ohospatch/entry/@vendor/business_page/src/main/ets/ViewModel/DemoViewModel#DemoViewModel'
+    '@vendor/business_page/src/main/ets/ViewModel/DemoViewModel#DemoViewModel'
   );
   var panel = Fixit.component(
-    'com.rickytan.ohospatch/entry/@vendor/business_page/src/main/ets/components/PatchablePanel#PatchablePanel'
+    '@vendor/business_page/src/main/ets/components/PatchablePanel#PatchablePanel'
   );
   var panelV2 = Fixit.component(
-    'com.rickytan.ohospatch/entry/@vendor/business_page/src/main/ets/components/PatchablePanelV2#PatchablePanelV2'
+    '@vendor/business_page/src/main/ets/components/PatchablePanelV2#PatchablePanelV2'
+  );
+  var builderParamRoot = Fixit.component(
+    '@vendor/business_page/src/main/ets/components/BuilderParamPanel#BuilderParamRoot'
   );
 
   // --- Timer + console 日志 ---
@@ -157,14 +160,65 @@
     });
 
   Fixit.component(
-    'com.rickytan.ohospatch/entry/@vendor/business_page/src/main/ets/components/ChildParamPanel#ParentChildParamPanel'
+    '@vendor/business_page/src/main/ets/components/ChildParamPanel#ParentChildParamPanel'
   )
     .node({
-      type: 'com.rickytan.ohospatch/entry/@vendor/business_page/src/main/ets/components/ChildParamPanel#ChildParamPanel',
+      type: '@vendor/business_page/src/main/ets/components/ChildParamPanel#ChildParamPanel',
       occurrence: 1
     })
     .param('title', function (originValue) {
       return 'scoped patched ' + originValue;
+    });
+
+  // --- BuilderParam reproduction: root param/state should work; slot nodes expose whether
+  // current node DSL can see ArkUI nodes built inside a child Component's trailing builder.
+  builderParamRoot.param('message', 'Patched builder-param root parameter');
+  builderParamRoot.state('statusText', 'Patched builder-param root state');
+  builderParamRoot.node({
+    type: '@vendor/business_page/src/main/ets/components/BuilderParamPanel#BuilderParamShell',
+    occurrence: 0
+  })
+    .slot({ type: 'Text', occurrence: 0 })
+    .attrs({
+      fontColor: '#C44736',
+      fontSize: 18
+    });
+  var originBuilderSlotClick = builderParamRoot.node({
+    type: '@vendor/business_page/src/main/ets/components/BuilderParamPanel#BuilderParamShell',
+    occurrence: 0
+  })
+    .slot({ type: 'Button', occurrence: 0 })
+    .attrs({
+      backgroundColor: '#C44736',
+      height: 52
+    })
+    .event('onClick', /** @this {any} */ function () {
+      var result = originBuilderSlotClick.apply(this, arguments);
+      this.statusText = 'Patched builder slot click';
+      return result;
+    });
+  builderParamRoot.node({
+    type: '@vendor/business_page/src/main/ets/components/BuilderParamPanel#BuilderParamShell',
+    occurrence: 1
+  })
+    .slot({ type: 'Text', occurrence: 0 })
+    .attrs({
+      fontColor: '#1F6B46',
+      fontSize: 18
+    });
+  var originInlineBuilderSlotClick = builderParamRoot.node({
+    type: '@vendor/business_page/src/main/ets/components/BuilderParamPanel#BuilderParamShell',
+    occurrence: 1
+  })
+    .slot({ type: 'Button', occurrence: 0 })
+    .attrs({
+      backgroundColor: '#1F6B46',
+      height: 52
+    })
+    .event('onClick', /** @this {any} */ function () {
+      var result = originInlineBuilderSlotClick.apply(this, arguments);
+      this.statusText = 'Patched inline builder slot click';
+      return result;
     });
 
   // --- Method patch: 实例方法 ---

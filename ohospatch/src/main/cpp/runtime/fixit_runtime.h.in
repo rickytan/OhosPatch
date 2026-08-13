@@ -1,5 +1,0 @@
-#pragma once
-
-static constexpr const char kFixitRuntimeScript[] = R"OHOSPATCH_JS(
-@FIXIT_RUNTIME_SOURCE@
-)OHOSPATCH_JS";

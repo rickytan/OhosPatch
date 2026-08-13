@@ -305,8 +305,7 @@
       moduleInfo: target.moduleInfo || '',
       exportName: target.exportName || target.className,
       bundleName: target.bundleName || '',
-      moduleName: target.moduleName || '',
-      packageName: target.packageName || ''
+      moduleName: target.moduleName || ''
     };
   }
 
@@ -316,18 +315,19 @@
     }
 
     var path = fullPath.trim();
+    var originalPath = path;
     if (path.indexOf('@bundle:') === 0) {
       path = path.slice('@bundle:'.length);
     }
-    if (path.indexOf('\\') !== -1 || path.charAt(0) === '/' || path.charAt(path.length - 1) === '/') {
-      throw new Error('OhosPatch path must use bundleName/moduleName/[packageName/]src/main/ets/File format');
+    if (path.indexOf('\\') !== -1 || path.charAt(path.length - 1) === '/') {
+      throw new Error('Invalid OhosPatch target path "' + originalPath + '": path must use bundleName/moduleName/[packagePath/]src/main/ets/File#Export, @package/src/main/ets/File#Export, or /src/main/ets/File#Export format');
     }
 
     var hashIndex = path.indexOf('#');
     var exportName = '';
     if (hashIndex !== -1) {
       if (path.indexOf('#', hashIndex + 1) !== -1) {
-        throw new Error('OhosPatch path can contain only one export separator (#)');
+        throw new Error('Invalid OhosPatch target path "' + originalPath + '": path can contain only one export separator (#)');
       }
       exportName = path.slice(hashIndex + 1);
       path = path.slice(0, hashIndex);
@@ -336,9 +336,22 @@
       path = path.replace(/\.(ets|ts)$/, '');
     }
 
+    var isHostModulePath = path.charAt(0) === '/';
+    if (isHostModulePath) {
+      path = path.slice(1);
+    }
+
     var parts = path.split('/');
+    for (var index = 0; index < parts.length; index += 1) {
+      if (!parts[index]) {
+        throw new Error('Invalid OhosPatch target path "' + originalPath + '": path contains an empty segment');
+      }
+    }
+
+    var isPackagePath = path.charAt(0) === '@';
+    var sourceSearchStart = isHostModulePath || isPackagePath ? 0 : 2;
     var sourceOffset = -1;
-    for (var partIndex = 2; partIndex < parts.length - 2; partIndex += 1) {
+    for (var partIndex = sourceSearchStart; partIndex < parts.length - 2; partIndex += 1) {
       if (parts[partIndex] === 'src' &&
           parts[partIndex + 1] === 'main' &&
           parts[partIndex + 2] === 'ets') {
@@ -347,31 +360,45 @@
       }
     }
     if (sourceOffset === -1 || parts.length < sourceOffset + 4) {
-      throw new Error('OhosPatch path must use bundleName/moduleName/[packageName/]src/main/ets/File format');
-    }
-    for (var index = 0; index < parts.length; index += 1) {
-      if (!parts[index]) {
-        throw new Error('OhosPatch path contains an empty segment');
-      }
+      throw new Error('Invalid OhosPatch target path "' + originalPath + '": cannot find src/main/ets/File. Use bundleName/moduleName/[packagePath/]src/main/ets/File#Export, @package/src/main/ets/File#Export, or /src/main/ets/File#Export');
     }
 
-    var bundleName = parts[0];
-    var moduleName = parts[1];
-    var packageName = sourceOffset === 2 ? moduleName : parts.slice(2, sourceOffset).join('/');
     var fileName = parts[parts.length - 1];
     exportName = exportName || fileName;
     if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(exportName)) {
-      throw new Error('OhosPatch export name is invalid: ' + exportName);
+      throw new Error('Invalid OhosPatch target path "' + originalPath + '": export name "' + exportName + '" is not a valid JavaScript identifier');
+    }
+
+    var bundleName = '';
+    var moduleName = '';
+    var modulePath = '';
+    if (isHostModulePath) {
+      if (sourceOffset !== 0) {
+        throw new Error('Invalid OhosPatch target path "' + originalPath + '": host module shorthand must start with /src/main/ets');
+      }
+      modulePath = '/' + parts.slice(sourceOffset).join('/');
+    } else if (isPackagePath) {
+      modulePath = parts.join('/');
+    } else {
+      if (sourceOffset < 2) {
+        throw new Error('Invalid OhosPatch target path "' + originalPath + '": full path must include bundleName and moduleName before src/main/ets');
+      }
+      if (parts[1].charAt(0) === '@') {
+        throw new Error('Invalid OhosPatch target path "' + originalPath + '": full path must include bundleName/moduleName before package path');
+      }
+      bundleName = parts[0];
+      moduleName = parts[1];
+      modulePath = (sourceOffset === 2 ? parts[1] : parts.slice(2, sourceOffset).join('/')) +
+        '/' + parts.slice(sourceOffset).join('/');
     }
 
     return {
       className: exportName === 'default' ? fileName : exportName,
-      modulePath: packageName + '/' + parts.slice(sourceOffset).join('/'),
-      moduleInfo: bundleName + '/' + moduleName,
+      modulePath: modulePath,
+      moduleInfo: bundleName && moduleName ? bundleName + '/' + moduleName : '',
       exportName: exportName,
       bundleName: bundleName,
-      moduleName: moduleName,
-      packageName: packageName
+      moduleName: moduleName
     };
   }
 
@@ -384,11 +411,11 @@
       if (target.indexOf('/') !== -1 || target.indexOf('@bundle:') === 0) {
         var normalized = parseTargetPath(target);
         if (!normalized.className || !normalized.modulePath) {
-          throw new Error('Fixit target requires className and modulePath');
+          throw new Error('Fixit target "' + target + '" did not resolve to className and modulePath');
         }
         return normalized;
       }
-      throw new Error('Fixit target must be a full OHM path string');
+      throw new Error('Fixit target "' + target + '" must be a full OHM path string. Example: com.example.app/entry/src/main/ets/Foo#Foo');
     }
     throw new TypeError('Fixit.fix requires a full OHM path string');
   }
@@ -582,6 +609,14 @@
     this.selector = normalizeNodeSelector(selector);
   }
 
+  function ComponentSlotNodeFix(componentNode, selector) {
+    assertChildNodeSelector(componentNode.selector, 'slot');
+    this.component = componentNode.component;
+    this.childSelector = componentNode.selector;
+    this.selector = normalizeNodeSelector(selector);
+    assertBuiltInNodeSelector(this.selector, 'slot node');
+  }
+
   function assertBuiltInNodeSelector(selector, operation) {
     if (selector.componentTarget) {
       throw new TypeError('Component child selector does not support ' + operation);
@@ -683,6 +718,81 @@
     rule.childTargetKey = targetKey(childTarget);
     registerUiRule(uniqueKey, rule, registry.uiValues, handler);
     return this;
+  };
+
+  ComponentNodeFix.prototype.slot = function (selector) {
+    return new ComponentSlotNodeFix(this, selector);
+  };
+
+  function copySlotScope(rule, childSelector) {
+    var childTarget = childSelector.componentTarget;
+    rule.childClassName = childTarget.className;
+    rule.childModulePath = childTarget.modulePath;
+    rule.childModuleInfo = childTarget.moduleInfo || '';
+    rule.childExportName = childTarget.exportName;
+    rule.childTargetKey = targetKey(childTarget);
+    rule.childOccurrence = childSelector.occurrence;
+  }
+
+  ComponentSlotNodeFix.prototype.attr = function (attributeName) {
+    var name = validateUiName(attributeName, 'Component slot attribute name');
+    var args = Array.prototype.slice.call(arguments, 1);
+    if (args.length === 0) {
+      throw new TypeError('Component slot attribute requires at least one argument');
+    }
+
+    var target = this.component.target;
+    var selector = this.selector;
+    var uniqueKey = targetKey(target) + '|slot|' + this.childSelector.selectorKey + '|node|' +
+      selector.selectorKey + '|attr|' + name;
+    var rule = copyUiTarget(target);
+    rule.kind = 'attribute';
+    copyNodeSelector(rule, selector);
+    copySlotScope(rule, this.childSelector);
+    rule.attributeName = name;
+
+    if (typeof args[0] === 'function') {
+      if (args.length !== 1) {
+        throw new TypeError('Component slot attribute handler does not accept extra arguments');
+      }
+      rule.attrHandler = true;
+      registerUiRule(uniqueKey, rule, registry.uiAttrs, args[0]);
+    } else {
+      rule.attrHandler = false;
+      rule.arguments = copyJsonValue(args, 'Component slot attribute arguments');
+      registerUiRule(uniqueKey, rule, null, null);
+    }
+    return this;
+  };
+
+  ComponentSlotNodeFix.prototype.attrs = function (attributes) {
+    if (!attributes || typeof attributes !== 'object' || Array.isArray(attributes)) {
+      throw new TypeError('Component slot attributes must be an object');
+    }
+    var self = this;
+    Object.keys(attributes).forEach(function (name) {
+      self.attr(name, attributes[name]);
+    });
+    return this;
+  };
+
+  ComponentSlotNodeFix.prototype.event = function (eventName, handler) {
+    var name = validateUiName(eventName, 'Component slot event name');
+    if (typeof handler !== 'function') {
+      throw new TypeError('Component slot event handler must be a function');
+    }
+
+    var target = this.component.target;
+    var selector = this.selector;
+    var uniqueKey = targetKey(target) + '|slot|' + this.childSelector.selectorKey + '|node|' +
+      selector.selectorKey + '|event|' + name;
+    var rule = copyUiTarget(target);
+    rule.kind = 'event';
+    copyNodeSelector(rule, selector);
+    copySlotScope(rule, this.childSelector);
+    rule.eventName = name;
+    registerUiRule(uniqueKey, rule, registry.uiEvents, handler);
+    return makeUiEventOrigin();
   };
 
   ComponentFix.prototype.param = function (propertyName, replacement) {
