@@ -243,14 +243,27 @@ export default function fixitTest(): void {
             } catch (err) {
               multiArgumentAttributeAccepted = false;
             }
+            var nestedFunctionAttributeAccepted = true;
+            try {
+              Fixit.component('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/PatchablePanelV2#PatchablePanelV2')
+                .node({ type: 'Text', occurrence: 0 })
+                .attr('bindMenu', [{
+                  value: 'Patch function menu',
+                  action: function () {
+                    this.statusText = 'Nested function action ran';
+                  }
+                }]);
+            } catch (err) {
+              nestedFunctionAttributeAccepted = false;
+            }
             return typeof direct + '|' + objectRuleRejected + '|' + attrExtraRejected + '|' +
               missingStateReplacementRejected + '|' + missingParamReplacementRejected + '|' +
               emptyWhereRejected + '|' + mixedSelectorRejected + '|' + builtInParamRejected + '|' +
-              childAttrRejected + '|' + multiArgumentAttributeAccepted;
+              childAttrRejected + '|' + multiArgumentAttributeAccepted + '|' + nestedFunctionAttributeAccepted;
           });
       `;
       expect(OhosPatch.executeScript(script).installedCount).assertLarger(0);
-      expect(DemoViewModel.crash()).assertEqual('function|true|true|true|true|true|true|true|true|true');
+      expect(DemoViewModel.crash()).assertEqual('function|true|true|true|true|true|true|true|true|true|true');
     });
 
     it('ComponentV2 supports param state node and event DSL behavior', 0, async () => {
@@ -328,6 +341,16 @@ export default function fixitTest(): void {
             this.markPrimary(10);
             var result = origin.apply(this, arguments);
             this.statusText = 'Patched V2 test event, taps=' + this.tapCount;
+            this.getUIContext().showAlertDialog({
+              title: 'OhosPatch',
+              message: 'Nested Patch JSVM function callback test',
+              buttons: [{
+                value: 'Patch action',
+                action: function () {
+                  this.statusText = 'Patch alert button action, taps=' + this.tapCount;
+                }
+              }]
+            });
             return result;
           });
         Fixit.component(
@@ -432,6 +455,17 @@ export default function fixitTest(): void {
       );
       if (eventStatus === undefined || eventStatus === null) {
         throw new Error('patched V2 event status was not updated after click');
+      }
+      const alertAction = await driver.waitForComponent(ON.text('Patch action'), 5000);
+      if (alertAction === undefined || alertAction === null) {
+        throw new Error('Patch alert action button was not shown');
+      }
+      await alertAction.click();
+      const alertActionStatus = await driver.waitForComponent(
+        ON.text('status=Patch alert button action, taps=111'), 5000
+      );
+      if (alertActionStatus === undefined || alertActionStatus === null) {
+        throw new Error('Patch alert button callback did not update component state');
       }
 
       const secondaryButton = await findWithForwardScroll(

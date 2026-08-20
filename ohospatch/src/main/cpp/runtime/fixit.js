@@ -21,6 +21,7 @@
 
   var REMOTE_HANDLE_KEY = '__ohospatch_proxy_handle__';
   var IMPORT_HANDLE_KEY = '__ohospatch_import_handle__';
+  var JSVM_FUNCTION_HANDLE_KEY = '__ohospatch_jsvm_function_handle__';
   var UNDEFINED_VALUE_KEY = '__ohospatch_proxy_undefined__';
 
   function own(object, property) {
@@ -48,6 +49,15 @@
         var importedReference = {};
         importedReference[IMPORT_HANDLE_KEY] = metadata.handle;
         return importedReference;
+      }
+      if (typeof value === 'function') {
+        var functionHandle = global.__ohospatch_retainJsFunction(value);
+        if (!functionHandle) {
+          throw new TypeError('OhosPatch could not retain a function argument');
+        }
+        var functionReference = {};
+        functionReference[JSVM_FUNCTION_HANDLE_KEY] = functionHandle;
+        return functionReference;
       }
     }
     if (value === undefined) {
@@ -86,6 +96,59 @@
 
   function encodeNativeWire(value) {
     return JSON.stringify(encodeNativeWireValue(value, []));
+  }
+
+  function encodeUiArgumentValue(value, ancestors) {
+    if (typeof value === 'function') {
+      var handle = global.__ohospatch_retainJsFunction(value);
+      if (!handle) {
+        throw new TypeError('OhosPatch could not retain a function argument');
+      }
+      var reference = {};
+      reference[JSVM_FUNCTION_HANDLE_KEY] = handle;
+      return reference;
+    }
+    if (value === undefined || typeof value === 'symbol') {
+      throw new TypeError('OhosPatch UI argument contains an unsupported type');
+    }
+    if (value === null || typeof value === 'string' || typeof value === 'boolean') {
+      return value;
+    }
+    if (typeof value === 'number') {
+      return Number.isFinite(value) ? value : null;
+    }
+    if (typeof value !== 'object') {
+      throw new TypeError('OhosPatch UI argument contains an unsupported type');
+    }
+    if (ancestors.indexOf(value) !== -1) {
+      throw new TypeError('OhosPatch UI argument contains a circular reference');
+    }
+
+    ancestors.push(value);
+    var encoded;
+    if (Array.isArray(value)) {
+      encoded = value.map(function (item) {
+        return encodeUiArgumentValue(item, ancestors);
+      });
+    } else {
+      encoded = {};
+      Object.keys(value).forEach(function (property) {
+        encoded[property] = encodeUiArgumentValue(value[property], ancestors);
+      });
+    }
+    ancestors.pop();
+    return encoded;
+  }
+
+  function copyUiArguments(value, label) {
+    try {
+      return JSON.parse(JSON.stringify(encodeUiArgumentValue(value, [])));
+    } catch (err) {
+      if (err instanceof TypeError) {
+        throw new TypeError(label + ' must be JSON-serializable or contain function references');
+      }
+      throw err;
+    }
   }
 
   function decodeNativeResponse(response, receiverHandle) {
@@ -172,6 +235,10 @@
     nativeProxyCache[cacheKey] = proxy;
     return proxy;
   }
+
+  global.__ohospatch_makeNativeProxy = function (handle) {
+    return makeNativeProxy(handle, false, handle);
+  };
 
   function decodeImportedResponse(response, receiverHandle) {
     if (!Array.isArray(response) || typeof response[0] !== 'string') {
@@ -656,7 +723,7 @@
       registerUiRule(uniqueKey, rule, registry.uiAttrs, args[0]);
     } else {
       rule.attrHandler = false;
-      rule.arguments = copyJsonValue(args, 'Component attribute arguments');
+      rule.arguments = copyUiArguments(args, 'Component attribute arguments');
       registerUiRule(uniqueKey, rule, null, null);
     }
     return this;
@@ -752,7 +819,7 @@
     var rule = copyUiTarget(target);
     rule.kind = 'create';
     copyNodeSelector(rule, selector);
-    rule.arguments = copyJsonValue(args, 'Component create arguments');
+    rule.arguments = copyUiArguments(args, 'Component create arguments');
     registerUiRule(uniqueKey, rule, null, null);
     return componentFix;
   }
@@ -767,7 +834,7 @@
     rule.kind = 'create';
     copyNodeSelector(rule, selector);
     copyBuilderScope(rule, builderFix.childSelector, builderFix.builderParamName);
-    rule.arguments = copyJsonValue(args, 'Component builder create arguments');
+    rule.arguments = copyUiArguments(args, 'Component builder create arguments');
     registerUiRule(uniqueKey, rule, null, null);
     return builderFix;
   }
@@ -802,7 +869,7 @@
       registerUiRule(uniqueKey, rule, registry.uiAttrs, args[0]);
     } else {
       rule.attrHandler = false;
-      rule.arguments = copyJsonValue(args, 'Component builder attribute arguments');
+      rule.arguments = copyUiArguments(args, 'Component builder attribute arguments');
       registerUiRule(uniqueKey, rule, null, null);
     }
     return this;

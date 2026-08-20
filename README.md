@@ -889,9 +889,9 @@ Text(After list) -> Text 2
 
 如果 `items = [A, B, C]`，`Text('After list')` 会变成 `Text occurrence 3`。`occurrence` 只做按类型计数，不需要临时捕获属性和执行深比较，性能更好，应作为生产 Patch 的首选。列表长度、过滤、排序或分页会改变计数时，再使用 `where` 匹配稳定的原始属性。
 
-当前不支持 `create` 参数、文本内容、父子层级、样式类或自定义 key selector。`id` 可以作为普通原始属性写入 `where`。发布版本增删节点、调整属性或改变同类型节点顺序后，selector 都可能失效，因此宿主仍必须把 Patch 与准确 APP 版本绑定。
+当前不支持父子层级、样式类或自定义 key selector。`id` 可以作为普通原始属性写入 `where`。发布版本增删节点、调整属性或改变同类型节点顺序后，selector 都可能失效，因此宿主仍必须把 Patch 与准确 APP 版本绑定。
 
-`attr(name, ...args)` 可传一个或多个 JSON 可序列化的静态参数；动态 handler 只能返回该属性的单个参数，不能附加额外参数。`attrs({...})` 是多个单参数 `attr` 的简写。
+`attr(name, ...args)` 可传一个或多个静态参数。普通对象和值会通过 JSON 拷贝；嵌套 function 会由 Patch JSVM 持有引用，并在传给 ArkTS 时还原成 callback。例如 Alert/Menu/Popup options 里的 `buttons[].action` 或 `primaryButton.action` 可以写成普通 JS function，回调触发时 `this` 绑定到当前 Component 实例 Proxy。动态 handler 只能返回该属性的单个参数，不能附加额外参数；如果它返回对象，目前仍应保持 JSON 可序列化。`attrs({...})` 是多个单参数 `attr` 的简写。
 
 ### 修复具有多个参数的事件
 
@@ -1150,8 +1150,8 @@ CMake 构建也会调用同一个 Gulp task；如果本地没有安装 Node 依�
 - 只有从 ArkTS 模块 `export` 出来的类、函数和自定义 Component 能被 patch；未导出的内部类型无法通过运行时模块导出表定位。
 - Patch handler 的 `this` Proxy 只在当前同步调用或 `origin` 调用期间有效，不应保存到 timer、Promise 或全局变量后异步访问。
 - `Fixit.import()` 返回的持久 Proxy 可保留到 `OhosPatch.clear()` 或下一次 patch 替换。
-- 普通方法参数和新建 JS 对象仍受 JSON wire 类型限制。
-- Component DSL 当前支持 API 20 状态管理 V1/V2、导出的自定义组件、父组件尾随闭包/`@BuilderParam` 内容、首选的 `type + occurrence` 节点选择器、`type + where` 原始属性选择器、JSON 属性参数和同步事件替换。
+- 普通方法参数和新建 JS 对象默认按 JSON wire 规则传输；嵌套 function 会由 Patch JSVM 保留引用，并在传给 ArkTS Proxy 方法或 Component `attr/create` 静态参数时还原成 callback。
+- Component DSL 当前支持 API 20 状态管理 V1/V2、导出的自定义组件、父组件尾随闭包/`@BuilderParam` 内容、首选的 `type + occurrence` 节点选择器、`type + where` 原始属性选择器、属性/create 参数和同步事件替换。
 - 非导出的 `@Entry` 页面、层级选择器、已挂载组件主动刷新，以及 `before/after/around` 事件组合尚未支持。`Resource`、Controller 等不可 JSON 序列化对象不能作为 selector 或静态 attr 参数直接下发。
 - 单个 runtime 最多同时存在 256 个 timer。
 - 单个 patch 最多保留 512 个去重后的动态导入类、实例、方法或嵌套对象句柄。

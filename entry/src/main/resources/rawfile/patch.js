@@ -164,6 +164,16 @@
       this.markPrimary(10);
       var result = originV2Click.apply(this, arguments);
       this.statusText = 'Patched V2 event, taps=' + this.tapCount;
+      this.getUIContext().showAlertDialog({
+        title: 'OhosPatch',
+        message: 'Alert options and button callbacks are provided by patch JavaScript.',
+        buttons: [{
+          value: 'Patch action',
+          action: /** @this {any} */ function () {
+            this.statusText = 'Patch alert button action, taps=' + this.tapCount;
+          }
+        }]
+      });
       return result;
     });
 

@@ -19,6 +19,15 @@
  */
 
 /**
+ * An ArkUI create/attribute argument. Plain values are copied through JSON.
+ * Nested functions are retained by the Patch JSVM and exposed to ArkTS as
+ * callbacks; ordinary function callbacks receive the current Component
+ * instance proxy as `this`.
+ *
+ * @typedef {any} OhosPatchUiArgument
+ */
+
+/**
  * A HarmonyOS module export resolved by OhosPatch in the ArkTS VM.
  *
  * @typedef {Object} OhosPatchTarget
@@ -128,14 +137,14 @@
 
 /**
  * @typedef {Object} OhosPatchComponentBuilderNodeFix
- * @property {(...args: OhosPatchJsonValue[]) => OhosPatchComponentBuilderNodeFix} create
+ * @property {(...args: OhosPatchUiArgument[]) => OhosPatchComponentBuilderNodeFix} create
  *   Replace the selected ArkUI node's initialization call (`create` / `createWithLabel`) inside BuilderParam
  *   content. Arguments are applied before the original builder's later attributes and events run.
- * @property {(attributeName: string, value: OhosPatchJsonValue | OhosPatchAttrHandler,
- *   ...args: OhosPatchJsonValue[]) => OhosPatchComponentBuilderNodeFix} attr
+ * @property {(attributeName: string, value: OhosPatchUiArgument | OhosPatchAttrHandler,
+ *   ...args: OhosPatchUiArgument[]) => OhosPatchComponentBuilderNodeFix} attr
  *   Override one ArkUI node attribute inside a named BuilderParam passed to a selected child custom Component.
  *   Handler `this` is bound to the parent component instance.
- * @property {(attributes: Record<string, OhosPatchJsonValue | OhosPatchAttrHandler>) =>
+ * @property {(attributes: Record<string, OhosPatchUiArgument | OhosPatchAttrHandler>) =>
  *   OhosPatchComponentBuilderNodeFix} attrs
  *   Override multiple single-argument attributes inside the selected BuilderParam content.
  * @property {(eventName: string, handler: OhosPatchComponentEventHandler) =>
@@ -145,19 +154,19 @@
 
 /**
  * @typedef {Object} OhosPatchComponentNodeFix
- * @property {(...args: OhosPatchJsonValue[]) => OhosPatchComponentNodeFix} create
+ * @property {(...args: OhosPatchUiArgument[]) => OhosPatchComponentNodeFix} create
  *   Replace the selected ArkUI node's initialization call (`create` / `createWithLabel`). For example,
  *   `node({ type: 'Column', occurrence: 0 }).create({ space: 20 })` patches `Column({ space: 14 })`.
  *   Use `occurrence` selectors for create patches; `where` selectors are evaluated after create arguments.
- * @property {(attributeName: string, value: OhosPatchJsonValue | OhosPatchAttrHandler,
- *   ...args: OhosPatchJsonValue[]) => OhosPatchComponentNodeFix} attr
+ * @property {(attributeName: string, value: OhosPatchUiArgument | OhosPatchAttrHandler,
+ *   ...args: OhosPatchUiArgument[]) => OhosPatchComponentNodeFix} attr
  *   Override one node attribute. When `value` is a function it is invoked with `this` bound to the
  *   current component instance on each render and its return value is applied as the single attribute
- *   argument; extra arguments are rejected in handler mode. Otherwise the JSON arguments are applied
- *   verbatim. At least one argument is required.
- * @property {(attributes: Record<string, OhosPatchJsonValue | OhosPatchAttrHandler>) =>
+ *   argument; extra arguments are rejected in handler mode. Otherwise arguments are applied
+ *   verbatim, with nested function values retained as callbacks. At least one argument is required.
+ * @property {(attributes: Record<string, OhosPatchUiArgument | OhosPatchAttrHandler>) =>
  *   OhosPatchComponentNodeFix} attrs
- *   Override multiple single-argument attributes. Each value may be a JSON value or a resolver function.
+ *   Override multiple single-argument attributes. Each value may be a UI argument or a resolver function.
  * @property {(eventName: string, handler: OhosPatchComponentEventHandler) =>
  *   OhosPatchOriginalEvent} event Replace a synchronous node event callback and return the original callback proxy.
  * @property {(propertyName: string, replacement: OhosPatchJsonValue | OhosPatchComponentValueHandler) =>

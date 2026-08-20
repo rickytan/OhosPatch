@@ -386,6 +386,11 @@ struct ImportedValue {
     uint32_t handle = 0;
 };
 
+struct StoredJsFunction {
+    JSVM_Ref reference = nullptr;
+    uint32_t handle = 0;
+};
+
 enum class UiRuleKind {
     PARAM,
     STATE,
@@ -567,6 +572,7 @@ struct UiEventCaptureContext {
 struct UiCreateCaptureContext {
     napi_env env = nullptr;
     napi_ref originalCreate = nullptr;
+    napi_ref owner = nullptr;
     std::string methodName;
     UiRule *rule = nullptr;
     bool installed = false;
@@ -579,6 +585,12 @@ struct UiWhereCaptureContext {
     std::string originalJson;
     bool invoked = false;
     bool installed = false;
+};
+
+struct UiStoredFunctionCallbackRecord {
+    napi_env env = nullptr;
+    napi_ref owner = nullptr;
+    uint32_t functionHandle = 0;
 };
 
 struct UiNodeTypeCounter {
@@ -668,12 +680,14 @@ class JsvmRuntime
         if (!Run(script)) {
             ClearRegistry();
             ClearImportedValues();
+            ClearStoredJsFunctions();
             return 0;
         }
         JSVM_HandleScope scope = nullptr;
         if (!JsvmOk(OH_JSVM_OpenHandleScope(env_, &scope), "OH_JSVM_OpenHandleScope(patch install)", env_)) {
             ClearRegistry();
             ClearImportedValues();
+            ClearStoredJsFunctions();
             return 0;
         }
         bool hooksInstalled = InstallHooks(napiEnv);
@@ -686,6 +700,7 @@ class JsvmRuntime
             RestoreHooks();
             ClearRegistry();
             ClearImportedValues();
+            ClearStoredJsFunctions();
             return 0;
         }
         return hookCount_ + uiRuleCount_;
@@ -703,16 +718,17 @@ class JsvmRuntime
         }
         if ((hookCount_ > 0 && hooks_[0]->env != napiEnv) ||
             (uiComponentHookCount_ > 0 && uiComponentHooks_[0]->env != napiEnv) ||
-            ((HasTimers() || importedValueCount_ > 0) && hostEnv_ != napiEnv)) {
+            ((HasTimers() || importedValueCount_ > 0 || storedJsFunctionCount_ > 0) && hostEnv_ != napiEnv)) {
             LogError("OhosPatch must be cleared on the ArkTS VM where it was installed");
             return false;
         }
         bool uiRestored = RestoreUiHooks();
         ClearUiRules();
+        bool storedFunctionsCleared = ClearStoredJsFunctions();
         bool restored = RestoreHooks();
         bool cleared = ClearRegistry();
         bool importsCleared = ClearImportedValues();
-        return uiRestored && restored && cleared && importsCleared;
+        return uiRestored && storedFunctionsCleared && restored && cleared && importsCleared;
     }
 
     napi_value InvokeHook(napi_env napiEnv, HookRecord *hook, napi_value receiver, size_t argc, const napi_value *argv)
@@ -884,6 +900,7 @@ class JsvmRuntime
     static constexpr size_t kMaxHooks = 256;
     static constexpr size_t kMaxTimers = 256;
     static constexpr size_t kMaxImportedValues = 512;
+    static constexpr size_t kMaxStoredJsFunctions = 512;
     static constexpr size_t kMaxUiRules = 256;
     static constexpr size_t kMaxUiComponentHooks = 64;
     static constexpr size_t kMaxUiRenderDepth = 16;
@@ -925,6 +942,9 @@ class JsvmRuntime
     std::array<ImportedValue, kMaxImportedValues> importedValues_{};
     size_t importedValueCount_ = 0;
     uint32_t nextImportedHandle_ = 1;
+    std::array<StoredJsFunction, kMaxStoredJsFunctions> storedJsFunctions_{};
+    size_t storedJsFunctionCount_ = 0;
+    uint32_t nextStoredJsFunctionHandle_ = 1;
     std::array<std::unique_ptr<UiRule>, kMaxUiRules> uiRules_;
     size_t uiRuleCount_ = 0;
     std::array<std::unique_ptr<UiComponentHook>, kMaxUiComponentHooks> uiComponentHooks_;
@@ -1286,6 +1306,7 @@ class JsvmRuntime
     void ResetVm()
     {
         CancelAllTimers();
+        ClearStoredJsFunctions();
         ReleaseContext();
         if (env_ && envScope_) {
             JsvmOk(OH_JSVM_CloseEnvScope(env_, envScope_), "OH_JSVM_CloseEnvScope", env_);
@@ -1858,10 +1879,19 @@ class JsvmRuntime
             return NapiUndefined(env);
         }
 
+        napi_value owner = nullptr;
+        if (capture->owner &&
+            !NapiOk(env, napi_get_reference_value(env, capture->owner, &owner),
+                    "napi_get_reference_value(component create owner)")) {
+            return NapiUndefined(env);
+        }
+
         std::array<napi_value, kMaxArguments> argv{};
         for (uint32_t argumentIndex = 0; argumentIndex < argc; ++argumentIndex) {
-            if (!NapiOk(env, napi_get_element(env, arguments, argumentIndex, &argv[argumentIndex]),
-                        "napi_get_element(component create argument)")) {
+            napi_value argument = nullptr;
+            if (!NapiOk(env, napi_get_element(env, arguments, argumentIndex, &argument),
+                        "napi_get_element(component create argument)") ||
+                !Runtime().ResolveBridgeWireValue(env, argument, 0, &argv[argumentIndex], owner)) {
                 return NapiUndefined(env);
             }
         }
@@ -1970,6 +2000,38 @@ class JsvmRuntime
         DeleteNapiReference(env, record->owner, "napi_delete_reference(component event owner)");
         DeleteNapiReference(env, record->originalEvent, "napi_delete_reference(original component event)");
         delete record;
+    }
+
+    static void FinalizeUiStoredFunctionCallback(napi_env env, void *data, void *)
+    {
+        UiStoredFunctionCallbackRecord *record = static_cast<UiStoredFunctionCallbackRecord *>(data);
+        if (!record) {
+            return;
+        }
+        DeleteNapiReference(env, record->owner, "napi_delete_reference(stored JS function owner)");
+        delete record;
+    }
+
+    static napi_value UiStoredFunctionCallback(napi_env env, napi_callback_info info)
+    {
+        size_t argc = kMaxArguments;
+        napi_value receiver = nullptr;
+        void *data = nullptr;
+        std::array<napi_value, kMaxArguments> argv{};
+        if (!NapiOk(env, napi_get_cb_info(env, info, &argc, argv.data(), &receiver, &data),
+                    "napi_get_cb_info(stored JS function callback)")) {
+            return NapiUndefined(env);
+        }
+        if (argc > kMaxArguments) {
+            LogError("Stored JS function callback arguments were truncated to the OhosPatch limit");
+            argc = kMaxArguments;
+        }
+        if (!data) {
+            LogError("OhosPatch stored JS function callback has no context");
+            return NapiUndefined(env);
+        }
+        return Runtime().InvokeStoredJsFunction(env, static_cast<UiStoredFunctionCallbackRecord *>(data), argc,
+                                                argv.data());
     }
 
     static napi_value CallUiOriginal(napi_env env, UiMethodHook *method, napi_value receiver, size_t argc,
@@ -2169,6 +2231,123 @@ class JsvmRuntime
         napi_value result = nullptr;
         if (!NapiOk(napiEnv, napi_get_named_property(napiEnv, envelope, "result", &result),
                     "napi_get_named_property(component event result)")) {
+            return NapiUndefined(napiEnv);
+        }
+        return result;
+    }
+
+    napi_value InvokeStoredJsFunction(napi_env napiEnv, UiStoredFunctionCallbackRecord *record, size_t argc,
+                                      napi_value *argv)
+    {
+        if (!record || record->functionHandle == 0) {
+            LogError("Cannot invoke an unavailable retained JS function");
+            return NapiUndefined(napiEnv);
+        }
+        if (!Ensure()) {
+            LogError("Cannot invoke a retained JS function before OhosPatch runtime is ready");
+            return NapiUndefined(napiEnv);
+        }
+
+        napi_value owner = nullptr;
+        if (record->owner &&
+            !NapiOk(napiEnv, napi_get_reference_value(napiEnv, record->owner, &owner),
+                    "napi_get_reference_value(stored JS function owner)")) {
+            return NapiUndefined(napiEnv);
+        }
+        if (!owner) {
+            LogError("Cannot invoke a retained JS function because its Component owner is unavailable");
+            return NapiUndefined(napiEnv);
+        }
+
+        napi_value callbackArgs = nullptr;
+        if (!NapiOk(napiEnv, napi_create_array_with_length(napiEnv, argc, &callbackArgs),
+                    "napi_create_array_with_length(stored JS callback arguments)")) {
+            return NapiUndefined(napiEnv);
+        }
+        for (size_t index = 0; index < argc; ++index) {
+            if (!NapiOk(napiEnv, napi_set_element(napiEnv, callbackArgs, static_cast<uint32_t>(index), argv[index]),
+                        "napi_set_element(stored JS callback argument)")) {
+                return NapiUndefined(napiEnv);
+            }
+        }
+        std::string argsJson;
+        if (!NapiJsonStringify(napiEnv, callbackArgs, "[]", &argsJson)) {
+            return NapiUndefined(napiEnv);
+        }
+
+        JSVM_HandleScope scope = nullptr;
+        if (!JsvmOk(OH_JSVM_OpenHandleScope(env_, &scope), "OH_JSVM_OpenHandleScope(stored JS function)", env_)) {
+            return NapiUndefined(napiEnv);
+        }
+        auto closeScope = [&]() {
+            return JsvmOk(OH_JSVM_CloseHandleScope(env_, scope), "OH_JSVM_CloseHandleScope(stored JS function)",
+                          env_);
+        };
+
+        JSVM_Value function = nullptr;
+        JSVM_Value argsArray = nullptr;
+        JSVM_Value ownerHandle = nullptr;
+        JSVM_Value thisArg = nullptr;
+        bool success = GetStoredJsFunction(record->functionHandle, &function) &&
+                       ParseJson(argsJson, &argsArray) &&
+                       JsvmOk(OH_JSVM_CreateUint32(env_, 0, &ownerHandle),
+                              "OH_JSVM_CreateUint32(stored JS function owner)", env_);
+
+        ActiveInvocation previous = activeInvocation_;
+        activeInvocation_ = {};
+        activeInvocation_.env = napiEnv;
+        activeInvocation_.receiver = owner;
+        activeInvocation_.proxyValues[0] = owner;
+        activeInvocation_.proxyValueCount = 1;
+
+        if (success) {
+            success = CallGlobal("__ohospatch_makeNativeProxy", &ownerHandle, 1, &thisArg);
+        }
+
+        uint32_t jsvmArgc = 0;
+        std::array<JSVM_Value, kMaxArguments> jsvmArgv{};
+        if (success) {
+            success = JsvmOk(OH_JSVM_GetArrayLength(env_, argsArray, &jsvmArgc),
+                             "OH_JSVM_GetArrayLength(stored JS callback arguments)", env_) &&
+                      jsvmArgc <= kMaxArguments;
+        }
+        if (success) {
+            for (uint32_t index = 0; index < jsvmArgc; ++index) {
+                if (!JsvmOk(OH_JSVM_GetElement(env_, argsArray, index, &jsvmArgv[index]),
+                            "OH_JSVM_GetElement(stored JS callback argument)", env_)) {
+                    success = false;
+                    break;
+                }
+            }
+        }
+
+        JSVM_Value jsvmResult = nullptr;
+        if (success) {
+            success = JsvmOk(OH_JSVM_CallFunction(env_, thisArg, function, jsvmArgc, jsvmArgv.data(), &jsvmResult),
+                             "OH_JSVM_CallFunction(retained JS function)", env_);
+        }
+
+        bool returnUndefined = true;
+        std::string resultJson;
+        if (success && jsvmResult) {
+            JSVM_ValueType resultType = JSVM_UNDEFINED;
+            if (JsvmOk(OH_JSVM_Typeof(env_, jsvmResult, &resultType),
+                       "OH_JSVM_Typeof(retained JS function result)", env_) &&
+                resultType != JSVM_UNDEFINED && resultType != JSVM_FUNCTION && resultType != JSVM_EXTERNAL &&
+                resultType != JSVM_BIGINT && resultType != JSVM_SYMBOL) {
+                returnUndefined = false;
+                success = StringifyJson(jsvmResult, &resultJson);
+            }
+        }
+
+        activeInvocation_ = previous;
+        bool scopeClosed = closeScope();
+        if (!success || !scopeClosed || returnUndefined) {
+            return NapiUndefined(napiEnv);
+        }
+
+        napi_value result = nullptr;
+        if (!NapiJsonParse(napiEnv, resultJson, &result)) {
             return NapiUndefined(napiEnv);
         }
         return result;
@@ -2379,7 +2558,7 @@ class JsvmRuntime
     }
 
     bool DecodeImportedArguments(const std::string &wire, std::array<napi_value, kMaxArguments> *arguments,
-                                 uint32_t *argumentCount)
+                                 uint32_t *argumentCount, napi_value owner = nullptr)
     {
         if (!hostEnv_ || !arguments || !argumentCount) {
             LogError("DecodeImportedArguments received an invalid argument");
@@ -2388,7 +2567,7 @@ class JsvmRuntime
         napi_value encoded = nullptr;
         napi_value resolved = nullptr;
         if (!NapiJsonParse(hostEnv_, wire, &encoded) ||
-            !ResolveBridgeWireValue(hostEnv_, encoded, 0, &resolved) ||
+            !ResolveBridgeWireValue(hostEnv_, encoded, 0, &resolved, owner) ||
             !NapiOk(hostEnv_, napi_get_array_length(hostEnv_, resolved, argumentCount),
                     "napi_get_array_length(imported arguments)")) {
             return false;
@@ -2428,7 +2607,170 @@ class JsvmRuntime
         return success;
     }
 
-    bool ResolveBridgeWireValue(napi_env napiEnv, napi_value encoded, size_t depth, napi_value *output)
+    uint32_t AllocateStoredJsFunctionHandle()
+    {
+        uint32_t start = nextStoredJsFunctionHandle_;
+        do {
+            uint32_t candidate = nextStoredJsFunctionHandle_;
+            nextStoredJsFunctionHandle_ =
+                nextStoredJsFunctionHandle_ == UINT32_MAX ? 1 : nextStoredJsFunctionHandle_ + 1;
+            bool used = false;
+            for (size_t index = 0; index < storedJsFunctionCount_; ++index) {
+                if (storedJsFunctions_[index].handle == candidate) {
+                    used = true;
+                    break;
+                }
+            }
+            if (!used) {
+                return candidate;
+            }
+        } while (nextStoredJsFunctionHandle_ != start);
+        LogError("OhosPatch could not allocate a JS function handle");
+        return 0;
+    }
+
+    uint32_t RetainStoredJsFunction(JSVM_Value function)
+    {
+        if (!function) {
+            LogError("RetainStoredJsFunction received an invalid function");
+            return 0;
+        }
+        JSVM_ValueType type = JSVM_UNDEFINED;
+        if (!JsvmOk(OH_JSVM_Typeof(env_, function, &type), "OH_JSVM_Typeof(retained JS function)", env_) ||
+            type != JSVM_FUNCTION) {
+            LogError("OhosPatch can only retain function arguments for UI callbacks");
+            return 0;
+        }
+        for (size_t index = 0; index < storedJsFunctionCount_; ++index) {
+            StoredJsFunction &record = storedJsFunctions_[index];
+            JSVM_Value retained = nullptr;
+            bool equal = false;
+            if (record.reference &&
+                JsvmOk(OH_JSVM_GetReferenceValue(env_, record.reference, &retained),
+                       "OH_JSVM_GetReferenceValue(retained JS function identity)", env_) &&
+                retained &&
+                JsvmOk(OH_JSVM_StrictEquals(env_, retained, function, &equal),
+                       "OH_JSVM_StrictEquals(retained JS function)", env_) &&
+                equal) {
+                return record.handle;
+            }
+        }
+        if (storedJsFunctionCount_ >= kMaxStoredJsFunctions) {
+            LogError("OhosPatch retained JS function limit exceeded");
+            return 0;
+        }
+
+        StoredJsFunction &record = storedJsFunctions_[storedJsFunctionCount_];
+        record.handle = AllocateStoredJsFunctionHandle();
+        if (record.handle == 0) {
+            record = {};
+            return 0;
+        }
+        if (!JsvmOk(OH_JSVM_CreateReference(env_, function, 1, &record.reference),
+                    "OH_JSVM_CreateReference(retained JS function)", env_)) {
+            record = {};
+            return 0;
+        }
+        ++storedJsFunctionCount_;
+        return record.handle;
+    }
+
+    bool GetStoredJsFunction(uint32_t handle, JSVM_Value *function)
+    {
+        if (!function || handle == 0) {
+            LogError("OhosPatch received an invalid retained JS function handle");
+            return false;
+        }
+        *function = nullptr;
+        for (size_t index = 0; index < storedJsFunctionCount_; ++index) {
+            StoredJsFunction &record = storedJsFunctions_[index];
+            if (record.handle == handle && record.reference) {
+                return JsvmOk(OH_JSVM_GetReferenceValue(env_, record.reference, function),
+                              "OH_JSVM_GetReferenceValue(retained JS function)", env_) &&
+                       *function;
+            }
+        }
+        LogError("OhosPatch retained JS function handle is stale or unavailable");
+        return false;
+    }
+
+    bool HasStoredJsFunction(uint32_t handle)
+    {
+        if (handle == 0) {
+            return false;
+        }
+        for (size_t index = 0; index < storedJsFunctionCount_; ++index) {
+            StoredJsFunction &record = storedJsFunctions_[index];
+            if (record.handle == handle && record.reference) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool ClearStoredJsFunctions()
+    {
+        bool success = true;
+        if (!env_) {
+            storedJsFunctionCount_ = 0;
+            return true;
+        }
+        for (size_t index = 0; index < storedJsFunctionCount_; ++index) {
+            StoredJsFunction &record = storedJsFunctions_[index];
+            if (record.reference &&
+                !JsvmOk(OH_JSVM_DeleteReference(env_, record.reference),
+                        "OH_JSVM_DeleteReference(retained JS function)", env_)) {
+                success = false;
+            }
+            record = {};
+        }
+        storedJsFunctionCount_ = 0;
+        return success;
+    }
+
+    bool CreateStoredJsFunctionCallback(napi_env napiEnv, uint32_t handle, napi_value owner, napi_value *output)
+    {
+        if (!output || handle == 0) {
+            LogError("CreateStoredJsFunctionCallback received an invalid argument");
+            return false;
+        }
+        *output = nullptr;
+        if (!HasStoredJsFunction(handle)) {
+            LogError("OhosPatch retained JS function handle is stale or unavailable");
+            return false;
+        }
+
+        UiStoredFunctionCallbackRecord *record = new (std::nothrow) UiStoredFunctionCallbackRecord();
+        if (!record) {
+            LogError("Cannot allocate OhosPatch retained JS function callback record");
+            return false;
+        }
+        record->env = napiEnv;
+        record->functionHandle = handle;
+        if (owner &&
+            !NapiOk(napiEnv, napi_create_reference(napiEnv, owner, 0, &record->owner),
+                    "napi_create_reference(stored JS function owner)")) {
+            delete record;
+            return false;
+        }
+
+        napi_value function = nullptr;
+        if (!NapiOk(napiEnv,
+                    napi_create_function(napiEnv, "ohospatchStoredJsFunction", NAPI_AUTO_LENGTH,
+                                         UiStoredFunctionCallback, record, &function),
+                    "napi_create_function(stored JS function callback)") ||
+            !NapiOk(napiEnv,
+                    napi_add_finalizer(napiEnv, function, record, FinalizeUiStoredFunctionCallback, nullptr, nullptr),
+                    "napi_add_finalizer(stored JS function callback)")) {
+            FinalizeUiStoredFunctionCallback(napiEnv, record, nullptr);
+            return false;
+        }
+        *output = function;
+        return true;
+    }
+
+    bool ResolveBridgeWireValue(napi_env napiEnv, napi_value encoded, size_t depth, napi_value *output,
+                                napi_value owner = nullptr)
     {
         if (!output || !encoded || depth > 32) {
             LogError("OhosPatch proxy wire value exceeds the supported depth");
@@ -2476,6 +2818,23 @@ class JsvmRuntime
             return true;
         }
 
+        bool hasJsvmFunctionHandle = false;
+        if (!NapiOk(napiEnv,
+                    napi_has_named_property(napiEnv, encoded, "__ohospatch_jsvm_function_handle__",
+                                            &hasJsvmFunctionHandle),
+                    "napi_has_named_property(JSVM function handle)")) {
+            return false;
+        }
+        if (hasJsvmFunctionHandle) {
+            uint32_t handle = 0;
+            if (!NapiNamedUint32(napiEnv, encoded, "__ohospatch_jsvm_function_handle__", &handle) ||
+                !CreateStoredJsFunctionCallback(napiEnv, handle, owner, output)) {
+                LogError("OhosPatch received an invalid JSVM function handle");
+                return false;
+            }
+            return true;
+        }
+
         bool hasUndefinedMarker = false;
         if (!NapiOk(napiEnv,
                     napi_has_named_property(napiEnv, encoded, "__ohospatch_proxy_undefined__", &hasUndefinedMarker),
@@ -2507,7 +2866,7 @@ class JsvmRuntime
                         "napi_get_element(proxy wire key)") ||
                 !NapiOk(napiEnv, napi_get_property(napiEnv, encoded, key, &child),
                         "napi_get_property(proxy wire child)") ||
-                !ResolveBridgeWireValue(napiEnv, child, depth + 1, &resolved) ||
+                !ResolveBridgeWireValue(napiEnv, child, depth + 1, &resolved, owner) ||
                 !NapiOk(napiEnv, napi_set_property(napiEnv, encoded, key, resolved),
                         "napi_set_property(proxy wire child)")) {
                 return false;
@@ -2570,7 +2929,7 @@ class JsvmRuntime
         napi_value value = nullptr;
         napi_value key = nullptr;
         if (!NapiJsonParse(active.env, wire, &encoded) ||
-            !runtime->ResolveBridgeWireValue(active.env, encoded, 0, &value) ||
+            !runtime->ResolveBridgeWireValue(active.env, encoded, 0, &value, active.receiver) ||
             !NapiOk(active.env, napi_create_string_utf8(active.env, property.c_str(), property.size(), &key),
                     "napi_create_string_utf8(proxy set property)") ||
             !NapiOk(active.env, napi_set_property(active.env, active.proxyValues[handle], key, value),
@@ -2609,7 +2968,7 @@ class JsvmRuntime
         napi_value resolvedArgs = nullptr;
         uint32_t argumentCount = 0;
         if (!NapiJsonParse(active.env, wire, &encodedArgs) ||
-            !runtime->ResolveBridgeWireValue(active.env, encodedArgs, 0, &resolvedArgs) ||
+            !runtime->ResolveBridgeWireValue(active.env, encodedArgs, 0, &resolvedArgs, active.receiver) ||
             !NapiOk(active.env, napi_get_array_length(active.env, resolvedArgs, &argumentCount),
                     "napi_get_array_length(proxy call args)")) {
             return runtime->ProxyError("OhosPatch could not decode proxied method arguments");
@@ -2754,7 +3113,7 @@ class JsvmRuntime
         napi_value value = nullptr;
         napi_value key = nullptr;
         if (!NapiJsonParse(napiEnv, wire, &encoded) ||
-            !runtime->ResolveBridgeWireValue(napiEnv, encoded, 0, &value) ||
+            !runtime->ResolveBridgeWireValue(napiEnv, encoded, 0, &value, runtime->activeInvocation_.receiver) ||
             !NapiOk(napiEnv, napi_create_string_utf8(napiEnv, property.c_str(), property.size(), &key),
                     "napi_create_string_utf8(import set property)") ||
             !NapiOk(napiEnv, napi_set_property(napiEnv, target, key, value),
@@ -2792,7 +3151,8 @@ class JsvmRuntime
 
         std::array<napi_value, kMaxArguments> arguments{};
         uint32_t argumentCount = 0;
-        if (!runtime->DecodeImportedArguments(wire, &arguments, &argumentCount)) {
+        if (!runtime->DecodeImportedArguments(wire, &arguments, &argumentCount,
+                                              runtime->activeInvocation_.receiver)) {
             return runtime->ProxyError("OhosPatch could not decode imported method arguments");
         }
         napi_value result = nullptr;
@@ -2827,7 +3187,8 @@ class JsvmRuntime
 
         std::array<napi_value, kMaxArguments> arguments{};
         uint32_t argumentCount = 0;
-        if (!runtime->DecodeImportedArguments(wire, &arguments, &argumentCount)) {
+        if (!runtime->DecodeImportedArguments(wire, &arguments, &argumentCount,
+                                              runtime->activeInvocation_.receiver)) {
             return runtime->ProxyError("OhosPatch could not decode imported constructor arguments");
         }
         napi_value instance = nullptr;
@@ -2859,7 +3220,7 @@ class JsvmRuntime
         napi_value encodedArgs = nullptr;
         napi_value napiArgsArray = nullptr;
         if (!NapiJsonParse(active.env, argsJson, &encodedArgs) ||
-            !runtime->ResolveBridgeWireValue(active.env, encodedArgs, 0, &napiArgsArray)) {
+            !runtime->ResolveBridgeWireValue(active.env, encodedArgs, 0, &napiArgsArray, active.receiver)) {
             return runtime->ProxyError("Original method arguments could not be decoded");
         }
         uint32_t napiArgc = 0;
@@ -2915,7 +3276,7 @@ class JsvmRuntime
         napi_value encodedArgs = nullptr;
         napi_value napiArgsArray = nullptr;
         if (!NapiJsonParse(active.env, argsJson, &encodedArgs) ||
-            !runtime->ResolveBridgeWireValue(active.env, encodedArgs, 0, &napiArgsArray)) {
+            !runtime->ResolveBridgeWireValue(active.env, encodedArgs, 0, &napiArgsArray, active.receiver)) {
             return runtime->ProxyError("Original component event arguments could not be decoded");
         }
         uint32_t napiArgc = 0;
@@ -3082,6 +3443,31 @@ class JsvmRuntime
         }
         JSVM_Value result = nullptr;
         if (!runtime->GetRuntimeInfo(&result)) {
+            return Undefined(env);
+        }
+        return result;
+    }
+
+    static JSVM_Value RetainJsFunctionCallback(JSVM_Env env, JSVM_CallbackInfo info)
+    {
+        JsvmRuntime *runtime = Current(env);
+        if (!runtime) {
+            return Undefined(env);
+        }
+
+        size_t argc = 1;
+        JSVM_Value argument = nullptr;
+        if (!JsvmOk(OH_JSVM_GetCbInfo(env, info, &argc, &argument, nullptr, nullptr),
+                    "OH_JSVM_GetCbInfo(retain JS function)", env) ||
+            argc < 1) {
+            LogError("OhosPatch retain JS function requires a function argument");
+            return Undefined(env);
+        }
+
+        uint32_t handle = runtime->RetainStoredJsFunction(argument);
+        JSVM_Value result = nullptr;
+        if (!JsvmOk(OH_JSVM_CreateUint32(env, handle, &result),
+                    "OH_JSVM_CreateUint32(retained JS function handle)", env)) {
             return Undefined(env);
         }
         return result;
@@ -4576,10 +4962,12 @@ class JsvmRuntime
                 capture.env = napiEnv;
                 capture.rule = rule;
                 capture.methodName = methodName;
+                capture.owner = record ? record->owner : nullptr;
                 if (!NapiOk(napiEnv, napi_create_reference(napiEnv, create, 1, &capture.originalCreate),
                             "napi_create_reference(component create)")) {
                     capture.rule = nullptr;
                     capture.methodName.clear();
+                    capture.owner = nullptr;
                     continue;
                 }
                 napi_value captureFunction = nullptr;
@@ -4595,6 +4983,7 @@ class JsvmRuntime
                     capture.originalCreate = nullptr;
                     capture.rule = nullptr;
                     capture.methodName.clear();
+                    capture.owner = nullptr;
                     continue;
                 }
                 capture.installed = true;
@@ -4630,6 +5019,7 @@ class JsvmRuntime
             captures[index].originalCreate = nullptr;
             captures[index].rule = nullptr;
             captures[index].methodName.clear();
+            captures[index].owner = nullptr;
         }
     }
 
@@ -4914,14 +5304,15 @@ class JsvmRuntime
                 continue;
             }
 
+            napi_value owner = nullptr;
+            if (!NapiOk(napiEnv, napi_get_reference_value(napiEnv, record->owner, &owner),
+                        "napi_get_reference_value(component attribute owner)") || !owner) {
+                LogError("Component attribute owner is unavailable");
+                continue;
+            }
+
             napi_value ignored = nullptr;
             if (rule->hasAttrHandler) {
-                napi_value owner = nullptr;
-                if (!NapiOk(napiEnv, napi_get_reference_value(napiEnv, record->owner, &owner),
-                            "napi_get_reference_value(component attribute owner)") || !owner) {
-                    LogError("Component attribute owner is unavailable");
-                    continue;
-                }
                 napi_value value = nullptr;
                 if (!CallUiAttrHandler(napiEnv, rule->ruleId, owner, &value) || !value) {
                     continue;
@@ -4945,8 +5336,10 @@ class JsvmRuntime
             std::array<napi_value, kMaxArguments> argv{};
             bool argsReady = true;
             for (uint32_t argumentIndex = 0; argumentIndex < argc; ++argumentIndex) {
-                if (!NapiOk(napiEnv, napi_get_element(napiEnv, arguments, argumentIndex, &argv[argumentIndex]),
-                            "napi_get_element(component attribute argument)")) {
+                napi_value argument = nullptr;
+                if (!NapiOk(napiEnv, napi_get_element(napiEnv, arguments, argumentIndex, &argument),
+                            "napi_get_element(component attribute argument)") ||
+                    !ResolveBridgeWireValue(napiEnv, argument, 0, &argv[argumentIndex], owner)) {
                     argsReady = false;
                     break;
                 }
@@ -5702,6 +6095,11 @@ class JsvmRuntime
                     "OH_JSVM_CreateFunction(cancel timer)", env_) ||
             !JsvmOk(OH_JSVM_SetNamedProperty(env_, global, "__ohospatch_cancelTimer", cancelTimerFunction),
                     "OH_JSVM_SetNamedProperty(cancel timer)", env_)) {
+            return false;
+        }
+
+        static JSVM_CallbackStruct retainJsFunctionCallback{RetainJsFunctionCallback, nullptr};
+        if (!InstallNativeFunction(global, "__ohospatch_retainJsFunction", &retainJsFunctionCallback)) {
             return false;
         }
 
