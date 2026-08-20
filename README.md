@@ -549,7 +549,24 @@ Selector 目前只有字符串和对象两种输入形态：
 | `node({ type: 'Button', occurrence: 2 })` | 当前目标组件渲染中的第三个 Button |
 | `node({ type: 'Button', where: { id: 'submit', height: 44 } })` | 原始 `id` 和 `height` 同时匹配的第一个 Button |
 
-`type` 必须是内置 ArkUI 节点 API 名称，例如 `Text`、`Button`、`Toggle`、`Slider`。`occurrence` 和 `where` 不能同时出现。节点规则在原 builder 执行后写入，因此 Patch 属性是最后写入者。
+`type` 必须是内置 ArkUI 节点 API 名称，例如 `Column`、`Text`、`Button`、`Toggle`、`Slider`。`occurrence` 和 `where` 不能同时出现。普通属性和事件规则在原 builder 执行后写入，因此 Patch 属性是最后写入者。
+
+`.create(...args)` 用来替换节点创建时的初始化参数，也就是源码里写在组件名后面的参数：
+
+```ts
+Text('abcd')
+  .fontSize(12)
+```
+
+对应 Patch：
+
+```js
+Fixit.component('@vendor/business_page/src/main/ets/components/DemoPatch#DemoPatchScreen')
+  .node({ type: 'Text', occurrence: 0 }) // 选择 DemoPatchScreen 中第一个 Text。
+  .create('Patched abcd'); // 调用 Text.create('Patched abcd')；返回 NodeBuilder。
+```
+
+`create` 同样可以用于 `Column({ space: 14 })` 这类对象参数，例如 `.node({ type: 'Column', occurrence: 0 }).create({ space: 20 })`。它在原 builder 执行期间临时替换 ArkUI 的 `create/createWithLabel`，所以早于 `.attr(...)`、`.attrs(...)` 和 `.event(...)` 生效。也因为这个时机差异，`create` 当前应只搭配 `occurrence` selector 使用；`where` 依赖后续属性调用才能完成匹配，无法可靠地反向修改已经执行过的 `create` 参数。
 
 `where` 的 key 是任意 ArkUI 属性方法名，value 是该方法原始第一个参数的编译时固定值。Runtime 不硬编码 `id`、`height` 等属性名；它会临时观察 `where` 中实际声明的方法。所有 value 必须可 JSON 序列化，所有条件按深度值比较并且必须同时满足。如果同一次组件构建中有多个节点满足条件，只选择按 builder 执行顺序遇到的第一个。
 
@@ -913,7 +930,7 @@ var originSliderChange = panel.node({ type: 'Slider', occurrence: 0 }) // 返回
 
 ## 内置 JS Runtime
 
-`ohospatch/src/main/cpp/runtime/fixit.js` 会在构建 HAR 时嵌入 `libohospatch.so`。JSVM 创建后先执行内置 runtime，再执行宿主 patch。
+`ohospatch/src/main/cpp/runtime/fixit.js` 会在构建 HAR 时 minify 到 rawfile。JSVM 创建后 native 先读取并执行内置 runtime，再执行宿主 patch。
 
 内置 API：
 
@@ -924,7 +941,7 @@ var originSliderChange = panel.node({ type: 'Slider', occurrence: 0 }) // 返回
 - `$r('app.<type>.<name>', ...args)` / `Fixit.resource('app.<type>.<name>', ...args)`
 - `instanceMethod(name, handler)` / `classMethod(name, handler)`
 - `component.param(name, valueOrHandler)` / `component.state(name, valueOrHandler)`
-- `component.node(selector).attr(...)` / `.attrs(...)` / `.event(...)`
+- `component.node(selector).create(...)` / `.attr(...)` / `.attrs(...)` / `.event(...)`
 - `require(fullPath)`
 - `console.debug/log/info/warn/error`
 - `setTimeout` / `clearTimeout`
@@ -1006,7 +1023,7 @@ Demo 使用一个真实的远程脚本 [`entry/src/main/resources/rawfile/patch.
 脚本按以下目的组织：
 
 1. `param/state` 同时演示固定值和基于原值的函数替换，以及 handler 中的 Component `this`。
-2. 多个 `Text/Button/Toggle/Slider` 规则验证 selector 的原始属性匹配、首个命中、按类型 `occurrence` 计数、静态属性、动态属性和多参数事件。
+2. 多个 `Column/Text/Button/Toggle/Slider` 规则验证 create 初始化参数、selector 的原始属性匹配、首个命中、按类型 `occurrence` 计数、静态属性、动态属性和多参数事件。
 3. Button handler 分别演示“先执行 Patch 再调 origin”“Patch 调组件方法后再调 origin”和“用 try/catch 包住会抛错的 origin”。
 4. V1 与 V2 使用同一 DSL，验证 Runtime 自动选择 adapter。
 5. `DemoViewModel`、`Point` 和 timer 规则验证普通方法、静态方法、跨模块 import、嵌套 Proxy 与 JSVM 全局函数。
@@ -1017,6 +1034,7 @@ Demo 使用一个真实的远程脚本 [`entry/src/main/resources/rawfile/patch.
 | --- | --- | --- |
 | `param('message', ...)` | `Original component parameter` | 顶部标题内容变为 `Patched component parameter` |
 | `param('subtitle', handler)` | `State, attrs, events...` | 副标题变为 `Patched subtitle from remote JavaScript` |
+| `Text occurrence 0` 的 `create('Patched abcd')` | `abcd` | 顶部文本变为 `Patched abcd` |
 | 第一个 Text 的 `fontColor` | 标题为深色 | 标题变为红色 |
 | `state('tapCount', handler)` | `tapCount=0` | `tapCount=40` |
 | `state('secondaryCount', handler)` | `secondary=1` | `secondary=21` |

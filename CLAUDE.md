@@ -116,6 +116,8 @@ Targets API 20 state-management V1 and V2 **exported** custom components through
 
 Parameter and state rules use `param/state(name, value)` or `param/state(name, function (originValue) { ... })`; the function receives the original value and `this` is the synchronous current-component Proxy. This is the only public value-replacement DSL.
 
+ArkUI node initialization arguments are patched with `component.node({ type, occurrence }).create(...args)`, for example `Column({ space: 14 })` -> `.node({ type: 'Column', occurrence: 0 }).create({ space: 20 })`. `create(...)` temporarily replaces `create/createWithLabel` while the original builder runs, so use occurrence selectors; `where` is resolved from later attributes and cannot reliably patch create args.
+
 ComponentV2 initial direct `param(...)` callbacks are applied at `finalizeConstruction`, after generated local fields are initialized, so callback `this` can read state reliably. For `@BuilderParam`, do not pass a parent builder method directly if it reads parent fields; wrap it with an arrow, for example `contentBuilder: () => { this.Content() }`, because generated child code may bind direct function values to the child receiver.
 
 The Demo startup task should only initialize OhosPatch. It must not auto-load the bundled fallback patch, otherwise "patch not loaded" baseline tests and manual UI checks become contaminated.

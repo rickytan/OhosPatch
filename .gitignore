@@ -14,3 +14,4 @@ oh_modules/
 .clangd
 oh-package-lock.json5
 .test
+.preview

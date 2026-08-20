@@ -744,6 +744,39 @@
     rule.builderParamName = builderParamName;
   }
 
+  function registerNodeCreate(componentFix, selector) {
+    assertBuiltInNodeSelector(selector, 'create');
+    var args = Array.prototype.slice.call(arguments, 2);
+    var target = componentFix.target;
+    var uniqueKey = targetKey(target) + '|node|' + selector.selectorKey + '|create';
+    var rule = copyUiTarget(target);
+    rule.kind = 'create';
+    copyNodeSelector(rule, selector);
+    rule.arguments = copyJsonValue(args, 'Component create arguments');
+    registerUiRule(uniqueKey, rule, null, null);
+    return componentFix;
+  }
+
+  function registerBuilderNodeCreate(builderFix) {
+    var args = Array.prototype.slice.call(arguments, 1);
+    var target = builderFix.component.target;
+    var selector = builderFix.selector;
+    var uniqueKey = targetKey(target) + '|builder|' + builderFix.childSelector.selectorKey + '|param|' +
+      builderFix.builderParamName + '|node|' + selector.selectorKey + '|create';
+    var rule = copyUiTarget(target);
+    rule.kind = 'create';
+    copyNodeSelector(rule, selector);
+    copyBuilderScope(rule, builderFix.childSelector, builderFix.builderParamName);
+    rule.arguments = copyJsonValue(args, 'Component builder create arguments');
+    registerUiRule(uniqueKey, rule, null, null);
+    return builderFix;
+  }
+
+  ComponentNodeFix.prototype.create = function () {
+    registerNodeCreate.apply(null, [this.component, this.selector].concat(Array.prototype.slice.call(arguments)));
+    return this;
+  };
+
   ComponentBuilderNodeFix.prototype.attr = function (attributeName) {
     var name = validateUiName(attributeName, 'Component builder attribute name');
     var args = Array.prototype.slice.call(arguments, 1);
@@ -772,6 +805,11 @@
       rule.arguments = copyJsonValue(args, 'Component builder attribute arguments');
       registerUiRule(uniqueKey, rule, null, null);
     }
+    return this;
+  };
+
+  ComponentBuilderNodeFix.prototype.create = function () {
+    registerBuilderNodeCreate.apply(null, [this].concat(Array.prototype.slice.call(arguments)));
     return this;
   };
 

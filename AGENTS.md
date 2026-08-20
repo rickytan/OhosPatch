@@ -120,18 +120,20 @@ Proposed public concepts:
 - `component.param(name, valueOrHandler)` for incoming component parameters. Handler form receives the original value with `this` bound to the current Component instance Proxy.
 - `component.state(name, valueOrHandler)` for observable component state. Handler form receives the original value with `this` bound to the current Component instance Proxy.
 - `component.node(selector)` for a built-in ArkUI node.
+- `node.create(...args)` for ArkUI node initialization arguments such as `Column({ space: 14 })`.
 - `node.attrs({...})` for attribute overrides.
 - `node.event(name, handler)` for synchronous callback replacement.
 - Event handlers receive only the original ArkUI event arguments. Ordinary `function` handlers receive `this` as the current Component instance Proxy and should read/write state directly through that Proxy.
 
-### Implemented status (2026-08-13)
+### Implemented status (2026-08-14)
 
-- Runtime version `1.16.0` implements `Fixit.component`, original-attribute node selectors, parent-scoped child Component parameter patching, named multi-`@BuilderParam` patching through `.builder(...)`, and the invocation-scoped ArkTS object Proxy bridge.
+- Runtime version `1.16.0` implements `Fixit.component`, `node.create(...)` for ArkUI create/createWithLabel initialization arguments, original-attribute node selectors, parent-scoped child Component parameter patching, named multi-`@BuilderParam` patching through `.builder(...)`, and the invocation-scoped ArkTS object Proxy bridge.
 - API 20 state-management V1 and V2 exported custom components are supported through separate native adapters with the same public DSL.
 - Direct `param/state(name, valueOrHandler)` are implemented; no chain-style value-fix API is exposed.
 - ComponentV2 initial direct `param(...)` handler execution is deferred until `finalizeConstruction`, after generated local fields are initialized. This lets the handler read `this` reliably; update/reuse paths still apply during `updateParam`/`resetParam`.
 - Node selection prefers `{ type, occurrence }` for efficient zero-based per-type counting and supports `{ type, where }` when original-attribute matching is needed.
-- `attr`, `attrs`, and synchronous `event(name, handler)` are implemented.
+- `create`, `attr`, `attrs`, and synchronous `event(name, handler)` are implemented.
+- `create(...)` should use `{ type, occurrence }`; `{ type, where }` is intentionally skipped for create rules because `where` is resolved from later attribute calls after create has already run.
 - Component event handlers written with normal `function` syntax receive `this` as the current Component instance Proxy. Arrow functions keep lexical `this`.
 - Component event handlers receive only the original ArkUI event arguments and can read/write component state through `this`.
 - `node.event(...)` returns an original ArkUI event callback proxy. `origin.apply(this, arguments)` is supported.
@@ -153,7 +155,7 @@ Implementation should proceed in explicit capability phases:
 5. Synchronous event replacement, initially `onClick` and then generic event adapters.
 6. State-management V2 adapter with the same public DSL.
 7. Route factory interception for non-exported `@Entry` pages.
-8. Create-argument/hierarchy selectors, resources, and live-instance refresh.
+8. Hierarchy selectors, resources, and live-instance refresh.
 
 Fail closed when a component shape, node selector, attribute, or event cannot be verified. Log an error and leave business behavior untouched.
 

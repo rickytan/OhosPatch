@@ -22,6 +22,11 @@ struct DemoPatchScreen {
   build() {
     Scroll() {
       Column({ space: 14 }) {
+        Text('abcd')
+          .fontSize(12)
+          .fontColor('#59636E')
+          .width('100%')
+
         PatchablePanel({
           message: 'Original component parameter',
           subtitle: 'State, attrs, events, this proxy, and original event callback'

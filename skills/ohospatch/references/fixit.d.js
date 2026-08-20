@@ -128,6 +128,9 @@
 
 /**
  * @typedef {Object} OhosPatchComponentBuilderNodeFix
+ * @property {(...args: OhosPatchJsonValue[]) => OhosPatchComponentBuilderNodeFix} create
+ *   Replace the selected ArkUI node's initialization call (`create` / `createWithLabel`) inside BuilderParam
+ *   content. Arguments are applied before the original builder's later attributes and events run.
  * @property {(attributeName: string, value: OhosPatchJsonValue | OhosPatchAttrHandler,
  *   ...args: OhosPatchJsonValue[]) => OhosPatchComponentBuilderNodeFix} attr
  *   Override one ArkUI node attribute inside a named BuilderParam passed to a selected child custom Component.
@@ -142,6 +145,10 @@
 
 /**
  * @typedef {Object} OhosPatchComponentNodeFix
+ * @property {(...args: OhosPatchJsonValue[]) => OhosPatchComponentNodeFix} create
+ *   Replace the selected ArkUI node's initialization call (`create` / `createWithLabel`). For example,
+ *   `node({ type: 'Column', occurrence: 0 }).create({ space: 20 })` patches `Column({ space: 14 })`.
+ *   Use `occurrence` selectors for create patches; `where` selectors are evaluated after create arguments.
  * @property {(attributeName: string, value: OhosPatchJsonValue | OhosPatchAttrHandler,
  *   ...args: OhosPatchJsonValue[]) => OhosPatchComponentNodeFix} attr
  *   Override one node attribute. When `value` is a function it is invoked with `this` bound to the

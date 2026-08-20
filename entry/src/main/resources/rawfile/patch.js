@@ -19,6 +19,9 @@
   var builderParamRoot = Fixit.component(
     '@vendor/business_page/src/main/ets/components/BuilderParamPanel#BuilderParamRoot'
   );
+  var demoPatchScreen = Fixit.component(
+    '@vendor/business_page/src/main/ets/components/DemoPatch#DemoPatchScreen'
+  );
 
   // --- Timer + console 日志 ---
   // setTimeout：一次性回调，闭包变量在 method patch 中可读。
@@ -41,6 +44,11 @@
       console.warn('OhosPatch interval cleared after ' + tick + ' ticks');
     }
   }, 60);
+
+  // --- Component create arguments: 修改 Text('abcd') 初始化参数 ---
+  // 这里命中 DemoPatchScreen 中第一个 Text，把创建参数改为新的 label。
+  demoPatchScreen.node({ type: 'Text', occurrence: 0 })
+    .create('Patched abcd');
 
   // --- Component value override: param / state ---
   panel.param('message', 'Patched component parameter');

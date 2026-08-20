@@ -270,6 +270,10 @@ export default function fixitTest(): void {
       if (baselineScroll === undefined || baselineScroll === null) {
         throw new Error('patch-target-scroll was not found before patch installation');
       }
+      const baselineCreateText = await driver.waitForComponent(ON.text('abcd'), 5000);
+      if (baselineCreateText === undefined || baselineCreateText === null) {
+        throw new Error('Text create marker was not found before patch installation');
+      }
       await baselineScroll.scrollToBottom(5000);
       const baselineMultiContent = await driver.waitForComponent(ON.id('multi-builder-content-text'), 5000);
       if (baselineMultiContent === undefined || baselineMultiContent === null) {
@@ -286,6 +290,10 @@ export default function fixitTest(): void {
         var componentV1 = Fixit.component(
           'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/PatchablePanel#PatchablePanel'
         );
+        Fixit.component(
+          'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/DemoPatch#DemoPatchScreen'
+        ).node({ type: 'Text', occurrence: 0 })
+          .create('Patched abcd');
         componentV1.state('tapCount', 40);
         componentV1.state('statusText', 'Patched V1 state before render');
         var component = Fixit.component(
@@ -381,6 +389,11 @@ export default function fixitTest(): void {
       }
       await patchedScroll.scrollToTop(5000);
 
+      const patchedCreateText = await findWithForwardScroll(
+        driver, ON.text('Patched abcd'), 'patched Text create argument', displaySize
+      );
+      expect(await patchedCreateText.getText()).assertEqual('Patched abcd');
+
       const v1State = await findWithForwardScroll(driver, ON.id('v1-state-text'), 'patched V1 state', displaySize);
       expect(await v1State.getText()).assertEqual('tapCount=40, secondary=1');
       const v1Status = await findWithForwardScroll(driver, ON.id('v1-status-text'), 'patched V1 status', displaySize);
@@ -414,6 +427,7 @@ export default function fixitTest(): void {
         driver, ON.id('v2-secondary-action'), 'v2-secondary-action', displaySize
       );
       await secondaryButton.click();
+      await patchedScroll.scrollToTop(5000);
       const secondaryStatus = await findWithForwardScroll(
         driver, ON.id('v2-status-text'), 'V2 secondary event status', displaySize
       );

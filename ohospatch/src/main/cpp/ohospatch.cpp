@@ -389,6 +389,7 @@ struct ImportedValue {
 enum class UiRuleKind {
     PARAM,
     STATE,
+    CREATE,
     ATTRIBUTE,
     EVENT,
     CHILD_PARAM,
@@ -406,6 +407,7 @@ enum class UiMethodKind {
 };
 
 constexpr size_t kMaxUiNodeTypesPerRender = 64;
+constexpr size_t kMaxUiCreateMethodsPerNode = 2;
 constexpr size_t kMaxUiEventsPerNode = 16;
 constexpr size_t kMaxUiWhereAttributesPerNode = 16;
 constexpr size_t kMaxUiSelectorsPerNode = 32;
@@ -453,6 +455,8 @@ std::string DescribeUiRuleKind(UiRuleKind kind)
             return "param";
         case UiRuleKind::STATE:
             return "state";
+        case UiRuleKind::CREATE:
+            return "create";
         case UiRuleKind::ATTRIBUTE:
             return "attribute";
         case UiRuleKind::EVENT:
@@ -462,6 +466,11 @@ std::string DescribeUiRuleKind(UiRuleKind kind)
         default:
             return "unknown";
     }
+}
+
+bool IsUiNodeRuleKind(UiRuleKind kind)
+{
+    return kind == UiRuleKind::CREATE || kind == UiRuleKind::ATTRIBUTE || kind == UiRuleKind::EVENT;
 }
 
 std::string DescribeUiRule(const UiRule *rule)
@@ -551,6 +560,14 @@ struct UiEventCaptureContext {
     napi_env env = nullptr;
     napi_ref originalRegistrar = nullptr;
     napi_ref originalEvent = nullptr;
+    UiRule *rule = nullptr;
+    bool installed = false;
+};
+
+struct UiCreateCaptureContext {
+    napi_env env = nullptr;
+    napi_ref originalCreate = nullptr;
+    std::string methodName;
     UiRule *rule = nullptr;
     bool installed = false;
 };
@@ -1807,6 +1824,60 @@ class JsvmRuntime
         return result;
     }
 
+    static napi_value UiCreateCaptureCallback(napi_env env, napi_callback_info info)
+    {
+        size_t originalArgc = kMaxArguments;
+        napi_value receiver = nullptr;
+        void *data = nullptr;
+        std::array<napi_value, kMaxArguments> originalArgv{};
+        if (!NapiOk(env, napi_get_cb_info(env, info, &originalArgc, originalArgv.data(), &receiver, &data),
+                    "napi_get_cb_info(component create capture)")) {
+            return NapiUndefined(env);
+        }
+        UiCreateCaptureContext *capture = static_cast<UiCreateCaptureContext *>(data);
+        if (!capture || !capture->originalCreate || !capture->rule) {
+            LogError("OhosPatch component create capture has no context");
+            return NapiUndefined(env);
+        }
+
+        napi_value create = nullptr;
+        if (!NapiOk(env, napi_get_reference_value(env, capture->originalCreate, &create),
+                    "napi_get_reference_value(component create)")) {
+            return NapiUndefined(env);
+        }
+
+        napi_value arguments = nullptr;
+        uint32_t argc = 0;
+        if (!NapiJsonParse(env, capture->rule->argumentsJson, &arguments) ||
+            !NapiOk(env, napi_get_array_length(env, arguments, &argc),
+                    "napi_get_array_length(component create arguments)")) {
+            return NapiUndefined(env);
+        }
+        if (argc > kMaxArguments) {
+            LogError("Component create argument count exceeds the OhosPatch limit");
+            return NapiUndefined(env);
+        }
+
+        std::array<napi_value, kMaxArguments> argv{};
+        for (uint32_t argumentIndex = 0; argumentIndex < argc; ++argumentIndex) {
+            if (!NapiOk(env, napi_get_element(env, arguments, argumentIndex, &argv[argumentIndex]),
+                        "napi_get_element(component create argument)")) {
+                return NapiUndefined(env);
+            }
+        }
+
+        napi_value result = nullptr;
+        napi_status status = napi_call_function(env, receiver, create, argc, argv.data(), &result);
+        if (status == napi_pending_exception) {
+            LogError("Original component create function threw an exception");
+            return nullptr;
+        }
+        if (!NapiOk(env, status, "napi_call_function(component create)")) {
+            return NapiUndefined(env);
+        }
+        return result;
+    }
+
     static napi_value UiWhereCaptureCallback(napi_env env, napi_callback_info info)
     {
         size_t argc = kMaxArguments;
@@ -2021,6 +2092,9 @@ class JsvmRuntime
             return NapiUndefined(napiEnv);
         }
 
+        std::array<UiCreateCaptureContext, kMaxUiCreateMethodsPerNode> createCaptures{};
+        size_t createCaptureCount =
+            PrepareUiCreateCaptures(napiEnv, record, componentApi, createCaptures.data(), createCaptures.size());
         std::array<UiWhereCaptureContext, kMaxUiWhereAttributesPerNode> whereCaptures{};
         size_t whereCaptureCount =
             PrepareUiWhereCaptures(napiEnv, record, componentApi, whereCaptures.data(), whereCaptures.size());
@@ -2043,15 +2117,18 @@ class JsvmRuntime
         if (pushedScopedChild) {
             PopUiScopedChildCreationFrame();
         }
+        RestoreUiCreateCaptures(napiEnv, componentApi, createCaptures.data(), createCaptureCount);
         RestoreUiEventCaptures(napiEnv, componentApi, eventCaptures.data(), eventCaptureCount);
         RestoreUiWhereCaptures(napiEnv, componentApi, whereCaptures.data(), whereCaptureCount);
         if (status == napi_pending_exception) {
             LogError("Original ArkUI node builder threw an exception");
+            ReleaseUiCreateCaptures(napiEnv, createCaptures.data(), createCaptureCount);
             ReleaseUiEventCaptures(napiEnv, eventCaptures.data(), eventCaptureCount);
             ReleaseUiWhereCaptures(napiEnv, whereCaptures.data(), whereCaptureCount);
             return nullptr;
         }
         if (!NapiOk(napiEnv, status, "napi_call_function(component node builder)")) {
+            ReleaseUiCreateCaptures(napiEnv, createCaptures.data(), createCaptureCount);
             ReleaseUiEventCaptures(napiEnv, eventCaptures.data(), eventCaptureCount);
             ReleaseUiWhereCaptures(napiEnv, whereCaptures.data(), whereCaptureCount);
             return NapiUndefined(napiEnv);
@@ -2060,6 +2137,7 @@ class JsvmRuntime
         SelectUiWhereRules(napiEnv, record, whereCaptures.data(), whereCaptureCount);
         ApplyUiAttributes(napiEnv, record, componentApi);
         InstallUiEventCallbacks(napiEnv, record, componentApi, eventCaptures.data(), eventCaptureCount);
+        ReleaseUiCreateCaptures(napiEnv, createCaptures.data(), createCaptureCount);
         ReleaseUiEventCaptures(napiEnv, eventCaptures.data(), eventCaptureCount);
         ReleaseUiWhereCaptures(napiEnv, whereCaptures.data(), whereCaptureCount);
         return result;
@@ -3461,8 +3539,7 @@ class JsvmRuntime
             for (size_t ruleIndex = 0; ruleIndex < uiRuleCount_; ++ruleIndex) {
                 UiRule *rule = uiRules_[ruleIndex].get();
                 if (rule && rule->targetKey == frame.targetKey && rule->childTargetKey == childTargetKey &&
-                    (rule->kind == UiRuleKind::CHILD_PARAM || rule->kind == UiRuleKind::ATTRIBUTE ||
-                     rule->kind == UiRuleKind::EVENT)) {
+                    (rule->kind == UiRuleKind::CHILD_PARAM || IsUiNodeRuleKind(rule->kind))) {
                     return &frame;
                 }
             }
@@ -4247,7 +4324,7 @@ class JsvmRuntime
         }
         for (size_t index = 0; index < uiRuleCount_; ++index) {
             UiRule *rule = uiRules_[index].get();
-            if (!rule || (rule->kind != UiRuleKind::ATTRIBUTE && rule->kind != UiRuleKind::EVENT) ||
+            if (!rule || (!IsUiNodeRuleKind(rule->kind)) ||
                 rule->targetKey != targetKey) {
                 continue;
             }
@@ -4360,7 +4437,7 @@ class JsvmRuntime
         if (hasNativeOccurrence) {
             for (size_t index = 0; index < uiRuleCount_; ++index) {
                 UiRule *rule = uiRules_[index].get();
-                if (rule && (rule->kind == UiRuleKind::ATTRIBUTE || rule->kind == UiRuleKind::EVENT) &&
+                if (rule && IsUiNodeRuleKind(rule->kind) &&
                     rule->targetKey == ruleTargetKey && rule->nodeType == nodeType &&
                     ((!inSlotScope && rule->childTargetKey.empty()) ||
                      (inSlotScope && rule->childTargetKey == slotChildTargetKey &&
@@ -4384,7 +4461,7 @@ class JsvmRuntime
                 bool supportsScopedChild =
                     rule && rule->targetKey == targetKey && rule->childClassName == customNodeName &&
                     (rule->kind == UiRuleKind::CHILD_PARAM ||
-                     ((rule->kind == UiRuleKind::ATTRIBUTE || rule->kind == UiRuleKind::EVENT) &&
+                     (IsUiNodeRuleKind(rule->kind) &&
                       !rule->childTargetKey.empty()));
                 if (!supportsScopedChild) {
                     continue;
@@ -4452,6 +4529,96 @@ class JsvmRuntime
             return;
         }
         argv[0] = wrapper;
+    }
+
+    size_t PrepareUiCreateCaptures(napi_env napiEnv, UiNodeCallbackRecord *record, napi_value componentApi,
+                                   UiCreateCaptureContext *captures, size_t capacity)
+    {
+        size_t count = 0;
+        const char *methodNames[kMaxUiCreateMethodsPerNode] = {"create", "createWithLabel"};
+        for (size_t ruleIndex = 0; ruleIndex < uiRuleCount_ && count < capacity; ++ruleIndex) {
+            UiRule *rule = uiRules_[ruleIndex].get();
+            if (!rule || rule->kind != UiRuleKind::CREATE || !RuleCouldMatchNode(rule, record)) {
+                continue;
+            }
+            if (rule->whereConditionCount > 0) {
+                LogError("Cannot patch Component create arguments with a where selector. Rule={" +
+                         DescribeUiRule(rule) +
+                         "}. create/createWithLabel arguments must be replaced before later attributes are "
+                         "registered, so use occurrence for create patches.");
+                continue;
+            }
+            for (size_t methodIndex = 0; methodIndex < kMaxUiCreateMethodsPerNode && count < capacity; ++methodIndex) {
+                const char *methodName = methodNames[methodIndex];
+                napi_value create = nullptr;
+                napi_valuetype createType = napi_undefined;
+                if (!NapiOk(napiEnv, napi_get_named_property(napiEnv, componentApi, methodName, &create),
+                            "napi_get_named_property(component create)") ||
+                    !NapiOk(napiEnv, napi_typeof(napiEnv, create, &createType),
+                            "napi_typeof(component create)") ||
+                    createType != napi_function) {
+                    continue;
+                }
+
+                UiCreateCaptureContext &capture = captures[count];
+                capture.env = napiEnv;
+                capture.rule = rule;
+                capture.methodName = methodName;
+                if (!NapiOk(napiEnv, napi_create_reference(napiEnv, create, 1, &capture.originalCreate),
+                            "napi_create_reference(component create)")) {
+                    capture.rule = nullptr;
+                    capture.methodName.clear();
+                    continue;
+                }
+                napi_value captureFunction = nullptr;
+                if (!NapiOk(napiEnv,
+                            napi_create_function(napiEnv, "ohospatchCreateCapture", NAPI_AUTO_LENGTH,
+                                                 UiCreateCaptureCallback, &capture, &captureFunction),
+                            "napi_create_function(component create capture)") ||
+                    !NapiOk(napiEnv,
+                            napi_set_named_property(napiEnv, componentApi, methodName, captureFunction),
+                            "napi_set_named_property(component create capture)")) {
+                    DeleteNapiReference(napiEnv, capture.originalCreate,
+                                        "napi_delete_reference(component create)");
+                    capture.originalCreate = nullptr;
+                    capture.rule = nullptr;
+                    capture.methodName.clear();
+                    continue;
+                }
+                capture.installed = true;
+                ++count;
+            }
+        }
+        return count;
+    }
+
+    static void RestoreUiCreateCaptures(napi_env napiEnv, napi_value componentApi, UiCreateCaptureContext *captures,
+                                        size_t count)
+    {
+        for (size_t index = count; index > 0; --index) {
+            UiCreateCaptureContext &capture = captures[index - 1];
+            if (!capture.installed || !capture.originalCreate || capture.methodName.empty()) {
+                continue;
+            }
+            napi_value create = nullptr;
+            if (NapiOk(napiEnv, napi_get_reference_value(napiEnv, capture.originalCreate, &create),
+                       "napi_get_reference_value(component create)")) {
+                NapiOk(napiEnv, napi_set_named_property(napiEnv, componentApi, capture.methodName.c_str(), create),
+                       "napi_set_named_property(restore component create)");
+            }
+            capture.installed = false;
+        }
+    }
+
+    static void ReleaseUiCreateCaptures(napi_env napiEnv, UiCreateCaptureContext *captures, size_t count)
+    {
+        for (size_t index = 0; index < count; ++index) {
+            DeleteNapiReference(napiEnv, captures[index].originalCreate,
+                                "napi_delete_reference(component create)");
+            captures[index].originalCreate = nullptr;
+            captures[index].rule = nullptr;
+            captures[index].methodName.clear();
+        }
     }
 
     size_t PrepareUiWhereCaptures(napi_env napiEnv, UiNodeCallbackRecord *record, napi_value componentApi,
@@ -4929,6 +5096,16 @@ class JsvmRuntime
             if (!NapiNamedString(napiEnv, spec, "propertyName", &rule->propertyName)) {
                 return false;
             }
+        } else if (kind == "create") {
+            rule->kind = UiRuleKind::CREATE;
+            napi_value arguments = nullptr;
+            if (!ParseUiNodeSelector(napiEnv, spec, rule.get()) ||
+                !ParseUiOptionalChildScope(napiEnv, spec, rule.get()) ||
+                !NapiOk(napiEnv, napi_get_named_property(napiEnv, spec, "arguments", &arguments),
+                        "napi_get_named_property(component create arguments)") ||
+                !NapiJsonStringify(napiEnv, arguments, "[]", &rule->argumentsJson)) {
+                return false;
+            }
         } else if (kind == "attribute") {
             rule->kind = UiRuleKind::ATTRIBUTE;
             napi_value arguments = nullptr;
@@ -5003,7 +5180,7 @@ class JsvmRuntime
     {
         for (size_t index = 0; index < uiRuleCount_; ++index) {
             UiRule *rule = uiRules_[index].get();
-            if (rule && (rule->kind == UiRuleKind::ATTRIBUTE || rule->kind == UiRuleKind::EVENT) &&
+            if (rule && IsUiNodeRuleKind(rule->kind) &&
                 rule->childTargetKey == targetKey) {
                 return true;
             }
@@ -5016,7 +5193,7 @@ class JsvmRuntime
     {
         for (size_t index = 0; index < uiRuleCount_; ++index) {
             UiRule *rule = uiRules_[index].get();
-            if (rule && (rule->kind == UiRuleKind::ATTRIBUTE || rule->kind == UiRuleKind::EVENT) &&
+            if (rule && IsUiNodeRuleKind(rule->kind) &&
                 rule->targetKey == parentTargetKey && rule->childTargetKey == childTargetKey &&
                 rule->childOccurrence == childOccurrence &&
                 (rule->builderParamName.empty() || rule->builderParamName == builderParamName)) {
@@ -5036,7 +5213,7 @@ class JsvmRuntime
         bool found = false;
         for (size_t index = 0; index < uiRuleCount_; ++index) {
             UiRule *rule = uiRules_[index].get();
-            if (!rule || (rule->kind != UiRuleKind::ATTRIBUTE && rule->kind != UiRuleKind::EVENT) ||
+            if (!rule || (!IsUiNodeRuleKind(rule->kind)) ||
                 rule->targetKey != parentTargetKey || rule->childTargetKey != childTargetKey ||
                 rule->childOccurrence != childOccurrence) {
                 continue;
@@ -5191,7 +5368,8 @@ class JsvmRuntime
                           TargetReceivesScopedChildParam(rule->targetKey) ||
                           TargetReceivesBuilderRules(rule->targetKey);
         bool needsState = TargetNeedsRuleKind(rule->targetKey, UiRuleKind::STATE);
-        bool needsNodes = TargetNeedsRuleKind(rule->targetKey, UiRuleKind::ATTRIBUTE) ||
+        bool needsNodes = TargetNeedsRuleKind(rule->targetKey, UiRuleKind::CREATE) ||
+                          TargetNeedsRuleKind(rule->targetKey, UiRuleKind::ATTRIBUTE) ||
                           TargetNeedsRuleKind(rule->targetKey, UiRuleKind::EVENT) ||
                           TargetReceivesBuilderRules(rule->targetKey);
         bool needsChildScope = TargetNeedsRuleKind(rule->targetKey, UiRuleKind::CHILD_PARAM);
@@ -5319,7 +5497,7 @@ class JsvmRuntime
                     return false;
                 }
             }
-            if ((rule->kind == UiRuleKind::ATTRIBUTE || rule->kind == UiRuleKind::EVENT) &&
+            if (IsUiNodeRuleKind(rule->kind) &&
                 !rule->childTargetKey.empty() && !IsUiComponentHookInstalled(rule->childTargetKey)) {
                 std::unique_ptr<UiRule> childRule(new (std::nothrow) UiRule());
                 if (!childRule) {
