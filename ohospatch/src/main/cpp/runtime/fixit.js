@@ -676,16 +676,25 @@
     this.selector = normalizeNodeSelector(selector);
   }
 
-  function ComponentBuilderNodeFix(componentNode, builderParamName, selector) {
-    assertChildNodeSelector(componentNode.selector, 'builder');
-    this.component = componentNode.component;
-    this.childSelector = componentNode.selector;
-    this.builderParamName = builderParamName
-      ? validateUiName(builderParamName, 'Component BuilderParam name')
-      : '';
+  function ComponentBuilderNodeFix(component, selector) {
+    this.component = component;
+    this.childSelector = null;
+    this.builderParamName = '';
+    this.builderMethodName = '';
     this.selector = normalizeNodeSelector(selector);
     assertBuiltInNodeSelector(this.selector, 'builder node');
   }
+
+  function ComponentBuilderMethodFix(component, builderMethodName) {
+    this.component = component;
+    this.builderMethodName = validateUiName(builderMethodName, 'Component Builder method name');
+  }
+
+  ComponentBuilderMethodFix.prototype.node = function (selector) {
+    var fix = new ComponentBuilderNodeFix(this.component, selector);
+    fix.builderMethodName = this.builderMethodName;
+    return fix;
+  };
 
   function assertBuiltInNodeSelector(selector, operation) {
     if (selector.componentTarget) {
@@ -796,18 +805,36 @@
     } else if (arguments.length !== 2) {
       throw new TypeError('Component builder requires a node selector and an optional BuilderParam name');
     }
-    return new ComponentBuilderNodeFix(this, builderParamName, selector);
+    assertChildNodeSelector(this.selector, 'builder');
+    var fix = new ComponentBuilderNodeFix(this.component, selector);
+    fix.childSelector = this.selector;
+    fix.builderParamName = builderParamName
+      ? validateUiName(builderParamName, 'Component BuilderParam name')
+      : '';
+    return fix;
   };
 
-  function copyBuilderScope(rule, childSelector, builderParamName) {
-    var childTarget = childSelector.componentTarget;
+  function builderScopeKey(builderFix) {
+    if (builderFix.builderMethodName) {
+      return '|builderMethod|' + builderFix.builderMethodName;
+    }
+    return '|builderParam|' + builderFix.childSelector.selectorKey + '|param|' + builderFix.builderParamName;
+  }
+
+  function copyBuilderScope(rule, builderFix) {
+    if (builderFix.builderMethodName) {
+      rule.builderMethodName = builderFix.builderMethodName;
+      rule.selectorKey = 'builderMethod:' + builderFix.builderMethodName + '|' + rule.selectorKey;
+      return;
+    }
+    var childTarget = builderFix.childSelector.componentTarget;
     rule.childClassName = childTarget.className;
     rule.childModulePath = childTarget.modulePath;
     rule.childModuleInfo = childTarget.moduleInfo || '';
     rule.childExportName = childTarget.exportName;
     rule.childTargetKey = targetKey(childTarget);
-    rule.childOccurrence = childSelector.occurrence;
-    rule.builderParamName = builderParamName;
+    rule.childOccurrence = builderFix.childSelector.occurrence;
+    rule.builderParamName = builderFix.builderParamName;
   }
 
   function registerNodeCreate(componentFix, selector) {
@@ -827,12 +854,11 @@
     var args = Array.prototype.slice.call(arguments, 1);
     var target = builderFix.component.target;
     var selector = builderFix.selector;
-    var uniqueKey = targetKey(target) + '|builder|' + builderFix.childSelector.selectorKey + '|param|' +
-      builderFix.builderParamName + '|node|' + selector.selectorKey + '|create';
+    var uniqueKey = targetKey(target) + builderScopeKey(builderFix) + '|node|' + selector.selectorKey + '|create';
     var rule = copyUiTarget(target);
     rule.kind = 'create';
     copyNodeSelector(rule, selector);
-    copyBuilderScope(rule, builderFix.childSelector, builderFix.builderParamName);
+    copyBuilderScope(rule, builderFix);
     rule.arguments = copyUiArguments(args, 'Component builder create arguments');
     registerUiRule(uniqueKey, rule, null, null);
     return builderFix;
@@ -852,12 +878,11 @@
 
     var target = this.component.target;
     var selector = this.selector;
-    var uniqueKey = targetKey(target) + '|builder|' + this.childSelector.selectorKey + '|param|' +
-      this.builderParamName + '|node|' + selector.selectorKey + '|attr|' + name;
+    var uniqueKey = targetKey(target) + builderScopeKey(this) + '|node|' + selector.selectorKey + '|attr|' + name;
     var rule = copyUiTarget(target);
     rule.kind = 'attribute';
     copyNodeSelector(rule, selector);
-    copyBuilderScope(rule, this.childSelector, this.builderParamName);
+    copyBuilderScope(rule, this);
     rule.attributeName = name;
 
     if (typeof args[0] === 'function') {
@@ -897,12 +922,11 @@
 
     var target = this.component.target;
     var selector = this.selector;
-    var uniqueKey = targetKey(target) + '|builder|' + this.childSelector.selectorKey + '|param|' +
-      this.builderParamName + '|node|' + selector.selectorKey + '|event|' + name;
+    var uniqueKey = targetKey(target) + builderScopeKey(this) + '|node|' + selector.selectorKey + '|event|' + name;
     var rule = copyUiTarget(target);
     rule.kind = 'event';
     copyNodeSelector(rule, selector);
-    copyBuilderScope(rule, this.childSelector, this.builderParamName);
+    copyBuilderScope(rule, this);
     rule.eventName = name;
     registerUiRule(uniqueKey, rule, registry.uiEvents, handler);
     return makeUiEventOrigin();
@@ -924,6 +948,13 @@
 
   ComponentFix.prototype.node = function (selector) {
     return new ComponentNodeFix(this, selector);
+  };
+
+  ComponentFix.prototype.builder = function (builderMethodName) {
+    if (arguments.length !== 1) {
+      throw new TypeError('Component builder requires exactly one @Builder method name');
+    }
+    return new ComponentBuilderMethodFix(this, builderMethodName);
   };
 
   function Fixit(target) {
@@ -1022,7 +1053,7 @@
   };
 
   Object.defineProperty(Fixit, 'runtimeVersion', {
-    value: '1.16.0',
+    value: '1.17.0',
     enumerable: true
   });
 

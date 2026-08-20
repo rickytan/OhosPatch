@@ -1,5 +1,6 @@
 import { DemoResult, DemoScenario } from "../ViewModel/DemoScenario";
 import { BuilderParamRoot } from "./BuilderParamPanel";
+import { BuilderMethodPanel } from "./BuilderMethodPanel";
 import { ParentChildParamPanel } from "./ChildParamPanel";
 import { PatchablePanel } from "./PatchablePanel";
 import { PatchablePanelV2 } from "./PatchablePanelV2";
@@ -41,6 +42,8 @@ struct DemoPatchScreen {
         BuilderParamRoot({
           message: 'Original builder-param root parameter'
         })
+
+        BuilderMethodPanel()
 
         Button('Run method hook scenario')
           .width('100%')

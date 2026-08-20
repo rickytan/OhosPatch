@@ -8,7 +8,7 @@
  *
  *   /// <reference path="./fixit.d.js" />
  *
- * @version 1.16.0
+ * @version 1.17.0
  */
 
 /**
@@ -138,18 +138,25 @@
 /**
  * @typedef {Object} OhosPatchComponentBuilderNodeFix
  * @property {(...args: OhosPatchUiArgument[]) => OhosPatchComponentBuilderNodeFix} create
- *   Replace the selected ArkUI node's initialization call (`create` / `createWithLabel`) inside BuilderParam
- *   content. Arguments are applied before the original builder's later attributes and events run.
+ *   Replace the selected ArkUI node's initialization call (`create` / `createWithLabel`) inside a Component
+ *   `@Builder` method or BuilderParam. Arguments run before the original node's later attributes and events.
  * @property {(attributeName: string, value: OhosPatchUiArgument | OhosPatchAttrHandler,
  *   ...args: OhosPatchUiArgument[]) => OhosPatchComponentBuilderNodeFix} attr
- *   Override one ArkUI node attribute inside a named BuilderParam passed to a selected child custom Component.
- *   Handler `this` is bound to the parent component instance.
+ *   Override one ArkUI node attribute inside a Component `@Builder` method or BuilderParam. Handler `this` is
+ *   bound to the Component instance that owns the Builder content.
  * @property {(attributes: Record<string, OhosPatchUiArgument | OhosPatchAttrHandler>) =>
  *   OhosPatchComponentBuilderNodeFix} attrs
- *   Override multiple single-argument attributes inside the selected BuilderParam content.
+ *   Override multiple single-argument attributes inside the selected Builder content.
  * @property {(eventName: string, handler: OhosPatchComponentEventHandler) =>
- *   OhosPatchOriginalEvent} event Replace a synchronous node event callback inside the selected BuilderParam
- *   content and return the original callback proxy. Handler `this` is bound to the parent component instance.
+ *   OhosPatchOriginalEvent} event Replace a synchronous node event callback inside the selected Builder content
+ *   and return the original callback proxy. Handler `this` is bound to the Component instance that owns it.
+ */
+
+/**
+ * @typedef {Object} OhosPatchComponentBuilderMethodFix
+ * @property {(selector: string | OhosPatchNodeSelector) => OhosPatchComponentBuilderNodeFix} node
+ *   Select an ArkUI built-in node inside one `@Builder` method. Occurrence is zero-based per node type and resets
+ *   for each synchronous invocation of that Builder method.
  */
 
 /**
@@ -191,6 +198,9 @@
  * @property {(selector: string | OhosPatchNodeSelector) => OhosPatchComponentNodeFix} node Select an ArkUI node by
  *   built-in type plus either zero-based occurrence or original attribute values, or select a child custom
  *   Component by full path plus occurrence. Prefer occurrence for lower runtime overhead.
+ * @property {(builderMethodName: string) => OhosPatchComponentBuilderMethodFix} builder Select an exported
+ *   Component's generated `@Builder` prototype method. Chain `.node(selector)` to patch nodes only while that
+ *   Builder method executes.
  */
 
 /** Registers method replacements for one exported ArkTS class. */
@@ -204,7 +214,7 @@ class Fixit {
   }
 
   /** @readonly @type {string} */
-  static runtimeVersion = '1.16.0';
+  static runtimeVersion = '1.17.0';
 
   /**
    * @param {string} target Full OHM class path.

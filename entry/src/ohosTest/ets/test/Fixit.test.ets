@@ -127,7 +127,7 @@ export default function fixitTest(): void {
           });
       `;
       OhosPatch.executeScript(script);
-      expect(DemoViewModel.crash()).assertEqual('1.16.0|function|undefined|undefined|undefined|undefined|undefined|undefined|undefined');
+      expect(DemoViewModel.crash()).assertEqual('1.17.0|function|undefined|undefined|undefined|undefined|undefined|undefined|undefined');
     });
 
     it('patch context can read app resources and runtime information', 0, () => {
@@ -153,7 +153,7 @@ export default function fixitTest(): void {
           });
       `;
       OhosPatch.executeScript(script);
-      expect(DemoViewModel.crash()).assertEqual('OhosPatch|number|number|true|number|true|string|string|string|number|1.16.0');
+      expect(DemoViewModel.crash()).assertEqual('OhosPatch|number|number|true|number|true|string|string|string|number|1.17.0');
     });
 
     it('component DSL validates direct value API and unsupported event rules', 0, () => {
@@ -413,6 +413,24 @@ export default function fixitTest(): void {
             this.statusText = 'Patched explicit contentBuilder event';
             return result;
           });
+        var builderMethod = Fixit.component(
+          'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/BuilderMethodPanel#BuilderMethodPanel'
+        ).builder('contentBuilder');
+        builderMethod.node({ type: 'Column', occurrence: 0 })
+          .create({ space: 18 });
+        builderMethod.node({ type: 'Text', occurrence: 0 })
+          .create('Patched Builder method title')
+          .attr('id', 'patched-builder-method-title');
+        var builderMethodOrigin = builderMethod.node({
+          type: 'Button',
+          where: { id: 'builder-method-action', height: 42 }
+        })
+          .attr('id', 'patched-builder-method-action')
+          .event('onClick', function () {
+            var result = builderMethodOrigin.apply(this, arguments);
+            this.statusText = 'Patched @Builder event';
+            return result;
+          });
       `;
       expect(OhosPatch.executeScript(script).installedCount).assertLarger(0);
       await openButton.click();
@@ -533,6 +551,25 @@ export default function fixitTest(): void {
         driver,
         ON.text('root status=Patched explicit contentBuilder event'),
         'patched explicit contentBuilder event status',
+        displaySize
+      );
+
+      const outsideBuilderMethodText = await findWithForwardScroll(
+        driver, ON.id('builder-method-outside'), 'unpatched node outside Builder method', displaySize
+      );
+      expect(await outsideBuilderMethodText.getText()).assertEqual('Outside Builder method');
+      const builderMethodTitle = await findWithForwardScroll(
+        driver, ON.id('patched-builder-method-title'), 'patched node inside Builder method', displaySize
+      );
+      expect(await builderMethodTitle.getText()).assertEqual('Patched Builder method title');
+      const builderMethodButton = await findWithForwardScroll(
+        driver, ON.id('patched-builder-method-action'), 'patched Builder method event', displaySize
+      );
+      await builderMethodButton.click();
+      await findWithForwardScroll(
+        driver,
+        ON.text('builder method status=Patched @Builder event'),
+        'patched Builder method event state',
         displaySize
       );
 

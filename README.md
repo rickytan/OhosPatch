@@ -600,6 +600,108 @@ var originSubmit = panel.node({ // 返回 NodeBuilder。
 
 同一个 Component 内的多层 `Column`、`Row`、`Stack` 等 ArkUI 内置容器不会创建新的计数作用域。只要还在同一个 `Fixit.component(fullPath)` 指向的组件 builder 里，同类型节点都会按实际执行顺序统一递增。
 
+### 修复 Component 自己声明的 @Builder 方法
+
+组件直接声明的 `@Builder` 会编译成组件 prototype 上的实例方法。例如下面的 `MainPage.contentBuilder()` 在编译产物中仍是可调用方法，方法内部继续通过 `observeComponentCreation2` 创建 ArkUI 节点：
+
+```ts
+@Component
+export struct MainPage {
+  @State private isExpanded: boolean = false
+
+  @Builder
+  contentBuilder() {
+    Column({ space: 8 }) {
+      Text('1').fontSize(20).backgroundColor(Color.Red)
+      Text('2').fontSize(20).backgroundColor(Color.Yellow)
+      if (this.isExpanded) {
+        Text('100').fontSize(20)
+      }
+      Text('3').fontSize(20).backgroundColor(Color.Green)
+    }
+  }
+
+  build() {
+    NavDestination() {
+      Button('Toggle').onClick(() => {
+        this.isExpanded = !this.isExpanded
+      })
+      this.contentBuilder()
+    }
+  }
+}
+```
+
+使用 `component.builder(builderMethodName).node(selector)` 把 selector 限定在这一个 `@Builder` 方法内：
+
+```js
+var mainPage = Fixit.component(
+  '@vendor/business_page/src/main/ets/components/MainPage#MainPage'
+); // 返回 ComponentFix；目标必须是已 export 的 MainPage。
+
+var content = mainPage.builder('contentBuilder');
+// 返回 ComponentBuilderMethodFix；安装时验证 prototype.contentBuilder 是 function。
+
+content.node({ type: 'Column', occurrence: 0 })
+  // 返回 ComponentBuilderNodeFix；Column 在 contentBuilder 内独立从 0 计数。
+  .create({ space: 20 });
+  // 把 Column({ space: 8 }) 的 create 参数替换为 { space: 20 }；返回同一个节点修复对象。
+
+content.node({ type: 'Text', occurrence: 0 })
+  // 只选择 contentBuilder 内第一个 Text，不会选中 build() 中 contentBuilder 外部的 Text。
+  .create('Patched 1')
+  // 把 Text('1') 的初始化文本替换为 Text('Patched 1')；返回 ComponentBuilderNodeFix。
+  .attrs({
+    fontSize: 24, // 在原 Text builder 执行后再次调用 Text.fontSize(24)。
+    fontColor: '#FFFFFF' // 原节点没有 fontColor 也可以新增调用，只要 Text API 支持该属性方法。
+  }); // 返回 ComponentBuilderNodeFix。
+
+content.node({ type: 'Text', occurrence: 1 })
+  .attr('backgroundColor', '#007D8A');
+  // 覆盖 Text('2') 原来的 backgroundColor；返回 ComponentBuilderNodeFix。
+```
+
+`component.builder(...)` 和 `component.node(child).builder(...)` 不是同一个作用域：前者选择目标组件自身的 `@Builder` prototype 方法，后者选择父组件传给子组件的 `@BuilderParam` 内容。两者后续的节点对象都支持 `create/attr/attrs/event`，但入口不能互换。
+
+`contentBuilder()` 每次同步调用都会建立新的计数作用域。如果同一轮渲染调用它两次，两次调用中的第一个 Text 都是 `occurrence: 0`，同一条规则会分别命中两次。Builder 方法带参数时，OhosPatch 原样转发所有参数和返回值；Patch DSL 不修改 Builder 方法参数。
+
+条件渲染仍然只统计实际执行的节点。上面的 `MainPage` 在不同状态下计数如下：
+
+| 状态 | Text occurrence 0 | Text occurrence 1 | Text occurrence 2 | Text occurrence 3 |
+| --- | --- | --- | --- | --- |
+| `isExpanded === false` | `Text('1')` | `Text('2')` | `Text('3')` | 不存在 |
+| `isExpanded === true` | `Text('1')` | `Text('2')` | `Text('100')` | `Text('3')` |
+
+因此 `Text('3')` 的 occurrence 会随分支变化，不能用一个 occurrence 在两种状态下稳定定位。若 Builder 源码中存在编译时固定的 `id/height/fontSize` 等属性，可以改用 `.node({ type: 'Text', where: { id: 'stable-id' } })`；没有任何稳定属性时，Runtime 无法仅根据 `Text('3')` 的 create 参数做 `where` 匹配。
+
+Builder 方法内的事件与普通 Component 节点事件相同：`.event(...)` 返回原回调，普通 `function` 的 `this` 是当前组件实例，可以同步调用原回调并修改状态：
+
+```ts
+@Builder
+actionBuilder() {
+  Button('Action')
+    .height(42)
+    .onClick(() => { this.statusText = 'Original event' })
+    .id('builder-action')
+}
+```
+
+```js
+var actionBuilder = mainPage.builder('actionBuilder'); // 返回 ComponentBuilderMethodFix。
+var originAction = actionBuilder.node({
+  type: 'Button',
+  where: { id: 'builder-action', height: 42 }
+})
+  .attr('backgroundColor', '#C44736') // 可覆盖或新增现有 ArkUI 属性调用；返回节点修复对象。
+  .event('onClick', function () { // 返回 OhosPatchOriginalEvent。
+    var result = originAction.apply(this, arguments); // 同步调用原 onClick 并保留其返回值。
+    this.statusText = 'Patched event'; // this 是当前 MainPage 实例 Proxy。
+    return result; // 保持原事件返回语义。
+  });
+```
+
+如果 Builder 方法不存在、不是函数，或 Release 混淆后方法名发生变化，整个 Patch 安装会失败并输出包含 Component 路径和 Builder 方法名的错误。嵌套调用多个 `@Builder` 方法时，每个方法是独立作用域；节点归最内层正在执行的 Builder 方法计数。
+
 自定义组件是边界。父组件中的 `<Child />` 只是父组件渲染路径上的一个自定义组件创建点，不会把 `Child` 内部的 `Text/Button` 计入父组件 selector；要修复子组件内部节点，需要对 `Child` 自己再写一条 `Fixit.component(childFullPath)`。
 
 这个边界有一个明确的例外：父组件传给子组件的尾随闭包或 `@BuilderParam` 内容仍归父组件所有，可以通过 `.node(childSelector).builder(...)` 修复。原始组件例如：
@@ -1151,7 +1253,7 @@ CMake 构建也会调用同一个 Gulp task；如果本地没有安装 Node 依�
 - Patch handler 的 `this` Proxy 只在当前同步调用或 `origin` 调用期间有效，不应保存到 timer、Promise 或全局变量后异步访问。
 - `Fixit.import()` 返回的持久 Proxy 可保留到 `OhosPatch.clear()` 或下一次 patch 替换。
 - 普通方法参数和新建 JS 对象默认按 JSON wire 规则传输；嵌套 function 会由 Patch JSVM 保留引用，并在传给 ArkTS Proxy 方法或 Component `attr/create` 静态参数时还原成 callback。
-- Component DSL 当前支持 API 20 状态管理 V1/V2、导出的自定义组件、父组件尾随闭包/`@BuilderParam` 内容、首选的 `type + occurrence` 节点选择器、`type + where` 原始属性选择器、属性/create 参数和同步事件替换。
+- Component DSL 当前支持 API 20 状态管理 V1/V2、导出的自定义组件自身的 `@Builder` 方法、父组件尾随闭包/`@BuilderParam` 内容、首选的 `type + occurrence` 节点选择器、`type + where` 原始属性选择器、属性/create 参数和同步事件替换。
 - 非导出的 `@Entry` 页面、层级选择器、已挂载组件主动刷新，以及 `before/after/around` 事件组合尚未支持。`Resource`、Controller 等不可 JSON 序列化对象不能作为 selector 或静态 attr 参数直接下发。
 - 单个 runtime 最多同时存在 256 个 timer。
 - 单个 patch 最多保留 512 个去重后的动态导入类、实例、方法或嵌套对象句柄。

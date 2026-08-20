@@ -409,8 +409,10 @@ enum class UiMethodKind {
     STATE_RESET,
     INITIAL_RENDER,
     OBSERVE_CREATION,
+    BUILDER,
 };
 
+constexpr size_t kMaxUiMethodsPerComponent = 32;
 constexpr size_t kMaxUiNodeTypesPerRender = 64;
 constexpr size_t kMaxUiCreateMethodsPerNode = 2;
 constexpr size_t kMaxUiEventsPerNode = 16;
@@ -419,6 +421,7 @@ constexpr size_t kMaxUiSelectorsPerNode = 32;
 constexpr size_t kMaxUiSelectorsPerRender = 256;
 constexpr size_t kMaxUiChildInstancesPerRender = 128;
 constexpr size_t kMaxUiScopedChildCreationDepth = 16;
+constexpr size_t kMaxUiBuilderMethodDepth = 16;
 
 struct UiWhereCondition {
     std::string attributeName;
@@ -444,6 +447,7 @@ struct UiRule {
     std::string childTargetKey;
     uint32_t childOccurrence = 0;
     std::string builderParamName;
+    std::string builderMethodName;
     std::array<UiWhereCondition, kMaxUiWhereAttributesPerNode> whereConditions;
     size_t whereConditionCount = 0;
     bool selectorMissLogged = false;
@@ -501,6 +505,9 @@ std::string DescribeUiRule(const UiRule *rule)
     if (!rule->builderParamName.empty()) {
         description += ", builderParam='" + rule->builderParamName + "'";
     }
+    if (!rule->builderMethodName.empty()) {
+        description += ", builderMethod='" + rule->builderMethodName + "'";
+    }
     if (!rule->childClassName.empty()) {
         description += ", childComponent='" + rule->childClassName + "'";
     }
@@ -523,7 +530,7 @@ struct UiComponentHook {
     std::string className;
     std::string targetKey;
     bool isV2 = false;
-    std::array<UiMethodHook, 8> methods;
+    std::array<UiMethodHook, kMaxUiMethodsPerComponent> methods;
     size_t methodCount = 0;
 };
 
@@ -539,6 +546,8 @@ struct UiNodeCallbackRecord {
     std::string childTargetKey;
     uint32_t childOccurrence = 0;
     std::string builderParamName;
+    std::string builderMethodName;
+    uint32_t builderMethodOccurrence = 0;
     std::array<std::string, kMaxUiSelectorsPerNode> selectedSelectors;
     size_t selectedSelectorCount = 0;
     std::array<std::string, kMaxUiSelectorsPerNode> resolvedSelectors;
@@ -624,6 +633,16 @@ struct UiScopedChildCreationFrame {
     napi_ref owner = nullptr;
     std::array<UiNodeTypeCounter, kMaxUiNodeTypesPerRender> counters;
     size_t counterCount = 0;
+};
+
+struct UiBuilderMethodFrame {
+    std::string targetKey;
+    std::string methodName;
+    napi_value owner = nullptr;
+    std::array<UiNodeTypeCounter, kMaxUiNodeTypesPerRender> counters;
+    size_t counterCount = 0;
+    std::array<std::string, kMaxUiSelectorsPerRender> selectedSelectors;
+    size_t selectedSelectorCount = 0;
 };
 
 class JsvmRuntime;
@@ -954,6 +973,8 @@ class JsvmRuntime
     size_t uiRenderDepth_ = 0;
     std::array<UiScopedChildCreationFrame, kMaxUiScopedChildCreationDepth> uiScopedChildCreationFrames_;
     size_t uiScopedChildCreationDepth_ = 0;
+    std::array<UiBuilderMethodFrame, kMaxUiBuilderMethodDepth> uiBuilderMethodFrames_;
+    size_t uiBuilderMethodDepth_ = 0;
 
     void ReleaseContext()
     {
@@ -1587,7 +1608,7 @@ class JsvmRuntime
         if (!first) {
             json.append(",");
         }
-        json.append("\"patchRuntimeVersion\":\"1.16.0\"");
+        json.append("\"patchRuntimeVersion\":\"1.17.0\"");
         json.append("}");
         return ParseJson(json, output);
     }
@@ -2083,6 +2104,7 @@ class JsvmRuntime
         }
 
         bool pushedFrame = false;
+        bool pushedBuilderMethodFrame = false;
         if (method->kind == UiMethodKind::FINALIZE_CONSTRUCTION) {
             ApplyUiV2InitialParamRules(napiEnv, method->component, receiver);
             ApplyUiValueRules(napiEnv, method->component->targetKey, UiRuleKind::STATE, receiver, receiver);
@@ -2090,6 +2112,9 @@ class JsvmRuntime
             pushedFrame = PushUiRenderFrame(method->component->targetKey, receiver);
         } else if (method->kind == UiMethodKind::OBSERVE_CREATION) {
             WrapUiNodeBuilder(napiEnv, method->component->targetKey, argc, argv);
+        } else if (method->kind == UiMethodKind::BUILDER) {
+            pushedBuilderMethodFrame = PushUiBuilderMethodFrame(method->component->targetKey,
+                                                                 method->methodName, receiver);
         }
 
         napi_value result = CallUiOriginal(napiEnv, method, receiver, argc, argv);
@@ -2102,6 +2127,9 @@ class JsvmRuntime
         }
         if (pushedFrame) {
             PopUiRenderFrame();
+        }
+        if (pushedBuilderMethodFrame) {
+            PopUiBuilderMethodFrame();
         }
         return result;
     }
@@ -4387,7 +4415,8 @@ class JsvmRuntime
         UiRenderFrame &frame = uiRenderFrames_[--uiRenderDepth_];
         for (size_t index = 0; index < uiRuleCount_; ++index) {
             UiRule *rule = uiRules_[index].get();
-            if (!rule || rule->targetKey != frame.targetKey || rule->whereConditionCount == 0 ||
+            if (!rule || rule->targetKey != frame.targetKey || !rule->builderMethodName.empty() ||
+                rule->whereConditionCount == 0 ||
                 rule->selectorMissLogged ||
                 ContainsSelector(frame.selectedSelectors.data(), frame.selectedSelectorCount, rule->selectorKey)) {
                 continue;
@@ -4482,6 +4511,65 @@ class JsvmRuntime
         return nullptr;
     }
 
+    bool PushUiBuilderMethodFrame(const std::string &targetKey, const std::string &methodName, napi_value owner)
+    {
+        if (uiBuilderMethodDepth_ >= uiBuilderMethodFrames_.size()) {
+            LogError("Component @Builder method nesting exceeds the OhosPatch limit");
+            return false;
+        }
+        UiBuilderMethodFrame &frame = uiBuilderMethodFrames_[uiBuilderMethodDepth_++];
+        frame.targetKey = targetKey;
+        frame.methodName = methodName;
+        frame.owner = owner;
+        frame.counterCount = 0;
+        frame.selectedSelectorCount = 0;
+        return true;
+    }
+
+    void PopUiBuilderMethodFrame()
+    {
+        if (uiBuilderMethodDepth_ == 0) {
+            return;
+        }
+        UiBuilderMethodFrame &frame = uiBuilderMethodFrames_[--uiBuilderMethodDepth_];
+        for (size_t index = 0; index < uiRuleCount_; ++index) {
+            UiRule *rule = uiRules_[index].get();
+            if (!rule || rule->targetKey != frame.targetKey || rule->builderMethodName != frame.methodName ||
+                rule->whereConditionCount == 0 || rule->selectorMissLogged ||
+                ContainsSelector(frame.selectedSelectors.data(), frame.selectedSelectorCount, rule->selectorKey)) {
+                continue;
+            }
+            LogWarn("Cannot find component node in @Builder method for patch selector. Rule={" +
+                    DescribeUiRule(rule) +
+                    "}. Check the Builder method name, node type, occurrence index, where attributes, and the "
+                    "currently executed conditional branch.");
+            for (size_t candidateIndex = index; candidateIndex < uiRuleCount_; ++candidateIndex) {
+                UiRule *candidate = uiRules_[candidateIndex].get();
+                if (candidate && candidate->targetKey == rule->targetKey &&
+                    candidate->builderMethodName == rule->builderMethodName &&
+                    candidate->selectorKey == rule->selectorKey) {
+                    candidate->selectorMissLogged = true;
+                }
+            }
+        }
+        frame.targetKey.clear();
+        frame.methodName.clear();
+        frame.owner = nullptr;
+        frame.counterCount = 0;
+        frame.selectedSelectorCount = 0;
+    }
+
+    UiBuilderMethodFrame *FindActiveUiBuilderMethodFrame(const std::string &targetKey)
+    {
+        for (size_t index = uiBuilderMethodDepth_; index > 0; --index) {
+            UiBuilderMethodFrame &frame = uiBuilderMethodFrames_[index - 1];
+            if (frame.targetKey == targetKey) {
+                return &frame;
+            }
+        }
+        return nullptr;
+    }
+
     static bool ContainsSelector(const std::string *selectors, size_t count, const std::string &selector)
     {
         for (size_t index = 0; index < count; ++index) {
@@ -4554,10 +4642,42 @@ class JsvmRuntime
         return true;
     }
 
+    bool ResolveUiBuilderMethodOccurrence(UiBuilderMethodFrame *frame, const std::string &nodeType,
+                                          uint32_t *occurrence)
+    {
+        if (!frame || !occurrence) {
+            return false;
+        }
+        UiNodeTypeCounter *counter = nullptr;
+        for (size_t index = 0; index < frame->counterCount; ++index) {
+            if (frame->counters[index].nodeType == nodeType) {
+                counter = &frame->counters[index];
+                break;
+            }
+        }
+        if (!counter) {
+            if (frame->counterCount >= frame->counters.size()) {
+                LogError("Component @Builder method node type count exceeds the OhosPatch limit");
+                return false;
+            }
+            counter = &frame->counters[frame->counterCount++];
+            counter->nodeType = nodeType;
+            counter->count = 0;
+        }
+        *occurrence = counter->count++;
+        return true;
+    }
+
     bool RuleCouldMatchNode(const UiRule *rule, const UiNodeCallbackRecord *record) const
     {
         if (!rule || !record || rule->targetKey != record->targetKey || rule->nodeType != record->nodeType) {
             return false;
+        }
+        if (!rule->builderMethodName.empty()) {
+            if (rule->builderMethodName != record->builderMethodName) {
+                return false;
+            }
+            return rule->whereConditionCount > 0 || rule->occurrence == record->builderMethodOccurrence;
         }
         if (rule->childTargetKey != record->childTargetKey) {
             return false;
@@ -4765,6 +4885,7 @@ class JsvmRuntime
             return;
         }
         UiRenderFrame *renderFrame = FindUiRenderFrame(targetKey);
+        UiBuilderMethodFrame *builderMethodFrame = FindActiveUiBuilderMethodFrame(targetKey);
         napi_valuetype builderType = napi_undefined;
         if (!NapiOk(napiEnv, napi_typeof(napiEnv, argv[0], &builderType), "napi_typeof(component node builder)") ||
             builderType != napi_function) {
@@ -4822,27 +4943,58 @@ class JsvmRuntime
                 slotOwner = parentFrame->owner;
             }
         }
-        if (!inSlotScope && !renderFrame) {
+        if (!inSlotScope && !renderFrame && !builderMethodFrame) {
             return;
         }
         const std::string &ruleTargetKey = inSlotScope ? slotParentTargetKey : targetKey;
         bool hasNativeNode = ResolveUiNodeType(napiEnv, ruleTargetKey, argv[1], &nodeType);
         uint32_t occurrence = 0;
-        bool hasNativeOccurrence = hasNativeNode &&
-                                   (inSlotScope && slotFrame
-                                        ? ResolveUiScopedOccurrence(slotFrame, nodeType, &occurrence)
-                                        : ResolveUiOccurrence(renderFrame, nodeType, &occurrence));
+        bool hasRegularOccurrence = false;
+        if (hasNativeNode) {
+            if (inSlotScope && slotFrame) {
+                hasRegularOccurrence = ResolveUiScopedOccurrence(slotFrame, nodeType, &occurrence);
+            } else if (renderFrame) {
+                hasRegularOccurrence = ResolveUiOccurrence(renderFrame, nodeType, &occurrence);
+            }
+        }
+        uint32_t builderMethodOccurrence = 0;
+        bool hasBuilderMethodOccurrence = false;
+        if (hasNativeNode && builderMethodFrame) {
+            if (!hasRegularOccurrence && !renderFrame && !slotFrame) {
+                hasBuilderMethodOccurrence =
+                    ResolveUiBuilderMethodOccurrence(builderMethodFrame, nodeType, &builderMethodOccurrence);
+                occurrence = builderMethodOccurrence;
+                hasRegularOccurrence = hasBuilderMethodOccurrence;
+            } else {
+                hasBuilderMethodOccurrence =
+                    ResolveUiBuilderMethodOccurrence(builderMethodFrame, nodeType, &builderMethodOccurrence);
+            }
+        }
+        bool hasNativeOccurrence = hasRegularOccurrence || hasBuilderMethodOccurrence;
         bool hasMatchingRule = false;
         if (hasNativeOccurrence) {
             for (size_t index = 0; index < uiRuleCount_; ++index) {
                 UiRule *rule = uiRules_[index].get();
-                if (rule && IsUiNodeRuleKind(rule->kind) &&
-                    rule->targetKey == ruleTargetKey && rule->nodeType == nodeType &&
-                    ((!inSlotScope && rule->childTargetKey.empty()) ||
-                     (inSlotScope && rule->childTargetKey == slotChildTargetKey &&
-                      rule->childOccurrence == slotChildOccurrence &&
-                      (rule->builderParamName.empty() || rule->builderParamName == builderParamName))) &&
-                    (rule->whereConditionCount > 0 || rule->occurrence == occurrence)) {
+                if (!rule || !IsUiNodeRuleKind(rule->kind) || rule->targetKey != ruleTargetKey ||
+                    rule->nodeType != nodeType) {
+                    continue;
+                }
+                bool scopeMatches = false;
+                if (!rule->builderMethodName.empty()) {
+                    scopeMatches = hasBuilderMethodOccurrence &&
+                                   rule->builderMethodName == builderMethodFrame->methodName &&
+                                   (rule->whereConditionCount > 0 ||
+                                    rule->occurrence == builderMethodOccurrence);
+                } else {
+                    scopeMatches = hasRegularOccurrence &&
+                                   ((!inSlotScope && rule->childTargetKey.empty()) ||
+                                    (inSlotScope && rule->childTargetKey == slotChildTargetKey &&
+                                     rule->childOccurrence == slotChildOccurrence &&
+                                     (rule->builderParamName.empty() ||
+                                      rule->builderParamName == builderParamName))) &&
+                                   (rule->whereConditionCount > 0 || rule->occurrence == occurrence);
+                }
+                if (scopeMatches) {
                     hasMatchingRule = true;
                     break;
                 }
@@ -4900,7 +5052,12 @@ class JsvmRuntime
         record->childTargetKey = inSlotScope ? slotChildTargetKey : childTargetKey;
         record->childOccurrence = inSlotScope ? slotChildOccurrence : childOccurrence;
         record->builderParamName = inSlotScope ? builderParamName : "";
-        napi_value owner = inSlotScope ? slotOwner : (renderFrame ? renderFrame->owner : nullptr);
+        record->builderMethodName = builderMethodFrame ? builderMethodFrame->methodName : "";
+        record->builderMethodOccurrence = builderMethodOccurrence;
+        napi_value owner = inSlotScope
+                               ? slotOwner
+                               : (builderMethodFrame ? builderMethodFrame->owner
+                                                     : (renderFrame ? renderFrame->owner : nullptr));
         if (!owner) {
             LogError("Cannot wrap Component node builder because its owner is unavailable. target='" +
                      ruleTargetKey + "'.");
@@ -5156,6 +5313,9 @@ class JsvmRuntime
             return;
         }
         UiRenderFrame *frame = FindUiRenderFrame(record->targetKey);
+        UiBuilderMethodFrame *builderMethodFrame = record->builderMethodName.empty()
+                                                        ? nullptr
+                                                        : FindActiveUiBuilderMethodFrame(record->targetKey);
         for (size_t index = 0; index < uiRuleCount_; ++index) {
             UiRule *rule = uiRules_[index].get();
             if (!rule || rule->whereConditionCount == 0 || !RuleCouldMatchNode(rule, record) ||
@@ -5170,8 +5330,15 @@ class JsvmRuntime
                 return;
             }
             record->resolvedSelectors[record->resolvedSelectorCount++] = rule->selectorKey;
-            if (frame && ContainsSelector(frame->selectedSelectors.data(), frame->selectedSelectorCount,
-                                          rule->selectorKey)) {
+            bool selectedInScope = !rule->builderMethodName.empty()
+                                       ? builderMethodFrame &&
+                                             ContainsSelector(builderMethodFrame->selectedSelectors.data(),
+                                                              builderMethodFrame->selectedSelectorCount,
+                                                              rule->selectorKey)
+                                       : frame && ContainsSelector(frame->selectedSelectors.data(),
+                                                                  frame->selectedSelectorCount,
+                                                                  rule->selectorKey);
+            if (selectedInScope) {
                 continue;
             }
             if (!UiWhereRuleMatches(napiEnv, rule, captures, captureCount)) {
@@ -5182,7 +5349,14 @@ class JsvmRuntime
                 return;
             }
             record->selectedSelectors[record->selectedSelectorCount++] = rule->selectorKey;
-            if (frame) {
+            if (!rule->builderMethodName.empty() && builderMethodFrame) {
+                if (builderMethodFrame->selectedSelectorCount >= builderMethodFrame->selectedSelectors.size()) {
+                    LogError("Component selected selector count reached the OhosPatch per-Builder-method limit");
+                    return;
+                }
+                builderMethodFrame->selectedSelectors[builderMethodFrame->selectedSelectorCount++] =
+                    rule->selectorKey;
+            } else if (frame) {
                 if (frame->selectedSelectorCount >= frame->selectedSelectors.size()) {
                     LogError("Component selected selector count reached the OhosPatch per-render limit");
                     return;
@@ -5473,6 +5647,27 @@ class JsvmRuntime
                NapiNamedString(napiEnv, spec, "builderParamName", &rule->builderParamName);
     }
 
+    bool ParseUiOptionalBuilderMethodScope(napi_env napiEnv, napi_value spec, UiRule *rule)
+    {
+        if (!rule) {
+            return false;
+        }
+        bool hasBuilderMethod = false;
+        if (!NapiOk(napiEnv, napi_has_named_property(napiEnv, spec, "builderMethodName", &hasBuilderMethod),
+                    "napi_has_named_property(component Builder method scope)")) {
+            return false;
+        }
+        if (!hasBuilderMethod) {
+            return true;
+        }
+        if (!rule->childTargetKey.empty()) {
+            LogError("Component node rule cannot combine @Builder method and BuilderParam scopes");
+            return false;
+        }
+        return NapiNamedString(napiEnv, spec, "builderMethodName", &rule->builderMethodName) &&
+               !rule->builderMethodName.empty();
+    }
+
     bool ParseUiRule(napi_env napiEnv, napi_value spec, std::unique_ptr<UiRule> *output)
     {
         std::unique_ptr<UiRule> rule(new (std::nothrow) UiRule());
@@ -5507,6 +5702,7 @@ class JsvmRuntime
             napi_value arguments = nullptr;
             if (!ParseUiNodeSelector(napiEnv, spec, rule.get()) ||
                 !ParseUiOptionalChildScope(napiEnv, spec, rule.get()) ||
+                !ParseUiOptionalBuilderMethodScope(napiEnv, spec, rule.get()) ||
                 !NapiOk(napiEnv, napi_get_named_property(napiEnv, spec, "arguments", &arguments),
                         "napi_get_named_property(component create arguments)") ||
                 !NapiJsonStringify(napiEnv, arguments, "[]", &rule->argumentsJson)) {
@@ -5519,6 +5715,7 @@ class JsvmRuntime
             bool hasAttrHandler = false;
             if (!ParseUiNodeSelector(napiEnv, spec, rule.get()) ||
                 !ParseUiOptionalChildScope(napiEnv, spec, rule.get()) ||
+                !ParseUiOptionalBuilderMethodScope(napiEnv, spec, rule.get()) ||
                 !NapiNamedString(napiEnv, spec, "attributeName", &rule->attributeName) ||
                 !NapiOk(napiEnv, napi_get_named_property(napiEnv, spec, "attrHandler", &attrHandler),
                         "napi_get_named_property(component attribute handler flag)") ||
@@ -5537,6 +5734,7 @@ class JsvmRuntime
             rule->kind = UiRuleKind::EVENT;
             if (!ParseUiNodeSelector(napiEnv, spec, rule.get()) ||
                 !ParseUiOptionalChildScope(napiEnv, spec, rule.get()) ||
+                !ParseUiOptionalBuilderMethodScope(napiEnv, spec, rule.get()) ||
                 !NapiNamedString(napiEnv, spec, "eventName", &rule->eventName)) {
                 return false;
             }
@@ -5715,6 +5913,47 @@ class JsvmRuntime
         return true;
     }
 
+    bool InstallUiBuilderMethodHooks(napi_env napiEnv, UiComponentHook *component, napi_value holder)
+    {
+        if (!component) {
+            return false;
+        }
+        for (size_t ruleIndex = 0; ruleIndex < uiRuleCount_; ++ruleIndex) {
+            UiRule *rule = uiRules_[ruleIndex].get();
+            if (!rule || rule->targetKey != component->targetKey || rule->builderMethodName.empty()) {
+                continue;
+            }
+            bool installed = false;
+            for (size_t methodIndex = 0; methodIndex < component->methodCount; ++methodIndex) {
+                UiMethodHook &method = component->methods[methodIndex];
+                if (method.kind == UiMethodKind::BUILDER && method.methodName == rule->builderMethodName) {
+                    installed = true;
+                    break;
+                }
+            }
+            if (installed) {
+                continue;
+            }
+            bool available = false;
+            if (!HasUiMethod(napiEnv, holder, rule->builderMethodName.c_str(), &available)) {
+                return false;
+            }
+            if (!available) {
+                LogError("Cannot patch Component @Builder method '" + rule->builderMethodName + "' on '" +
+                         component->className + "': the generated prototype method is unavailable. Rule={" +
+                         DescribeUiRule(rule) +
+                         "}. Check the @Builder method spelling, confirm the target Component is exported, and "
+                         "inspect the obfuscated generated method name for Release builds.");
+                return false;
+            }
+            if (!InstallUiMethod(napiEnv, component, holder, rule->builderMethodName.c_str(),
+                                 UiMethodKind::BUILDER)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     bool InstallUiComponentHook(napi_env napiEnv, UiRule *rule)
     {
         if (!rule || uiComponentHookCount_ >= kMaxUiComponentHooks) {
@@ -5848,6 +6087,9 @@ class JsvmRuntime
         if ((needsNodes || needsChildScope) &&
             !InstallUiMethod(napiEnv, componentPointer, holder, "observeComponentCreation2",
                              UiMethodKind::OBSERVE_CREATION)) {
+            return false;
+        }
+        if (!InstallUiBuilderMethodHooks(napiEnv, componentPointer, holder)) {
             return false;
         }
         return true;

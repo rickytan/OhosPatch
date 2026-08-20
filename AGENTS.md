@@ -58,7 +58,7 @@ Primary implementation: `ohospatch/src/main/cpp/ohospatch.cpp`.
 - Patch method registrations are returned from JSVM as JSON specs.
 - Native loads target classes in the ArkTS VM and installs N-API trampolines.
 - Handler arguments still enter JSVM as JSON values. Method handler `this`, Component event handler `this`, nested properties, method calls, Proxy arguments, original-method results, and Proxy returns use invocation-scoped Native handles.
-- Runtime `1.16.0` includes a JS `Proxy` for the ArkTS receiver. `get`, `set`, and `apply` synchronously bridge to the original ArkTS object, preserving nested object identity and prototype method dispatch.
+- Runtime `1.17.0` includes a JS `Proxy` for the ArkTS receiver. `get`, `set`, and `apply` synchronously bridge to the original ArkTS object, preserving nested object identity and prototype method dispatch.
 - Proxy handles are valid only during the current synchronous patch invocation and must not escape to timers, promises, or globals. A call can retain at most 256 handles.
 - Hook failures fall back to the original ArkTS method.
 - Installation failure restores hooks that were already installed.
@@ -127,7 +127,7 @@ Proposed public concepts:
 
 ### Implemented status (2026-08-14)
 
-- Runtime version `1.16.0` implements `Fixit.component`, `node.create(...)` for ArkUI create/createWithLabel initialization arguments, original-attribute node selectors, parent-scoped child Component parameter patching, named multi-`@BuilderParam` patching through `.builder(...)`, and the invocation-scoped ArkTS object Proxy bridge.
+- Runtime version `1.17.0` implements `Fixit.component`, `node.create(...)` for ArkUI create/createWithLabel initialization arguments, original-attribute node selectors, Component-owned `@Builder` method scopes through `component.builder(name).node(...)`, parent-scoped child Component parameter patching, named multi-`@BuilderParam` patching through `component.node(child).builder(...)`, and the invocation-scoped ArkTS object Proxy bridge.
 - API 20 state-management V1 and V2 exported custom components are supported through separate native adapters with the same public DSL.
 - Direct `param/state(name, valueOrHandler)` are implemented; no chain-style value-fix API is exposed.
 - ComponentV2 initial direct `param(...)` handler execution is deferred until `finalizeConstruction`, after generated local fields are initialized. This lets the handler read `this` reliably; update/reuse paths still apply during `updateParam`/`resetParam`.
