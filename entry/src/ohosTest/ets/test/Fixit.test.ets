@@ -418,20 +418,26 @@ export default function fixitTest(): void {
       );
       expect(await eventButton.getText()).assertEqual('V2 primary action');
       await eventButton.click();
-      const eventStatus = await findWithForwardScroll(
-        driver, ON.id('v2-status-text'), 'patched V2 event status', displaySize
+      const eventStatus = await driver.waitForComponent(
+        ON.text('status=Patched V2 test event, taps=111'), 5000
       );
-      expect(await eventStatus.getText()).assertEqual('status=Patched V2 test event, taps=111');
+      if (eventStatus === undefined || eventStatus === null) {
+        throw new Error('patched V2 event status was not updated after click');
+      }
 
       const secondaryButton = await findWithForwardScroll(
         driver, ON.id('v2-secondary-action'), 'v2-secondary-action', displaySize
       );
       await secondaryButton.click();
-      await patchedScroll.scrollToTop(5000);
-      const secondaryStatus = await findWithForwardScroll(
-        driver, ON.id('v2-status-text'), 'V2 secondary event status', displaySize
-      );
-      expect(await secondaryStatus.getText()).assertEqual('status=V2 event ran, taps=113');
+      const refreshedScroll = await driver.waitForComponent(ON.id('patch-target-scroll'), 5000);
+      if (refreshedScroll === undefined || refreshedScroll === null) {
+        throw new Error('patch-target-scroll was not found after V2 secondary click');
+      }
+      await refreshedScroll.scrollToTop(5000);
+      const secondaryStatus = await driver.waitForComponent(ON.text('status=V2 event ran, taps=113'), 5000);
+      if (secondaryStatus === undefined || secondaryStatus === null) {
+        throw new Error('V2 secondary event status was not updated after click');
+      }
 
       await findWithForwardScroll(driver, ON.text('first:static child'), 'first child parameter', displaySize);
       await findWithForwardScroll(
@@ -484,6 +490,21 @@ export default function fixitTest(): void {
         ).state('tapCount', 200);
       `;
       expect(OhosPatch.executeScript(reinstallScript).installedCount).assertLarger(0);
+      await driver.pressBack();
+      const reopenButton = await driver.waitForComponent(ON.text('Open patch target screen'), 5000);
+      if (reopenButton === undefined || reopenButton === null) {
+        throw new Error('Open patch target screen button was not found before state-only reinstall verification');
+      }
+      await reopenButton.click();
+      const stateOnlyScroll = await driver.waitForComponent(ON.id('patch-target-scroll'), 5000);
+      if (stateOnlyScroll === undefined || stateOnlyScroll === null) {
+        throw new Error('patch-target-scroll was not found for state-only reinstall verification');
+      }
+      await stateOnlyScroll.scrollToTop(5000);
+      const stateOnlyV2State = await findWithForwardScroll(
+        driver, ON.id('v2-state-text'), 'state-only ComponentV2 patch', displaySize
+      );
+      expect(await stateOnlyV2State.getText()).assertEqual('tapCount=200');
     });
 
     it('invalid full path input fails closed and later valid input still works', 0, () => {

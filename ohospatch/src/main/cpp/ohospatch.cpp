@@ -3488,6 +3488,18 @@ class JsvmRuntime
         if (!component || !owner) {
             return;
         }
+        bool hasDirectParamRule = false;
+        for (size_t index = 0; index < uiRuleCount_; ++index) {
+            UiRule *rule = uiRules_[index].get();
+            if (rule && rule->kind == UiRuleKind::PARAM && rule->targetKey == component->targetKey) {
+                hasDirectParamRule = true;
+                break;
+            }
+        }
+        if (!hasDirectParamRule) {
+            return;
+        }
+
         UiMethodHook *updateParam = nullptr;
         for (size_t index = 0; index < component->methodCount; ++index) {
             UiMethodHook &candidate = component->methods[index];
