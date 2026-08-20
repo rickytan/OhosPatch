@@ -522,6 +522,7 @@ struct UiComponentHook {
     napi_ref holder = nullptr;
     std::string className;
     std::string targetKey;
+    bool isV2 = false;
     std::array<UiMethodHook, 8> methods;
     size_t methodCount = 0;
 };
@@ -3871,7 +3872,7 @@ class JsvmRuntime
 
     void ApplyUiV2InitialParamRules(napi_env napiEnv, UiComponentHook *component, napi_value owner)
     {
-        if (!component || !owner) {
+        if (!component || !component->isV2 || !owner) {
             return;
         }
         bool hasDirectParamRule = false;
@@ -5791,6 +5792,7 @@ class JsvmRuntime
              !HasUiMethod(napiEnv, holder, "resetStateVarsOnReuse", &hasV2StateReset))) {
             return false;
         }
+        componentPointer->isV2 = !hasV1Initializer;
 
         if (hasV1Initializer) {
             if (needsParam &&

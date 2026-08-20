@@ -315,6 +315,7 @@ export default function fixitTest(): void {
           'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/DemoPatch#DemoPatchScreen'
         ).node({ type: 'Text', occurrence: 0 })
           .create('Patched abcd');
+        componentV1.param('message', 'Patched V1 test parameter');
         componentV1.state('tapCount', 40);
         componentV1.state('statusText', 'Patched V1 state before render');
         var component = Fixit.component(
@@ -426,6 +427,10 @@ export default function fixitTest(): void {
       );
       expect(await patchedCreateText.getText()).assertEqual('Patched abcd');
 
+      const v1Parameter = await findWithForwardScroll(
+        driver, ON.text('Patched V1 test parameter'), 'patched V1 parameter with state rules', displaySize
+      );
+      expect(await v1Parameter.getText()).assertEqual('Patched V1 test parameter');
       const v1State = await findWithForwardScroll(driver, ON.id('v1-state-text'), 'patched V1 state', displaySize);
       expect(await v1State.getText()).assertEqual('tapCount=40, secondary=1');
       const v1Status = await findWithForwardScroll(driver, ON.id('v1-status-text'), 'patched V1 status', displaySize);
