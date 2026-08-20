@@ -81,12 +81,12 @@
     ancestors.push(value);
     var encoded;
     if (Array.isArray(value)) {
-      encoded = value.map(function (item) {
+      encoded = value.map((item) => {
         return encodeNativeWireValue(item, ancestors);
       });
     } else {
       encoded = {};
-      Object.keys(value).forEach(function (property) {
+      Object.keys(value).forEach((property) => {
         encoded[property] = encodeNativeWireValue(value[property], ancestors);
       });
     }
@@ -127,12 +127,12 @@
     ancestors.push(value);
     var encoded;
     if (Array.isArray(value)) {
-      encoded = value.map(function (item) {
+      encoded = value.map((item) => {
         return encodeUiArgumentValue(item, ancestors);
       });
     } else {
       encoded = {};
-      Object.keys(value).forEach(function (property) {
+      Object.keys(value).forEach((property) => {
         encoded[property] = encodeUiArgumentValue(value[property], ancestors);
       });
     }
@@ -637,7 +637,7 @@
         throw new TypeError('Component node where must be a non-empty object');
       }
       var where = {};
-      names.forEach(function (name) {
+      names.forEach((name) => {
         validateUiName(name, 'Component node where attribute name');
         where[name] = copyJsonValue(normalized.where[name], 'Component node where value');
       });
@@ -733,9 +733,8 @@
     if (!attributes || typeof attributes !== 'object' || Array.isArray(attributes)) {
       throw new TypeError('Component attributes must be an object');
     }
-    var self = this;
-    Object.keys(attributes).forEach(function (name) {
-      self.attr(name, attributes[name]);
+    Object.keys(attributes).forEach((name) => {
+      this.attr(name, attributes[name]);
     });
     return this;
   };
@@ -884,9 +883,8 @@
     if (!attributes || typeof attributes !== 'object' || Array.isArray(attributes)) {
       throw new TypeError('Component builder attributes must be an object');
     }
-    var self = this;
-    Object.keys(attributes).forEach(function (name) {
-      self.attr(name, attributes[name]);
+    Object.keys(attributes).forEach((name) => {
+      this.attr(name, attributes[name]);
     });
     return this;
   };
@@ -1077,7 +1075,7 @@
   }
 
   function clearAllTimers() {
-    Object.keys(timers).forEach(function (id) {
+    Object.keys(timers).forEach((id) => {
       global.__ohospatch_cancelTimer(Number(id));
     });
     timers = Object.create(null);
