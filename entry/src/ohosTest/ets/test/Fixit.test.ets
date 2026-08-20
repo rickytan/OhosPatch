@@ -235,14 +235,22 @@ export default function fixitTest(): void {
             } catch (err) {
               childAttrRejected = err instanceof TypeError;
             }
+            var multiArgumentAttributeAccepted = true;
+            try {
+              Fixit.component('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/PatchablePanelV2#PatchablePanelV2')
+                .node({ type: 'Text', occurrence: 1 })
+                .attr('backgroundImage', $r('app.media.app_icon'), { syncLoad: true });
+            } catch (err) {
+              multiArgumentAttributeAccepted = false;
+            }
             return typeof direct + '|' + objectRuleRejected + '|' + attrExtraRejected + '|' +
               missingStateReplacementRejected + '|' + missingParamReplacementRejected + '|' +
               emptyWhereRejected + '|' + mixedSelectorRejected + '|' + builtInParamRejected + '|' +
-              childAttrRejected;
+              childAttrRejected + '|' + multiArgumentAttributeAccepted;
           });
       `;
       expect(OhosPatch.executeScript(script).installedCount).assertLarger(0);
-      expect(DemoViewModel.crash()).assertEqual('function|true|true|true|true|true|true|true|true');
+      expect(DemoViewModel.crash()).assertEqual('function|true|true|true|true|true|true|true|true|true');
     });
 
     it('ComponentV2 supports param state node and event DSL behavior', 0, async () => {
@@ -307,7 +315,8 @@ export default function fixitTest(): void {
           return originValue + 100;
         });
         component.node({ type: 'Text', occurrence: 1 })
-          .attr('backgroundColor', '#E7F7EE');
+          .attr('backgroundColor', '#E7F7EE')
+          .attr('backgroundImage', $r('app.media.app_icon'), { syncLoad: true });
         component.node({
           type: 'Button',
           where: { id: 'v2-primary-action', height: 44 }
@@ -452,10 +461,15 @@ export default function fixitTest(): void {
         driver, ON.id('patched-builder-slot-button'), 'patched-builder-slot-button', displaySize
       );
       await builderButton.click();
-      const inlineBuilderText = await findWithForwardScroll(
+      await findWithForwardScroll(
         driver, ON.id('patched-inline-builder-slot-text'), 'patched-inline-builder-slot-text', displaySize
       );
-      expect(await inlineBuilderText.getText()).assertEqual('inline slot text=Patched BuilderParam slot event');
+      await findWithForwardScroll(
+        driver,
+        ON.text('inline slot text=Patched BuilderParam slot event'),
+        'patched inline BuilderParam slot state',
+        displaySize
+      );
       const inlineBuilderButton = await findWithForwardScroll(
         driver, ON.id('patched-inline-builder-slot-button'), 'patched-inline-builder-slot-button', displaySize
       );
