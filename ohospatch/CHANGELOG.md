@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.0.4
+
 - Renamed the trailing-closure and `@BuilderParam` node API from `node(...).slot(...)` to `node(...).builder(...)`.
 - Added one-argument `builder(nodeSelector)` syntax for trailing closures and named `builder(builderParamName, nodeSelector)` syntax for explicitly passed or multiple BuilderParams.
 - Added independent node occurrence scopes and event patches for multiple named BuilderParams.
