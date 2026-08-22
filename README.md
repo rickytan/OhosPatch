@@ -562,7 +562,8 @@ Text('abcd')
 
 ```js
 Fixit.component('@vendor/business_page/src/main/ets/components/DemoPatch#DemoPatchScreen')
-  .node({ type: 'Text', occurrence: 0 }) // 选择 DemoPatchScreen 中第一个 Text。
+  .builder('ComponentTab') // 选择 DemoPatchScreen 的 ComponentTab Builder。
+  .node({ type: 'Text', occurrence: 0 }) // 选择 ComponentTab 中第一个 Text。
   .create('Patched abcd'); // 调用 Text.create('Patched abcd')；返回 NodeBuilder。
 ```
 

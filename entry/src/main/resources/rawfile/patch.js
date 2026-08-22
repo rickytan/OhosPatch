@@ -46,8 +46,9 @@
   }, 60);
 
   // --- Component create arguments: 修改 Text('abcd') 初始化参数 ---
-  // 这里命中 DemoPatchScreen 中第一个 Text，把创建参数改为新的 label。
-  demoPatchScreen.node({ type: 'Text', occurrence: 0 })
+  // 这里命中 DemoPatchScreen 的 Components TabContent 中第一个 Text，把创建参数改为新的 label。
+  demoPatchScreen.builder('ComponentTab')
+    .node({ type: 'Text', occurrence: 0 })
     .create('Patched abcd');
 
   // --- Component value override: param / state ---
@@ -187,6 +188,20 @@
     .param('title', function (originValue) {
       return 'scoped patched ' + originValue;
     });
+
+  Fixit.component('@vendor/business_page/src/main/ets/components/BuilderMethodPanel#BuilderMethodPanel')
+    .builder('contentBuilder')
+    .node('Button')
+    .create('Patched Builder method action')
+    .attr('height', 80)
+    .event('onClick', function() {
+      this.statusText = 'Patched @Builder event';
+    })
+
+  Fixit.component('@vendor/business_page/src/main/ets/components/MainPage#MainPage')
+    .node('Text')
+    .create('Patched content')
+    .attr('fontColor', '#F0F')
 
   // --- BuilderParam: patch nodes built by trailing and explicitly passed builders.
   builderParamRoot.param('message', 'Patched builder-param root parameter');

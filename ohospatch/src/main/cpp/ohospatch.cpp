@@ -571,11 +571,41 @@ struct UiEventCallbackRecord {
     uint32_t ruleId = 0;
 };
 
+struct UiNodeTypeCounter {
+    std::string nodeType;
+    uint32_t count = 0;
+};
+
 struct UiEventCaptureContext {
     napi_env env = nullptr;
     napi_ref originalRegistrar = nullptr;
     napi_ref originalEvent = nullptr;
+    napi_ref owner = nullptr;
     UiRule *rule = nullptr;
+    bool installed = false;
+};
+
+struct UiContentBuilderCallbackRecord {
+    napi_env env = nullptr;
+    napi_ref originalBuilder = nullptr;
+    napi_ref owner = nullptr;
+    std::string targetKey;
+    std::array<UiNodeTypeCounter, kMaxUiNodeTypesPerRender> counters;
+    size_t counterCount = 0;
+    std::array<std::string, kMaxUiSelectorsPerRender> selectedSelectors;
+    size_t selectedSelectorCount = 0;
+};
+
+struct UiContentCreateCaptureContext {
+    napi_env env = nullptr;
+    napi_ref originalCreate = nullptr;
+    napi_ref owner = nullptr;
+    std::string targetKey;
+    std::string methodName;
+    std::array<UiNodeTypeCounter, kMaxUiNodeTypesPerRender> counters;
+    size_t counterCount = 0;
+    std::array<std::string, kMaxUiSelectorsPerRender> selectedSelectors;
+    size_t selectedSelectorCount = 0;
     bool installed = false;
 };
 
@@ -601,11 +631,6 @@ struct UiStoredFunctionCallbackRecord {
     napi_env env = nullptr;
     napi_ref owner = nullptr;
     uint32_t functionHandle = 0;
-};
-
-struct UiNodeTypeCounter {
-    std::string nodeType;
-    uint32_t count = 0;
 };
 
 struct UiChildInstanceOccurrence {
@@ -1855,8 +1880,20 @@ class JsvmRuntime
                     "napi_get_reference_value(component event registrar)")) {
             return NapiUndefined(env);
         }
+        std::array<napi_value, kMaxArguments> forwarded{};
+        napi_value *callArgv = argv.data();
+        if (capture->rule && capture->rule->whereConditionCount == 0 && argc > 0) {
+            napi_value callback = nullptr;
+            if (Runtime().CreateUiEventCallback(env, capture, &callback) && callback) {
+                for (size_t index = 0; index < argc; ++index) {
+                    forwarded[index] = argv[index];
+                }
+                forwarded[0] = callback;
+                callArgv = forwarded.data();
+            }
+        }
         napi_value result = nullptr;
-        napi_status status = napi_call_function(env, receiver, registrar, argc, argv.data(), &result);
+        napi_status status = napi_call_function(env, receiver, registrar, argc, callArgv, &result);
         if (status == napi_pending_exception) {
             LogError("Original component event registrar threw an exception");
             return nullptr;
@@ -1930,6 +1967,72 @@ class JsvmRuntime
         return result;
     }
 
+    static napi_value UiContentBuilderCallback(napi_env env, napi_callback_info info)
+    {
+        size_t argc = kMaxArguments;
+        napi_value receiver = nullptr;
+        void *data = nullptr;
+        std::array<napi_value, kMaxArguments> argv{};
+        if (!NapiOk(env, napi_get_cb_info(env, info, &argc, argv.data(), &receiver, &data),
+                    "napi_get_cb_info(component content builder)")) {
+            return NapiUndefined(env);
+        }
+        if (!data) {
+            LogError("OhosPatch component content builder callback has no context");
+            return NapiUndefined(env);
+        }
+        if (argc > kMaxArguments) {
+            LogError("Component content builder arguments were truncated to the OhosPatch limit");
+            argc = kMaxArguments;
+        }
+        return Runtime().InvokeUiContentBuilder(env, static_cast<UiContentBuilderCallbackRecord *>(data), receiver,
+                                                argc, argv.data());
+    }
+
+    static napi_value UiContentCreateCaptureCallback(napi_env env, napi_callback_info info)
+    {
+        size_t argc = kMaxArguments;
+        napi_value receiver = nullptr;
+        void *data = nullptr;
+        std::array<napi_value, kMaxArguments> argv{};
+        if (!NapiOk(env, napi_get_cb_info(env, info, &argc, argv.data(), &receiver, &data),
+                    "napi_get_cb_info(component content create capture)")) {
+            return NapiUndefined(env);
+        }
+        UiContentCreateCaptureContext *capture = static_cast<UiContentCreateCaptureContext *>(data);
+        if (!capture || !capture->originalCreate) {
+            LogError("OhosPatch component content create capture has no context");
+            return NapiUndefined(env);
+        }
+        if (argc > kMaxArguments) {
+            LogError("Component content create arguments were truncated to the OhosPatch limit");
+            argc = kMaxArguments;
+        }
+
+        napi_value create = nullptr;
+        if (!NapiOk(env, napi_get_reference_value(env, capture->originalCreate, &create),
+                    "napi_get_reference_value(component content create)")) {
+            return NapiUndefined(env);
+        }
+
+        Runtime().CaptureUiContentCreateState(capture);
+        std::array<napi_value, kMaxArguments> forwarded{};
+        for (size_t index = 0; index < argc; ++index) {
+            forwarded[index] = Runtime().WrapUiContentBuilderArgument(env, capture, argv[index]);
+        }
+
+        napi_value result = nullptr;
+        napi_status status = napi_call_function(env, receiver, create, argc, forwarded.data(), &result);
+        if (status == napi_pending_exception) {
+            LogError("Original component content create function threw an exception");
+            return nullptr;
+        }
+        if (!NapiOk(env, status, "napi_call_function(component content create)")) {
+            return NapiUndefined(env);
+        }
+        return result;
+    }
+
     static napi_value UiWhereCaptureCallback(napi_env env, napi_callback_info info)
     {
         size_t argc = kMaxArguments;
@@ -1998,6 +2101,18 @@ class JsvmRuntime
         DeleteNapiReference(env, record->originalBuilder, "napi_delete_reference(component node builder)");
         DeleteNapiReference(env, record->componentApi, "napi_delete_reference(component API)");
         DeleteNapiReference(env, record->owner, "napi_delete_reference(component owner)");
+        delete record;
+    }
+
+    static void FinalizeUiContentBuilderCallback(napi_env env, void *data, void *)
+    {
+        UiContentBuilderCallbackRecord *record = static_cast<UiContentBuilderCallbackRecord *>(data);
+        if (!record) {
+            return;
+        }
+        DeleteNapiReference(env, record->originalBuilder,
+                            "napi_delete_reference(component content builder)");
+        DeleteNapiReference(env, record->owner, "napi_delete_reference(component content builder owner)");
         delete record;
     }
 
@@ -2168,6 +2283,164 @@ class JsvmRuntime
         return result;
     }
 
+    void CaptureUiContentCreateState(UiContentCreateCaptureContext *capture)
+    {
+        if (!capture) {
+            return;
+        }
+        UiRenderFrame *frame = FindUiRenderFrame(capture->targetKey);
+        if (frame) {
+            CopyUiRenderFrameState(frame, capture);
+        }
+    }
+
+    napi_value WrapUiContentBuilderArgument(napi_env napiEnv, UiContentCreateCaptureContext *capture,
+                                            napi_value argument)
+    {
+        napi_valuetype type = napi_undefined;
+        if (!capture || !argument ||
+            !NapiOk(napiEnv, napi_typeof(napiEnv, argument, &type),
+                    "napi_typeof(component content builder argument)") ||
+            type != napi_function) {
+            return argument;
+        }
+
+        napi_value owner = nullptr;
+        if (!capture->owner ||
+            !NapiOk(napiEnv, napi_get_reference_value(napiEnv, capture->owner, &owner),
+                    "napi_get_reference_value(component content owner)") ||
+            !owner) {
+            LogError("Cannot wrap Component content builder because its owner is unavailable. target='" +
+                     capture->targetKey + "'.");
+            return argument;
+        }
+
+        UiContentBuilderCallbackRecord *record = new (std::nothrow) UiContentBuilderCallbackRecord();
+        if (!record) {
+            LogError("Cannot allocate OhosPatch UiContentBuilderCallbackRecord");
+            return argument;
+        }
+        record->env = napiEnv;
+        record->targetKey = capture->targetKey;
+        size_t counterCount = capture->counterCount < record->counters.size()
+                                  ? capture->counterCount
+                                  : record->counters.size();
+        for (size_t index = 0; index < counterCount; ++index) {
+            record->counters[index] = capture->counters[index];
+        }
+        record->counterCount = counterCount;
+        size_t selectorCount = capture->selectedSelectorCount < record->selectedSelectors.size()
+                                   ? capture->selectedSelectorCount
+                                   : record->selectedSelectors.size();
+        for (size_t index = 0; index < selectorCount; ++index) {
+            record->selectedSelectors[index] = capture->selectedSelectors[index];
+        }
+        record->selectedSelectorCount = selectorCount;
+
+        if (!NapiOk(napiEnv, napi_create_reference(napiEnv, argument, 1, &record->originalBuilder),
+                    "napi_create_reference(component content builder)") ||
+            !NapiOk(napiEnv, napi_create_reference(napiEnv, owner, 0, &record->owner),
+                    "napi_create_reference(component content builder owner)")) {
+            FinalizeUiContentBuilderCallback(napiEnv, record, nullptr);
+            return argument;
+        }
+
+        napi_value wrapper = nullptr;
+        if (!NapiOk(napiEnv,
+                    napi_create_function(napiEnv, "ohospatchContentBuilder", NAPI_AUTO_LENGTH,
+                                         UiContentBuilderCallback, record, &wrapper),
+                    "napi_create_function(component content builder)") ||
+            !NapiOk(napiEnv, napi_add_finalizer(napiEnv, wrapper, record,
+                                                FinalizeUiContentBuilderCallback, nullptr, nullptr),
+                    "napi_add_finalizer(component content builder)")) {
+            FinalizeUiContentBuilderCallback(napiEnv, record, nullptr);
+            return argument;
+        }
+        return wrapper;
+    }
+
+    napi_value InvokeUiContentBuilder(napi_env napiEnv, UiContentBuilderCallbackRecord *record, napi_value receiver,
+                                      size_t argc, napi_value *argv)
+    {
+        if (!record || !record->originalBuilder) {
+            LogError("Cannot invoke an unavailable component content builder");
+            return NapiUndefined(napiEnv);
+        }
+        napi_value builder = nullptr;
+        napi_value owner = nullptr;
+        if (!NapiOk(napiEnv, napi_get_reference_value(napiEnv, record->originalBuilder, &builder),
+                    "napi_get_reference_value(component content builder)") ||
+            !NapiOk(napiEnv, napi_get_reference_value(napiEnv, record->owner, &owner),
+                    "napi_get_reference_value(component content builder owner)")) {
+            return NapiUndefined(napiEnv);
+        }
+
+        bool pushed = false;
+        if (!FindUiRenderFrame(record->targetKey)) {
+            pushed = PushUiRenderContinuationFrame(record->targetKey, owner, record->counters.data(),
+                                                   record->counterCount, record->selectedSelectors.data(),
+                                                   record->selectedSelectorCount);
+        }
+
+        napi_value result = nullptr;
+        napi_status status = napi_call_function(napiEnv, receiver, builder, argc, argv, &result);
+        if (pushed) {
+            PopUiRenderFrame();
+        }
+        if (status == napi_pending_exception) {
+            LogError("Original Component content builder threw an exception. target='" + record->targetKey + "'.");
+            return nullptr;
+        }
+        if (!NapiOk(napiEnv, status, "napi_call_function(component content builder)")) {
+            return NapiUndefined(napiEnv);
+        }
+        return result;
+    }
+
+    bool CreateUiEventCallback(napi_env napiEnv, UiEventCaptureContext *capture, napi_value *out)
+    {
+        if (!out) {
+            return false;
+        }
+        *out = nullptr;
+        if (!capture || !capture->rule) {
+            LogError("Cannot create OhosPatch Component event callback because capture context is unavailable");
+            return false;
+        }
+        UiEventCallbackRecord *record = new (std::nothrow) UiEventCallbackRecord();
+        if (!record) {
+            LogError("Cannot allocate OhosPatch UiEventCallbackRecord");
+            return false;
+        }
+        record->env = napiEnv;
+        record->ruleId = capture->rule->ruleId;
+        record->originalEvent = capture->originalEvent;
+        capture->originalEvent = nullptr;
+        napi_value owner = nullptr;
+        if (capture->owner &&
+            NapiOk(napiEnv, napi_get_reference_value(napiEnv, capture->owner, &owner),
+                   "napi_get_reference_value(component event capture owner)") &&
+            owner &&
+            !NapiOk(napiEnv, napi_create_reference(napiEnv, owner, 0, &record->owner),
+                    "napi_create_reference(component event owner)")) {
+            FinalizeUiEventCallback(napiEnv, record, nullptr);
+            return false;
+        }
+
+        napi_value callback = nullptr;
+        if (!NapiOk(napiEnv,
+                    napi_create_function(napiEnv, "ohospatchEvent", NAPI_AUTO_LENGTH, UiEventCallback, record,
+                                         &callback),
+                    "napi_create_function(component event)") ||
+            !NapiOk(napiEnv, napi_add_finalizer(napiEnv, callback, record, FinalizeUiEventCallback, nullptr, nullptr),
+                    "napi_add_finalizer(component event)")) {
+            FinalizeUiEventCallback(napiEnv, record, nullptr);
+            return false;
+        }
+        *out = callback;
+        return true;
+    }
+
     napi_value InvokeUiNodeBuilder(napi_env napiEnv, UiNodeCallbackRecord *record, napi_value receiver, size_t argc,
                                    napi_value *argv)
     {
@@ -2186,6 +2459,10 @@ class JsvmRuntime
         std::array<UiCreateCaptureContext, kMaxUiCreateMethodsPerNode> createCaptures{};
         size_t createCaptureCount =
             PrepareUiCreateCaptures(napiEnv, record, componentApi, createCaptures.data(), createCaptures.size());
+        std::array<UiContentCreateCaptureContext, kMaxUiCreateMethodsPerNode> contentCreateCaptures{};
+        size_t contentCreateCaptureCount = PrepareUiContentCreateCaptures(
+            napiEnv, record, componentApi, createCaptures.data(), createCaptureCount,
+            contentCreateCaptures.data(), contentCreateCaptures.size());
         std::array<UiWhereCaptureContext, kMaxUiWhereAttributesPerNode> whereCaptures{};
         size_t whereCaptureCount =
             PrepareUiWhereCaptures(napiEnv, record, componentApi, whereCaptures.data(), whereCaptures.size());
@@ -2208,17 +2485,21 @@ class JsvmRuntime
         if (pushedScopedChild) {
             PopUiScopedChildCreationFrame();
         }
+        RestoreUiContentCreateCaptures(napiEnv, componentApi, contentCreateCaptures.data(),
+                                       contentCreateCaptureCount);
         RestoreUiCreateCaptures(napiEnv, componentApi, createCaptures.data(), createCaptureCount);
         RestoreUiEventCaptures(napiEnv, componentApi, eventCaptures.data(), eventCaptureCount);
         RestoreUiWhereCaptures(napiEnv, componentApi, whereCaptures.data(), whereCaptureCount);
         if (status == napi_pending_exception) {
             LogError("Original ArkUI node builder threw an exception");
+            ReleaseUiContentCreateCaptures(napiEnv, contentCreateCaptures.data(), contentCreateCaptureCount);
             ReleaseUiCreateCaptures(napiEnv, createCaptures.data(), createCaptureCount);
             ReleaseUiEventCaptures(napiEnv, eventCaptures.data(), eventCaptureCount);
             ReleaseUiWhereCaptures(napiEnv, whereCaptures.data(), whereCaptureCount);
             return nullptr;
         }
         if (!NapiOk(napiEnv, status, "napi_call_function(component node builder)")) {
+            ReleaseUiContentCreateCaptures(napiEnv, contentCreateCaptures.data(), contentCreateCaptureCount);
             ReleaseUiCreateCaptures(napiEnv, createCaptures.data(), createCaptureCount);
             ReleaseUiEventCaptures(napiEnv, eventCaptures.data(), eventCaptureCount);
             ReleaseUiWhereCaptures(napiEnv, whereCaptures.data(), whereCaptureCount);
@@ -2228,6 +2509,7 @@ class JsvmRuntime
         SelectUiWhereRules(napiEnv, record, whereCaptures.data(), whereCaptureCount);
         ApplyUiAttributes(napiEnv, record, componentApi);
         InstallUiEventCallbacks(napiEnv, record, componentApi, eventCaptures.data(), eventCaptureCount);
+        ReleaseUiContentCreateCaptures(napiEnv, contentCreateCaptures.data(), contentCreateCaptureCount);
         ReleaseUiCreateCaptures(napiEnv, createCaptures.data(), createCaptureCount);
         ReleaseUiEventCaptures(napiEnv, eventCaptures.data(), eventCaptureCount);
         ReleaseUiWhereCaptures(napiEnv, whereCaptures.data(), whereCaptureCount);
@@ -4407,6 +4689,35 @@ class JsvmRuntime
         return true;
     }
 
+    bool PushUiRenderContinuationFrame(const std::string &targetKey, napi_value owner,
+                                       const UiNodeTypeCounter *counters, size_t counterCount,
+                                       const std::string *selectedSelectors, size_t selectedSelectorCount)
+    {
+        if (uiRenderDepth_ >= kMaxUiRenderDepth) {
+            LogError("Component render continuation nesting exceeds the OhosPatch limit");
+            return false;
+        }
+        UiRenderFrame &frame = uiRenderFrames_[uiRenderDepth_++];
+        frame.targetKey = targetKey;
+        frame.owner = owner;
+        frame.counterCount = 0;
+        frame.childInstanceCount = 0;
+        frame.selectedSelectorCount = 0;
+        size_t safeCounterCount = counterCount < frame.counters.size() ? counterCount : frame.counters.size();
+        for (size_t index = 0; index < safeCounterCount; ++index) {
+            frame.counters[index] = counters[index];
+        }
+        frame.counterCount = safeCounterCount;
+        size_t safeSelectorCount = selectedSelectorCount < frame.selectedSelectors.size()
+                                       ? selectedSelectorCount
+                                       : frame.selectedSelectors.size();
+        for (size_t index = 0; index < safeSelectorCount; ++index) {
+            frame.selectedSelectors[index] = selectedSelectors[index];
+        }
+        frame.selectedSelectorCount = safeSelectorCount;
+        return true;
+    }
+
     void PopUiRenderFrame()
     {
         if (uiRenderDepth_ == 0) {
@@ -4879,6 +5190,94 @@ class JsvmRuntime
         return false;
     }
 
+    bool IsGlobalComponentApi(napi_env napiEnv, napi_value componentApi, const char *name)
+    {
+        if (!componentApi || !name) {
+            return false;
+        }
+        napi_value global = nullptr;
+        napi_value expectedApi = nullptr;
+        bool equal = false;
+        return NapiOk(napiEnv, napi_get_global(napiEnv, &global), "napi_get_global(component API)") &&
+               TryNapiNamedValue(napiEnv, global, name, &expectedApi) &&
+               NapiOk(napiEnv, napi_strict_equals(napiEnv, componentApi, expectedApi, &equal),
+                      "napi_strict_equals(component API)") &&
+               equal;
+    }
+
+    bool TargetNeedsRegularNodeRules(const std::string &targetKey) const
+    {
+        for (size_t index = 0; index < uiRuleCount_; ++index) {
+            UiRule *rule = uiRules_[index].get();
+            if (rule && IsUiNodeRuleKind(rule->kind) && rule->targetKey == targetKey &&
+                rule->childTargetKey.empty() && rule->builderMethodName.empty()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void CopyUiRenderFrameState(const UiRenderFrame *frame, UiContentCreateCaptureContext *capture)
+    {
+        if (!frame || !capture) {
+            return;
+        }
+        size_t counterCount = frame->counterCount < capture->counters.size()
+                                  ? frame->counterCount
+                                  : capture->counters.size();
+        for (size_t index = 0; index < counterCount; ++index) {
+            capture->counters[index] = frame->counters[index];
+        }
+        capture->counterCount = counterCount;
+
+        size_t selectorCount = frame->selectedSelectorCount < capture->selectedSelectors.size()
+                                   ? frame->selectedSelectorCount
+                                   : capture->selectedSelectors.size();
+        for (size_t index = 0; index < selectorCount; ++index) {
+            capture->selectedSelectors[index] = frame->selectedSelectors[index];
+        }
+        capture->selectedSelectorCount = selectorCount;
+    }
+
+    bool WrapUiNodeBuilderForContent(napi_env napiEnv, const std::string &targetKey, UiRenderFrame *renderFrame,
+                                     napi_value *builder, napi_value componentApi)
+    {
+        if (!builder || !renderFrame || !TargetNeedsRegularNodeRules(targetKey)) {
+            return false;
+        }
+
+        UiNodeCallbackRecord *record = new (std::nothrow) UiNodeCallbackRecord();
+        if (!record) {
+            LogError("Cannot allocate OhosPatch content UiNodeCallbackRecord");
+            return false;
+        }
+        record->env = napiEnv;
+        record->targetKey = targetKey;
+        record->owner = nullptr;
+        if (!NapiOk(napiEnv, napi_create_reference(napiEnv, *builder, 1, &record->originalBuilder),
+                    "napi_create_reference(component content node builder)") ||
+            !NapiOk(napiEnv, napi_create_reference(napiEnv, componentApi, 1, &record->componentApi),
+                    "napi_create_reference(component content API)") ||
+            !NapiOk(napiEnv, napi_create_reference(napiEnv, renderFrame->owner, 0, &record->owner),
+                    "napi_create_reference(component content owner)")) {
+            FinalizeUiNodeCallback(napiEnv, record, nullptr);
+            return false;
+        }
+
+        napi_value wrapper = nullptr;
+        if (!NapiOk(napiEnv,
+                    napi_create_function(napiEnv, "ohospatchContentNodeBuilder", NAPI_AUTO_LENGTH,
+                                         UiNodeBuilderCallback, record, &wrapper),
+                    "napi_create_function(component content node builder)") ||
+            !NapiOk(napiEnv, napi_add_finalizer(napiEnv, wrapper, record, FinalizeUiNodeCallback, nullptr, nullptr),
+                    "napi_add_finalizer(component content node builder)")) {
+            FinalizeUiNodeCallback(napiEnv, record, nullptr);
+            return false;
+        }
+        *builder = wrapper;
+        return true;
+    }
+
     void WrapUiNodeBuilder(napi_env napiEnv, const std::string &targetKey, size_t argc, napi_value *argv)
     {
         if (argc < 2 || !argv) {
@@ -5036,6 +5435,10 @@ class JsvmRuntime
         }
 
         if (!hasMatchingRule || (!hasNativeOccurrence && !hasScopedChild)) {
+            if (!inSlotScope && renderFrame && !builderMethodFrame &&
+                IsGlobalComponentApi(napiEnv, argv[1], "NavDestination")) {
+                WrapUiNodeBuilderForContent(napiEnv, targetKey, renderFrame, &argv[0], argv[1]);
+            }
             return;
         }
 
@@ -5178,6 +5581,114 @@ class JsvmRuntime
             captures[index].rule = nullptr;
             captures[index].methodName.clear();
             captures[index].owner = nullptr;
+        }
+    }
+
+    static bool IsCreateMethodCaptured(const UiCreateCaptureContext *captures, size_t count,
+                                       const char *methodName)
+    {
+        if (!captures || !methodName) {
+            return false;
+        }
+        for (size_t index = 0; index < count; ++index) {
+            if (captures[index].installed && captures[index].methodName == methodName) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    size_t PrepareUiContentCreateCaptures(napi_env napiEnv, UiNodeCallbackRecord *record, napi_value componentApi,
+                                          const UiCreateCaptureContext *createCaptures,
+                                          size_t createCaptureCount,
+                                          UiContentCreateCaptureContext *captures, size_t capacity)
+    {
+        if (!record || !componentApi || !captures || !record->nodeType.empty() ||
+            !TargetNeedsRegularNodeRules(record->targetKey)) {
+            return 0;
+        }
+
+        size_t count = 0;
+        const char *methodNames[kMaxUiCreateMethodsPerNode] = {"create", "createWithLabel"};
+        for (size_t methodIndex = 0; methodIndex < kMaxUiCreateMethodsPerNode && count < capacity; ++methodIndex) {
+            const char *methodName = methodNames[methodIndex];
+            if (IsCreateMethodCaptured(createCaptures, createCaptureCount, methodName)) {
+                continue;
+            }
+            napi_value create = nullptr;
+            napi_valuetype createType = napi_undefined;
+            if (!NapiOk(napiEnv, napi_get_named_property(napiEnv, componentApi, methodName, &create),
+                        "napi_get_named_property(component content create)") ||
+                !NapiOk(napiEnv, napi_typeof(napiEnv, create, &createType),
+                        "napi_typeof(component content create)") ||
+                createType != napi_function) {
+                continue;
+            }
+
+            UiContentCreateCaptureContext &capture = captures[count];
+            capture.env = napiEnv;
+            capture.targetKey = record->targetKey;
+            capture.methodName = methodName;
+            capture.owner = record->owner;
+            if (!NapiOk(napiEnv, napi_create_reference(napiEnv, create, 1, &capture.originalCreate),
+                        "napi_create_reference(component content create)")) {
+                capture.targetKey.clear();
+                capture.methodName.clear();
+                capture.owner = nullptr;
+                continue;
+            }
+            napi_value captureFunction = nullptr;
+            if (!NapiOk(napiEnv,
+                        napi_create_function(napiEnv, "ohospatchContentCreateCapture", NAPI_AUTO_LENGTH,
+                                             UiContentCreateCaptureCallback, &capture, &captureFunction),
+                        "napi_create_function(component content create capture)") ||
+                !NapiOk(napiEnv,
+                        napi_set_named_property(napiEnv, componentApi, methodName, captureFunction),
+                        "napi_set_named_property(component content create capture)")) {
+                DeleteNapiReference(napiEnv, capture.originalCreate,
+                                    "napi_delete_reference(component content create)");
+                capture.originalCreate = nullptr;
+                capture.targetKey.clear();
+                capture.methodName.clear();
+                capture.owner = nullptr;
+                continue;
+            }
+            capture.installed = true;
+            ++count;
+        }
+        return count;
+    }
+
+    static void RestoreUiContentCreateCaptures(napi_env napiEnv, napi_value componentApi,
+                                               UiContentCreateCaptureContext *captures, size_t count)
+    {
+        for (size_t index = count; index > 0; --index) {
+            UiContentCreateCaptureContext &capture = captures[index - 1];
+            if (!capture.installed || !capture.originalCreate || capture.methodName.empty()) {
+                continue;
+            }
+            napi_value create = nullptr;
+            if (NapiOk(napiEnv, napi_get_reference_value(napiEnv, capture.originalCreate, &create),
+                       "napi_get_reference_value(component content create)")) {
+                NapiOk(napiEnv, napi_set_named_property(napiEnv, componentApi, capture.methodName.c_str(), create),
+                       "napi_set_named_property(restore component content create)");
+            }
+            capture.installed = false;
+        }
+    }
+
+    static void ReleaseUiContentCreateCaptures(napi_env napiEnv, UiContentCreateCaptureContext *captures,
+                                               size_t count)
+    {
+        for (size_t index = 0; index < count; ++index) {
+            DeleteNapiReference(napiEnv, captures[index].originalCreate,
+                                "napi_delete_reference(component content create)");
+            captures[index].originalCreate = nullptr;
+            captures[index].owner = nullptr;
+            captures[index].targetKey.clear();
+            captures[index].methodName.clear();
+            captures[index].counterCount = 0;
+            captures[index].selectedSelectorCount = 0;
         }
     }
 
@@ -5393,6 +5904,7 @@ class JsvmRuntime
             UiEventCaptureContext &capture = captures[count];
             capture.env = napiEnv;
             capture.rule = rule;
+            capture.owner = record->owner;
             if (!NapiOk(napiEnv, napi_create_reference(napiEnv, registrar, 1, &capture.originalRegistrar),
                         "napi_create_reference(component event registrar)")) {
                 continue;
@@ -5530,40 +6042,19 @@ class JsvmRuntime
     void InstallUiEventCallbacks(napi_env napiEnv, UiNodeCallbackRecord *nodeRecord, napi_value componentApi,
                                  UiEventCaptureContext *captures, size_t count)
     {
-        napi_value owner = nullptr;
-        NapiOk(napiEnv, napi_get_reference_value(napiEnv, nodeRecord->owner, &owner),
-               "napi_get_reference_value(component owner for event)");
-
         for (size_t index = 0; index < count; ++index) {
             UiEventCaptureContext &capture = captures[index];
             UiRule *rule = capture.rule;
             if (!rule || !capture.originalRegistrar || !RuleMatchesNode(rule, nodeRecord)) {
                 continue;
             }
-
-            UiEventCallbackRecord *record = new (std::nothrow) UiEventCallbackRecord();
-            if (!record) {
-                LogError("Cannot allocate OhosPatch UiEventCallbackRecord");
-                continue;
-            }
-            record->env = napiEnv;
-            record->ruleId = rule->ruleId;
-            record->originalEvent = capture.originalEvent;
-            capture.originalEvent = nullptr;
-            if (owner && !NapiOk(napiEnv, napi_create_reference(napiEnv, owner, 0, &record->owner),
-                                 "napi_create_reference(component event owner)")) {
-                FinalizeUiEventCallback(napiEnv, record, nullptr);
+            if (rule->whereConditionCount == 0 && !capture.originalEvent) {
                 continue;
             }
 
             napi_value callback = nullptr;
-            if (!NapiOk(napiEnv,
-                        napi_create_function(napiEnv, "ohospatchEvent", NAPI_AUTO_LENGTH, UiEventCallback, record,
-                                             &callback),
-                        "napi_create_function(component event)") ||
-                !NapiOk(napiEnv, napi_add_finalizer(napiEnv, callback, record, FinalizeUiEventCallback, nullptr, nullptr),
-                        "napi_add_finalizer(component event)")) {
-                FinalizeUiEventCallback(napiEnv, record, nullptr);
+            capture.owner = nodeRecord->owner;
+            if (!CreateUiEventCallback(napiEnv, &capture, &callback) || !callback) {
                 continue;
             }
 

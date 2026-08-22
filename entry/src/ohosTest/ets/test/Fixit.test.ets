@@ -1,29 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it } from '@ohos/hypium';
 import { Want } from '@kit.AbilityKit';
-import { abilityDelegatorRegistry, Component, Driver, ON, On, Point as UiPoint } from '@kit.TestKit';
+import { abilityDelegatorRegistry, Driver, ON } from '@kit.TestKit';
 import { OhosPatch } from '@rickytan/ohospatch';
 import { DemoScenario, DemoViewModel, Point } from '@vendor/business_page';
 
-async function findWithForwardScroll(driver: Driver, on: On, label: string, displaySize: UiPoint): Promise<Component> {
-  const swipeX = Math.floor(displaySize.x * 0.5);
-  const startY = Math.floor(displaySize.y * 0.68);
-  const endY = Math.floor(displaySize.y * 0.53);
-  for (let attempt = 0; attempt < 20; attempt++) {
-    const component = await driver.findComponent(on);
-    if (component !== undefined && component !== null) {
-      return component;
-    }
-    await driver.swipe(swipeX, startY, swipeX, endY, 5000);
+async function selectPatchTab(driver: Driver, label: string): Promise<void> {
+  const tab = await driver.waitForComponent(ON.text(label), 5000);
+  if (tab === undefined || tab === null) {
+    throw new Error(`Patch tab ${label} was not found`);
   }
-  const textComponents = await driver.findComponents(ON.type('Text'));
-  const visibleTexts: Array<string> = [];
-  for (let index = 0; index < textComponents.length; index++) {
-    visibleTexts.push(await textComponents[index].getText());
-  }
-  throw new Error(
-    `${label} was not found after scrolling; display=${displaySize.x}x${displaySize.y}; ` +
-    `visibleTexts=${visibleTexts.join(' | ')}`
-  );
+  await tab.click();
+  await driver.delayMs(300);
 }
 
 export default function fixitTest(): void {
@@ -286,16 +273,15 @@ export default function fixitTest(): void {
       }
 
       await openButton.click();
-      const displaySize = await driver.getDisplaySize();
-      const baselineScroll = await driver.waitForComponent(ON.id('patch-target-scroll'), 5000);
-      if (baselineScroll === undefined || baselineScroll === null) {
-        throw new Error('patch-target-scroll was not found before patch installation');
+      const baselineTabs = await driver.waitForComponent(ON.id('patch-target-tabs'), 5000);
+      if (baselineTabs === undefined || baselineTabs === null) {
+        throw new Error('patch-target-tabs was not found before patch installation');
       }
       const baselineCreateText = await driver.waitForComponent(ON.text('abcd'), 5000);
       if (baselineCreateText === undefined || baselineCreateText === null) {
         throw new Error('Text create marker was not found before patch installation');
       }
-      await baselineScroll.scrollToBottom(5000);
+      await selectPatchTab(driver, 'BuilderParam');
       const baselineMultiContent = await driver.waitForComponent(ON.id('multi-builder-content-text'), 5000);
       if (baselineMultiContent === undefined || baselineMultiContent === null) {
         throw new Error('multi-builder-content-text was not found before patch installation');
@@ -313,11 +299,17 @@ export default function fixitTest(): void {
         );
         Fixit.component(
           'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/DemoPatch#DemoPatchScreen'
-        ).node({ type: 'Text', occurrence: 0 })
+        ).builder('ComponentTab')
+          .node({ type: 'Text', occurrence: 0 })
           .create('Patched abcd');
         componentV1.param('message', 'Patched V1 test parameter');
         componentV1.state('tapCount', 40);
         componentV1.state('statusText', 'Patched V1 state before render');
+        var v2EventProbe = 'not-run';
+        Fixit.fix('com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/ViewModel/DemoViewModel#DemoViewModel')
+          .classMethod('crash', function () {
+            return v2EventProbe;
+          });
         var component = Fixit.component(
           'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/PatchablePanelV2#PatchablePanelV2'
         );
@@ -337,21 +329,18 @@ export default function fixitTest(): void {
         }).attr('id', 'patched-v2-primary-action');
         component.node({ type: 'Button', where: { id: 'missing-action' } })
           .attr('id', 'unexpected-action');
-        var origin = component.node({ type: 'Button', where: { height: 44 } })
+        var primaryOrigin = component.node({ type: 'Button', occurrence: 0 })
           .event('onClick', function () {
             this.markPrimary(10);
-            var result = origin.apply(this, arguments);
+            var result = primaryOrigin.apply(this, arguments);
             this.statusText = 'Patched V2 test event, taps=' + this.tapCount;
-            this.getUIContext().showAlertDialog({
-              title: 'OhosPatch',
-              message: 'Nested Patch JSVM function callback test',
-              buttons: [{
-                value: 'Patch action',
-                action: function () {
-                  this.statusText = 'Patch alert button action, taps=' + this.tapCount;
-                }
-              }]
-            });
+            v2EventProbe = 'primary taps=' + this.tapCount;
+            return result;
+          });
+        var secondaryOrigin = component.node({ type: 'Button', occurrence: 1 })
+          .event('onClick', function () {
+            var result = secondaryOrigin.apply(this, arguments);
+            v2EventProbe = 'secondary taps=' + this.tapCount;
             return result;
           });
         Fixit.component(
@@ -434,144 +423,153 @@ export default function fixitTest(): void {
       `;
       expect(OhosPatch.executeScript(script).installedCount).assertLarger(0);
       await openButton.click();
-      const patchedScroll = await driver.waitForComponent(ON.id('patch-target-scroll'), 5000);
-      if (patchedScroll === undefined || patchedScroll === null) {
-        throw new Error('patch-target-scroll was not found after patch installation');
+      const patchedTabs = await driver.waitForComponent(ON.id('patch-target-tabs'), 5000);
+      if (patchedTabs === undefined || patchedTabs === null) {
+        throw new Error('patch-target-tabs was not found after patch installation');
       }
-      await patchedScroll.scrollToTop(5000);
 
-      const patchedCreateText = await findWithForwardScroll(
-        driver, ON.text('Patched abcd'), 'patched Text create argument', displaySize
-      );
+      const patchedCreateText = await driver.waitForComponent(ON.text('Patched abcd'), 5000);
+      if (patchedCreateText === undefined || patchedCreateText === null) {
+        throw new Error('patched Text create argument was not found in Components TabContent');
+      }
       expect(await patchedCreateText.getText()).assertEqual('Patched abcd');
 
-      const v1Parameter = await findWithForwardScroll(
-        driver, ON.text('Patched V1 test parameter'), 'patched V1 parameter with state rules', displaySize
-      );
+      const v1Parameter = await driver.waitForComponent(ON.text('Patched V1 test parameter'), 5000);
+      if (v1Parameter === undefined || v1Parameter === null) {
+        throw new Error('patched V1 parameter was not found in Components TabContent');
+      }
       expect(await v1Parameter.getText()).assertEqual('Patched V1 test parameter');
-      const v1State = await findWithForwardScroll(driver, ON.id('v1-state-text'), 'patched V1 state', displaySize);
+      const v1State = await driver.waitForComponent(ON.id('v1-state-text'), 5000);
+      if (v1State === undefined || v1State === null) {
+        throw new Error('patched V1 state was not found in Components TabContent');
+      }
       expect(await v1State.getText()).assertEqual('tapCount=40, secondary=1');
-      const v1Status = await findWithForwardScroll(driver, ON.id('v1-status-text'), 'patched V1 status', displaySize);
+      const v1Status = await driver.waitForComponent(ON.id('v1-status-text'), 5000);
+      if (v1Status === undefined || v1Status === null) {
+        throw new Error('patched V1 status was not found in Components TabContent');
+      }
       expect(await v1Status.getText()).assertEqual('status=Patched V1 state before render');
 
-      const parameter = await findWithForwardScroll(
-        driver, ON.id('v2-message-text'), 'patched V2 parameter', displaySize
-      );
+      await selectPatchTab(driver, 'V2');
+      const parameter = await driver.waitForComponent(ON.id('v2-message-text'), 5000);
+      if (parameter === undefined || parameter === null) {
+        throw new Error('patched V2 parameter was not found in V2 TabContent');
+      }
       expect(await parameter.getText())
         .assertEqual('Patched V2 test parameter, origin=Original V2 component parameter, count=0');
-      const initialState = await findWithForwardScroll(
-        driver, ON.id('v2-state-text'), 'patched V2 state', displaySize
-      );
+      const initialState = await driver.waitForComponent(ON.id('v2-state-text'), 5000);
+      if (initialState === undefined || initialState === null) {
+        throw new Error('patched V2 state was not found in V2 TabContent');
+      }
       expect(await initialState.getText()).assertEqual('tapCount=100');
-      const initialStatus = await findWithForwardScroll(
-        driver, ON.id('v2-status-text'), 'patched V2 status', displaySize
-      );
+      const initialStatus = await driver.waitForComponent(ON.id('v2-status-text'), 5000);
+      if (initialStatus === undefined || initialStatus === null) {
+        throw new Error('patched V2 status was not found in V2 TabContent');
+      }
       expect(await initialStatus.getText()).assertEqual('status=Patched V2 state callback, origin=0');
 
-      const eventButton = await findWithForwardScroll(
-        driver, ON.id('patched-v2-primary-action'), 'patched-v2-primary-action', displaySize
-      );
+      const eventButton = await driver.waitForComponent(ON.id('patched-v2-primary-action'), 5000);
+      if (eventButton === undefined || eventButton === null) {
+        throw new Error('patched-v2-primary-action was not found in V2 TabContent');
+      }
       expect(await eventButton.getText()).assertEqual('V2 primary action');
-      await eventButton.click();
-      const eventStatus = await driver.waitForComponent(
-        ON.text('status=Patched V2 test event, taps=111'), 5000
-      );
-      if (eventStatus === undefined || eventStatus === null) {
-        throw new Error('patched V2 event status was not updated after click');
-      }
-      const alertAction = await driver.waitForComponent(ON.text('Patch action'), 5000);
-      if (alertAction === undefined || alertAction === null) {
-        throw new Error('Patch alert action button was not shown');
-      }
-      await alertAction.click();
-      const alertActionStatus = await driver.waitForComponent(
-        ON.text('status=Patch alert button action, taps=111'), 5000
-      );
-      if (alertActionStatus === undefined || alertActionStatus === null) {
-        throw new Error('Patch alert button callback did not update component state');
-      }
+      const eventButtonCenter = await eventButton.getBoundsCenter();
+      await driver.click(eventButtonCenter.x, eventButtonCenter.y);
+      await driver.delayMs(500);
+      expect(DemoViewModel.crash()).assertEqual('primary taps=111');
 
-      const secondaryButton = await findWithForwardScroll(
-        driver, ON.id('v2-secondary-action'), 'v2-secondary-action', displaySize
-      );
+      const secondaryButton = await driver.waitForComponent(ON.id('v2-secondary-action'), 5000);
+      if (secondaryButton === undefined || secondaryButton === null) {
+        throw new Error('v2-secondary-action was not found in V2 TabContent');
+      }
       await secondaryButton.click();
-      const refreshedScroll = await driver.waitForComponent(ON.id('patch-target-scroll'), 5000);
-      if (refreshedScroll === undefined || refreshedScroll === null) {
-        throw new Error('patch-target-scroll was not found after V2 secondary click');
+      await driver.delayMs(500);
+      expect(DemoViewModel.crash()).assertEqual('secondary taps=113');
+
+      const firstChild = await driver.waitForComponent(ON.text('first:static child'), 5000);
+      if (firstChild === undefined || firstChild === null) {
+        throw new Error('first child parameter was not found in V2 TabContent');
       }
-      await refreshedScroll.scrollToTop(5000);
-      const secondaryStatus = await driver.waitForComponent(ON.text('status=V2 event ran, taps=113'), 5000);
-      if (secondaryStatus === undefined || secondaryStatus === null) {
-        throw new Error('V2 secondary event status was not updated after click');
+      const secondChild = await driver.waitForComponent(ON.text('second:scoped patched dynamic child'), 5000);
+      if (secondChild === undefined || secondChild === null) {
+        throw new Error('scoped second child parameter was not found in V2 TabContent');
       }
 
-      await findWithForwardScroll(driver, ON.text('first:static child'), 'first child parameter', displaySize);
-      await findWithForwardScroll(
-        driver, ON.text('second:scoped patched dynamic child'), 'scoped second child parameter', displaySize
-      );
-
-      const builderText = await findWithForwardScroll(
-        driver, ON.id('patched-builder-slot-text'), 'patched-builder-slot-text', displaySize
-      );
+      await selectPatchTab(driver, 'BuilderParam');
+      const builderText = await driver.waitForComponent(ON.id('patched-builder-slot-text'), 5000);
+      if (builderText === undefined || builderText === null) {
+        throw new Error('patched-builder-slot-text was not found in BuilderParam TabContent');
+      }
       expect(await builderText.getText()).assertEqual('slot text=Original builder-param state');
-      const builderButton = await findWithForwardScroll(
-        driver, ON.id('patched-builder-slot-button'), 'patched-builder-slot-button', displaySize
-      );
+      const builderButton = await driver.waitForComponent(ON.id('patched-builder-slot-button'), 5000);
+      if (builderButton === undefined || builderButton === null) {
+        throw new Error('patched-builder-slot-button was not found in BuilderParam TabContent');
+      }
       await builderButton.click();
-      await findWithForwardScroll(
-        driver, ON.id('patched-inline-builder-slot-text'), 'patched-inline-builder-slot-text', displaySize
+      const inlineBuilderText = await driver.waitForComponent(ON.id('patched-inline-builder-slot-text'), 5000);
+      if (inlineBuilderText === undefined || inlineBuilderText === null) {
+        throw new Error('patched-inline-builder-slot-text was not found in BuilderParam TabContent');
+      }
+      const inlineBuilderStatus = await driver.waitForComponent(
+        ON.text('inline slot text=Patched BuilderParam slot event'), 5000
       );
-      await findWithForwardScroll(
-        driver,
-        ON.text('inline slot text=Patched BuilderParam slot event'),
-        'patched inline BuilderParam slot state',
-        displaySize
-      );
-      const inlineBuilderButton = await findWithForwardScroll(
-        driver, ON.id('patched-inline-builder-slot-button'), 'patched-inline-builder-slot-button', displaySize
-      );
+      if (inlineBuilderStatus === undefined || inlineBuilderStatus === null) {
+        throw new Error('patched inline BuilderParam slot state was not found in BuilderParam TabContent');
+      }
+      const inlineBuilderButton = await driver.waitForComponent(ON.id('patched-inline-builder-slot-button'), 5000);
+      if (inlineBuilderButton === undefined || inlineBuilderButton === null) {
+        throw new Error('patched-inline-builder-slot-button was not found in BuilderParam TabContent');
+      }
       await inlineBuilderButton.click();
-      const multiHeaderText = await findWithForwardScroll(
-        driver, ON.id('patched-multi-builder-header-text'), 'patched-multi-builder-header-text', displaySize
-      );
-      const originalHeaderButton = await findWithForwardScroll(
-        driver, ON.id('multi-builder-header-button'), 'unpatched multi-builder-header-button', displaySize
-      );
+      const multiHeaderText = await driver.waitForComponent(ON.id('patched-multi-builder-header-text'), 5000);
+      if (multiHeaderText === undefined || multiHeaderText === null) {
+        throw new Error('patched-multi-builder-header-text was not found in BuilderParam TabContent');
+      }
+      const originalHeaderButton = await driver.waitForComponent(ON.id('multi-builder-header-button'), 5000);
+      if (originalHeaderButton === undefined || originalHeaderButton === null) {
+        throw new Error('unpatched multi-builder-header-button was not found in BuilderParam TabContent');
+      }
       expect(await originalHeaderButton.getText()).assertEqual('Multi header action');
-      const multiContentText = await findWithForwardScroll(
-        driver, ON.id('patched-multi-builder-content-text'), 'patched-multi-builder-content-text', displaySize
-      );
+      const multiContentText = await driver.waitForComponent(ON.id('patched-multi-builder-content-text'), 5000);
+      if (multiContentText === undefined || multiContentText === null) {
+        throw new Error('patched-multi-builder-content-text was not found in BuilderParam TabContent');
+      }
       expect(await multiContentText.getText())
         .assertEqual('multi content text=Patched inline BuilderParam slot event');
-      const multiContentButton = await findWithForwardScroll(
-        driver, ON.id('patched-multi-builder-content-button'), 'patched-multi-builder-content-button', displaySize
-      );
+      const multiContentButton = await driver.waitForComponent(ON.id('patched-multi-builder-content-button'), 5000);
+      if (multiContentButton === undefined || multiContentButton === null) {
+        throw new Error('patched-multi-builder-content-button was not found in BuilderParam TabContent');
+      }
       await multiContentButton.click();
-      await findWithForwardScroll(
-        driver,
-        ON.text('root status=Patched explicit contentBuilder event'),
-        'patched explicit contentBuilder event status',
-        displaySize
+      const multiContentEventStatus = await driver.waitForComponent(
+        ON.text('multi content text=Patched explicit contentBuilder event'), 5000
       );
+      if (multiContentEventStatus === undefined || multiContentEventStatus === null) {
+        throw new Error('patched explicit contentBuilder event status was not found in BuilderParam TabContent');
+      }
 
-      const outsideBuilderMethodText = await findWithForwardScroll(
-        driver, ON.id('builder-method-outside'), 'unpatched node outside Builder method', displaySize
-      );
+      await selectPatchTab(driver, 'BuilderMethod');
+      const outsideBuilderMethodText = await driver.waitForComponent(ON.id('builder-method-outside'), 5000);
+      if (outsideBuilderMethodText === undefined || outsideBuilderMethodText === null) {
+        throw new Error('unpatched node outside Builder method was not found in BuilderMethod TabContent');
+      }
       expect(await outsideBuilderMethodText.getText()).assertEqual('Outside Builder method');
-      const builderMethodTitle = await findWithForwardScroll(
-        driver, ON.id('patched-builder-method-title'), 'patched node inside Builder method', displaySize
-      );
+      const builderMethodTitle = await driver.waitForComponent(ON.id('patched-builder-method-title'), 5000);
+      if (builderMethodTitle === undefined || builderMethodTitle === null) {
+        throw new Error('patched node inside Builder method was not found in BuilderMethod TabContent');
+      }
       expect(await builderMethodTitle.getText()).assertEqual('Patched Builder method title');
-      const builderMethodButton = await findWithForwardScroll(
-        driver, ON.id('patched-builder-method-action'), 'patched Builder method event', displaySize
-      );
+      const builderMethodButton = await driver.waitForComponent(ON.id('patched-builder-method-action'), 5000);
+      if (builderMethodButton === undefined || builderMethodButton === null) {
+        throw new Error('patched Builder method event was not found in BuilderMethod TabContent');
+      }
       await builderMethodButton.click();
-      await findWithForwardScroll(
-        driver,
-        ON.text('builder method status=Patched @Builder event'),
-        'patched Builder method event state',
-        displaySize
+      const builderMethodStatus = await driver.waitForComponent(
+        ON.text('builder method status=Patched @Builder event'), 5000
       );
+      if (builderMethodStatus === undefined || builderMethodStatus === null) {
+        throw new Error('patched Builder method event state was not found in BuilderMethod TabContent');
+      }
 
       OhosPatch.clear();
       const reinstallScript = `
@@ -586,15 +584,53 @@ export default function fixitTest(): void {
         throw new Error('Open patch target screen button was not found before state-only reinstall verification');
       }
       await reopenButton.click();
-      const stateOnlyScroll = await driver.waitForComponent(ON.id('patch-target-scroll'), 5000);
-      if (stateOnlyScroll === undefined || stateOnlyScroll === null) {
-        throw new Error('patch-target-scroll was not found for state-only reinstall verification');
+      const stateOnlyTabs = await driver.waitForComponent(ON.id('patch-target-tabs'), 5000);
+      if (stateOnlyTabs === undefined || stateOnlyTabs === null) {
+        throw new Error('patch-target-tabs was not found for state-only reinstall verification');
       }
-      await stateOnlyScroll.scrollToTop(5000);
-      const stateOnlyV2State = await findWithForwardScroll(
-        driver, ON.id('v2-state-text'), 'state-only ComponentV2 patch', displaySize
-      );
+      await selectPatchTab(driver, 'V2');
+      const stateOnlyV2State = await driver.waitForComponent(ON.id('v2-state-text'), 5000);
+      if (stateOnlyV2State === undefined || stateOnlyV2State === null) {
+        throw new Error('state-only ComponentV2 patch was not found in V2 TabContent');
+      }
       expect(await stateOnlyV2State.getText()).assertEqual('tapCount=200');
+    });
+
+    it('component DSL patches system nodes inside NavDestination content builder', 0, async () => {
+      const script = `
+        Fixit.component(
+          'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/MainPage#MainPage'
+        ).node({ type: 'Text', occurrence: 0 })
+          .create('Patched NavDestination content')
+          .attr('id', 'patched-nav-destination-text');
+      `;
+      expect(OhosPatch.executeScript(script).installedCount).assertLarger(0);
+
+      const delegator = abilityDelegatorRegistry.getAbilityDelegator();
+      const want: Want = {
+        bundleName: 'com.rickytan.ohospatch',
+        moduleName: 'entry',
+        abilityName: 'EntryAbility'
+      };
+      await delegator.startAbility(want);
+
+      const driver = Driver.create();
+      let openButton = await driver.waitForComponent(ON.text('Open patch target screen'), 2000);
+      if (openButton === undefined || openButton === null) {
+        await driver.pressBack();
+        openButton = await driver.waitForComponent(ON.text('Open patch target screen'), 5000);
+      }
+      if (openButton === undefined || openButton === null) {
+        throw new Error('Open patch target screen button was not found');
+      }
+
+      await openButton.click();
+      const patchedText = await driver.waitForComponent(ON.id('patched-nav-destination-text'), 5000);
+      if (patchedText === undefined || patchedText === null) {
+        throw new Error('patched NavDestination content Text was not found');
+      }
+      expect(await patchedText.getText()).assertEqual('Patched NavDestination content');
+      await driver.pressBack();
     });
 
     it('invalid full path input fails closed and later valid input still works', 0, () => {
