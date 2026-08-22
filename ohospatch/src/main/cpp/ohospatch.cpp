@@ -11,13 +11,13 @@
 #include <memory>
 #include <new>
 #include <string>
-#include <vector>
 
 namespace {
 
 constexpr unsigned int kLogDomain = 0x3900;
 constexpr const char *kLogTag = "[OhosPatch]";
 constexpr const char *kFixitRuntimeRawFile = "ohospatch/fixit.min.js";
+constexpr size_t kMaxArguments = 64;
 
 void LogError(const char *operation, int status)
 {
@@ -130,6 +130,34 @@ napi_value NapiUndefined(napi_env env)
         return nullptr;
     }
     return value;
+}
+
+struct NapiCallbackArguments {
+    size_t count = kMaxArguments;
+    napi_value receiver = nullptr;
+    void *data = nullptr;
+    std::array<napi_value, kMaxArguments> values{};
+};
+
+bool ReadNapiCallbackArguments(napi_env env, napi_callback_info info, const char *operation,
+                               const char *truncationMessage, NapiCallbackArguments *arguments)
+{
+    if (!arguments) {
+        LogError("ReadNapiCallbackArguments received an invalid output pointer");
+        return false;
+    }
+    arguments->count = arguments->values.size();
+    if (!NapiOk(env,
+                napi_get_cb_info(env, info, &arguments->count, arguments->values.data(), &arguments->receiver,
+                                 &arguments->data),
+                operation)) {
+        return false;
+    }
+    if (arguments->count > arguments->values.size()) {
+        LogError(truncationMessage);
+        arguments->count = arguments->values.size();
+    }
+    return true;
 }
 
 napi_value NapiUint32(napi_env env, uint32_t number)
@@ -357,6 +385,125 @@ bool NapiJsonParse(napi_env env, const std::string &json, napi_value *output)
                   "napi_call_function(JSON.parse)");
 }
 
+bool JsvmValueToString(JSVM_Env env, JSVM_Value value, std::string *output)
+{
+    if (!env || !value || !output) {
+        return false;
+    }
+    JSVM_Value textValue = nullptr;
+    if (OH_JSVM_CoerceToString(env, value, &textValue) != JSVM_OK) {
+        return false;
+    }
+    size_t length = 0;
+    if (OH_JSVM_GetValueStringUtf8(env, textValue, nullptr, 0, &length) != JSVM_OK) {
+        return false;
+    }
+    std::string text(length + 1, '\0');
+    if (OH_JSVM_GetValueStringUtf8(env, textValue, text.data(), text.size(), &length) != JSVM_OK) {
+        return false;
+    }
+    text.resize(length);
+    *output = std::move(text);
+    return true;
+}
+
+void LogAndClearPendingJsvmException(JSVM_Env env, const char *operation)
+{
+    if (!env) {
+        return;
+    }
+    bool pending = false;
+    JSVM_Status pendingStatus = OH_JSVM_IsExceptionPending(env, &pending);
+    if (pendingStatus != JSVM_OK) {
+        LogError("OH_JSVM_IsExceptionPending", static_cast<int>(pendingStatus));
+        return;
+    }
+    if (!pending) {
+        return;
+    }
+    JSVM_Value exception = nullptr;
+    JSVM_Status clearStatus = OH_JSVM_GetAndClearLastException(env, &exception);
+    if (clearStatus != JSVM_OK) {
+        LogError("OH_JSVM_GetAndClearLastException", static_cast<int>(clearStatus));
+        return;
+    }
+    std::string message;
+    if (!JsvmValueToString(env, exception, &message) || message.empty()) {
+        message = "<unable to stringify JSVM exception>";
+    }
+    LogError(std::string("Patch script exception while ") + (operation ? operation : "executing script") +
+             ": " + message +
+             ". Check the patch JavaScript syntax, target path strings, and DSL argument types.");
+}
+
+bool JsvmOk(JSVM_Status status, const char *operation, JSVM_Env env)
+{
+    if (status == JSVM_OK) {
+        return true;
+    }
+    LogError(operation, static_cast<int>(status));
+    LogAndClearPendingJsvmException(env, operation);
+    return false;
+}
+
+class JsvmHandleScope final {
+  public:
+    JsvmHandleScope(JSVM_Env env, const char *openOperation, const char *closeOperation)
+        : env_(env), closeOperation_(closeOperation)
+    {
+        if (!JsvmOk(OH_JSVM_OpenHandleScope(env_, &scope_), openOperation, env_)) {
+            scope_ = nullptr;
+        }
+    }
+
+    ~JsvmHandleScope()
+    {
+        Close();
+    }
+
+    JsvmHandleScope(const JsvmHandleScope &) = delete;
+    JsvmHandleScope &operator=(const JsvmHandleScope &) = delete;
+
+    bool IsOpen() const
+    {
+        return scope_ != nullptr;
+    }
+
+    bool Close()
+    {
+        if (!scope_) {
+            return true;
+        }
+        JSVM_HandleScope scope = scope_;
+        scope_ = nullptr;
+        return JsvmOk(OH_JSVM_CloseHandleScope(env_, scope), closeOperation_, env_);
+    }
+
+  private:
+    JSVM_Env env_ = nullptr;
+    JSVM_HandleScope scope_ = nullptr;
+    const char *closeOperation_ = nullptr;
+};
+
+template <size_t Capacity>
+struct JsvmCallbackArguments {
+    size_t count = Capacity;
+    std::array<JSVM_Value, Capacity> values{};
+};
+
+template <size_t Capacity>
+bool ReadJsvmCallbackArguments(JSVM_Env env, JSVM_CallbackInfo info, const char *operation,
+                               JsvmCallbackArguments<Capacity> *arguments)
+{
+    if (!arguments) {
+        LogError("ReadJsvmCallbackArguments received an invalid output pointer");
+        return false;
+    }
+    arguments->count = arguments->values.size();
+    return JsvmOk(OH_JSVM_GetCbInfo(env, info, &arguments->count, arguments->values.data(), nullptr, nullptr),
+                  operation, env);
+}
+
 struct HookRecord {
     napi_env env = nullptr;
     napi_ref holder = nullptr;
@@ -378,6 +525,43 @@ struct ActiveInvocation {
     napi_value receiver = nullptr;
     std::array<napi_value, kMaxProxyHandles> proxyValues{};
     size_t proxyValueCount = 0;
+};
+
+class ActiveInvocationScope final {
+  public:
+    ActiveInvocationScope(ActiveInvocation *current, bool activate = true) : current_(activate ? current : nullptr)
+    {
+        if (current_) {
+            previous_ = *current_;
+            *current_ = {};
+        }
+    }
+
+    ~ActiveInvocationScope()
+    {
+        Restore();
+    }
+
+    ActiveInvocationScope(const ActiveInvocationScope &) = delete;
+    ActiveInvocationScope &operator=(const ActiveInvocationScope &) = delete;
+
+    ActiveInvocation *Get()
+    {
+        return current_;
+    }
+
+    void Restore()
+    {
+        if (!current_) {
+            return;
+        }
+        *current_ = previous_;
+        current_ = nullptr;
+    }
+
+  private:
+    ActiveInvocation *current_ = nullptr;
+    ActiveInvocation previous_{};
 };
 
 struct ImportedValue {
@@ -576,55 +760,94 @@ struct UiNodeTypeCounter {
     uint32_t count = 0;
 };
 
-struct UiEventCaptureContext {
-    napi_env env = nullptr;
-    napi_ref originalRegistrar = nullptr;
-    napi_ref originalEvent = nullptr;
-    napi_ref owner = nullptr;
-    UiRule *rule = nullptr;
+struct UiNodeCounterState {
+    std::array<UiNodeTypeCounter, kMaxUiNodeTypesPerRender> counters;
+    size_t counterCount = 0;
+};
+
+struct UiNodeSelectionState : UiNodeCounterState {
+    std::array<std::string, kMaxUiSelectorsPerRender> selectedSelectors;
+    size_t selectedSelectorCount = 0;
+};
+
+void CopyUiNodeSelectionState(const UiNodeSelectionState &source, UiNodeSelectionState *target)
+{
+    if (!target) {
+        return;
+    }
+    target->counterCount = source.counterCount < target->counters.size() ? source.counterCount
+                                                                         : target->counters.size();
+    for (size_t index = 0; index < target->counterCount; ++index) {
+        target->counters[index] = source.counters[index];
+    }
+    target->selectedSelectorCount = source.selectedSelectorCount < target->selectedSelectors.size()
+                                        ? source.selectedSelectorCount
+                                        : target->selectedSelectors.size();
+    for (size_t index = 0; index < target->selectedSelectorCount; ++index) {
+        target->selectedSelectors[index] = source.selectedSelectors[index];
+    }
+}
+
+template <size_t Capacity>
+bool ResolveUiNodeOccurrence(std::array<UiNodeTypeCounter, Capacity> *counters, size_t *counterCount,
+                             const std::string &nodeType, uint32_t *occurrence, const char *limitMessage)
+{
+    if (!counters || !counterCount || !occurrence) {
+        LogError("ResolveUiNodeOccurrence received an invalid argument");
+        return false;
+    }
+    UiNodeTypeCounter *counter = nullptr;
+    for (size_t index = 0; index < *counterCount; ++index) {
+        if ((*counters)[index].nodeType == nodeType) {
+            counter = &(*counters)[index];
+            break;
+        }
+    }
+    if (!counter) {
+        if (*counterCount >= counters->size()) {
+            LogError(limitMessage);
+            return false;
+        }
+        counter = &(*counters)[(*counterCount)++];
+        counter->nodeType = nodeType;
+        counter->count = 0;
+    }
+    *occurrence = counter->count++;
+    return true;
+}
+
+struct UiTemporaryMethodCapture {
+    napi_ref originalMethod = nullptr;
+    std::string methodName;
     bool installed = false;
 };
 
-struct UiContentBuilderCallbackRecord {
+struct UiEventCaptureContext : UiTemporaryMethodCapture {
+    napi_ref originalEvent = nullptr;
+    napi_ref owner = nullptr;
+    UiRule *rule = nullptr;
+};
+
+struct UiContentBuilderCallbackRecord : UiNodeSelectionState {
     napi_env env = nullptr;
     napi_ref originalBuilder = nullptr;
     napi_ref owner = nullptr;
     std::string targetKey;
-    std::array<UiNodeTypeCounter, kMaxUiNodeTypesPerRender> counters;
-    size_t counterCount = 0;
-    std::array<std::string, kMaxUiSelectorsPerRender> selectedSelectors;
-    size_t selectedSelectorCount = 0;
 };
 
-struct UiContentCreateCaptureContext {
-    napi_env env = nullptr;
-    napi_ref originalCreate = nullptr;
+struct UiContentCreateCaptureContext : UiTemporaryMethodCapture, UiNodeSelectionState {
     napi_ref owner = nullptr;
     std::string targetKey;
-    std::string methodName;
-    std::array<UiNodeTypeCounter, kMaxUiNodeTypesPerRender> counters;
-    size_t counterCount = 0;
-    std::array<std::string, kMaxUiSelectorsPerRender> selectedSelectors;
-    size_t selectedSelectorCount = 0;
-    bool installed = false;
 };
 
-struct UiCreateCaptureContext {
-    napi_env env = nullptr;
-    napi_ref originalCreate = nullptr;
+struct UiCreateCaptureContext : UiTemporaryMethodCapture {
     napi_ref owner = nullptr;
-    std::string methodName;
     UiRule *rule = nullptr;
-    bool installed = false;
 };
 
-struct UiWhereCaptureContext {
-    napi_env env = nullptr;
-    napi_ref originalAttribute = nullptr;
-    std::string attributeName;
+struct UiWhereCaptureContext : UiTemporaryMethodCapture {
     std::string originalJson;
     bool invoked = false;
-    bool installed = false;
 };
 
 struct UiStoredFunctionCallbackRecord {
@@ -639,36 +862,84 @@ struct UiChildInstanceOccurrence {
     uint32_t occurrence = 0;
 };
 
-struct UiRenderFrame {
+struct UiRenderFrame : UiNodeSelectionState {
     std::string targetKey;
     napi_value owner = nullptr;
-    std::array<UiNodeTypeCounter, kMaxUiNodeTypesPerRender> counters;
-    size_t counterCount = 0;
     std::array<UiChildInstanceOccurrence, kMaxUiChildInstancesPerRender> childInstances;
     size_t childInstanceCount = 0;
-    std::array<std::string, kMaxUiSelectorsPerRender> selectedSelectors;
-    size_t selectedSelectorCount = 0;
 };
 
-struct UiScopedChildCreationFrame {
+struct UiScopedChildCreationFrame : UiNodeCounterState {
     std::string parentTargetKey;
     std::string childTargetKey;
     uint32_t occurrence = 0;
     std::string builderParamName;
     napi_ref owner = nullptr;
-    std::array<UiNodeTypeCounter, kMaxUiNodeTypesPerRender> counters;
-    size_t counterCount = 0;
 };
 
-struct UiBuilderMethodFrame {
+struct UiBuilderMethodFrame : UiNodeSelectionState {
     std::string targetKey;
     std::string methodName;
     napi_value owner = nullptr;
-    std::array<UiNodeTypeCounter, kMaxUiNodeTypesPerRender> counters;
-    size_t counterCount = 0;
-    std::array<std::string, kMaxUiSelectorsPerRender> selectedSelectors;
-    size_t selectedSelectorCount = 0;
 };
+
+bool InstallUiTemporaryMethod(napi_env env, napi_value holder, napi_value original, const char *methodName,
+                              const char *callbackName, napi_callback callback, void *callbackData,
+                              UiTemporaryMethodCapture *capture, const char *referenceOperation,
+                              const char *releaseOperation, const char *functionOperation,
+                              const char *propertyOperation)
+{
+    if (!holder || !original || !methodName || !callback || !capture) {
+        LogError("InstallUiTemporaryMethod received an invalid argument");
+        return false;
+    }
+    capture->methodName = methodName;
+    if (!NapiOk(env, napi_create_reference(env, original, 1, &capture->originalMethod), referenceOperation)) {
+        capture->methodName.clear();
+        return false;
+    }
+
+    napi_value trampoline = nullptr;
+    if (!NapiOk(env,
+                napi_create_function(env, callbackName, NAPI_AUTO_LENGTH, callback, callbackData, &trampoline),
+                functionOperation) ||
+        !NapiOk(env, napi_set_named_property(env, holder, methodName, trampoline), propertyOperation)) {
+        DeleteNapiReference(env, capture->originalMethod, releaseOperation);
+        capture->originalMethod = nullptr;
+        capture->methodName.clear();
+        return false;
+    }
+    capture->installed = true;
+    return true;
+}
+
+template <typename Capture>
+void RestoreUiTemporaryMethods(napi_env env, napi_value holder, Capture *captures, size_t count,
+                               const char *getOperation, const char *setOperation)
+{
+    for (size_t index = count; index > 0; --index) {
+        Capture &capture = captures[index - 1];
+        if (!capture.installed || !capture.originalMethod || capture.methodName.empty()) {
+            continue;
+        }
+        napi_value original = nullptr;
+        if (NapiOk(env, napi_get_reference_value(env, capture.originalMethod, &original), getOperation)) {
+            NapiOk(env, napi_set_named_property(env, holder, capture.methodName.c_str(), original), setOperation);
+        }
+        capture.installed = false;
+    }
+}
+
+template <typename Capture>
+void ReleaseUiTemporaryMethods(napi_env env, Capture *captures, size_t count, const char *operation)
+{
+    for (size_t index = 0; index < count; ++index) {
+        DeleteNapiReference(env, captures[index].originalMethod, operation);
+        captures[index].originalMethod = nullptr;
+        captures[index].methodName.clear();
+        captures[index].installed = false;
+    }
+}
 
 class JsvmRuntime;
 
@@ -723,29 +994,20 @@ class JsvmRuntime
             return 0;
         }
         if (!Run(script)) {
-            ClearRegistry();
-            ClearImportedValues();
-            ClearStoredJsFunctions();
+            DiscardPatchRuntimeState();
             return 0;
         }
-        JSVM_HandleScope scope = nullptr;
-        if (!JsvmOk(OH_JSVM_OpenHandleScope(env_, &scope), "OH_JSVM_OpenHandleScope(patch install)", env_)) {
-            ClearRegistry();
-            ClearImportedValues();
-            ClearStoredJsFunctions();
+        JsvmHandleScope scope(env_, "OH_JSVM_OpenHandleScope(patch install)",
+                              "OH_JSVM_CloseHandleScope(patch install)");
+        if (!scope.IsOpen()) {
+            DiscardPatchRuntimeState();
             return 0;
         }
         bool hooksInstalled = InstallHooks(napiEnv);
         bool uiInstalled = hooksInstalled && InstallUiRules(napiEnv);
-        bool scopeClosed = JsvmOk(OH_JSVM_CloseHandleScope(env_, scope),
-                                  "OH_JSVM_CloseHandleScope(patch install)", env_);
+        bool scopeClosed = scope.Close();
         if (!hooksInstalled || !uiInstalled || !scopeClosed) {
-            RestoreUiHooks();
-            ClearUiRules();
-            RestoreHooks();
-            ClearRegistry();
-            ClearImportedValues();
-            ClearStoredJsFunctions();
+            RollbackPatchInstallation();
             return 0;
         }
         return hookCount_ + uiRuleCount_;
@@ -809,13 +1071,11 @@ class JsvmRuntime
             return callOriginal();
         }
 
-        JSVM_HandleScope scope = nullptr;
-        if (!JsvmOk(OH_JSVM_OpenHandleScope(env_, &scope), "OH_JSVM_OpenHandleScope(method patch)", env_)) {
+        JsvmHandleScope scope(env_, "OH_JSVM_OpenHandleScope(method patch)",
+                              "OH_JSVM_CloseHandleScope(method patch)");
+        if (!scope.IsOpen()) {
             return callOriginal();
         }
-        auto closeScope = [&]() {
-            return JsvmOk(OH_JSVM_CloseHandleScope(env_, scope), "OH_JSVM_CloseHandleScope(method patch)", env_);
-        };
 
         JSVM_Value targetKeyValue = nullptr;
         JSVM_Value methodNameValue = nullptr;
@@ -826,40 +1086,41 @@ class JsvmRuntime
             !Bool(hook->classMethod, &classMethodValue) ||
             !JsvmOk(OH_JSVM_CreateUint32(env_, 0, &targetHandleValue), "OH_JSVM_CreateUint32(proxy root)", env_) ||
             !ParseJson(argsJson, &argsValue)) {
-            closeScope();
+            scope.Close();
             return callOriginal();
         }
 
         JSVM_Value patchArgs[] = {targetKeyValue, methodNameValue, classMethodValue, targetHandleValue, argsValue};
-        ActiveInvocation previous = activeInvocation_;
-        activeInvocation_ = {};
+        ActiveInvocationScope invocation(&activeInvocation_);
         activeInvocation_.env = napiEnv;
         activeInvocation_.hook = hook;
         activeInvocation_.receiver = receiver;
         activeInvocation_.proxyValues[0] = receiver;
         activeInvocation_.proxyValueCount = 1;
-        auto restoreInvocation = [&]() {
-            activeInvocation_ = previous;
+        auto fallback = [&]() -> napi_value {
+            invocation.Restore();
+            return callOriginal();
+        };
+        auto returnUndefined = [&]() -> napi_value {
+            invocation.Restore();
+            return NapiUndefined(napiEnv);
         };
         JSVM_Value patchResult = nullptr;
         bool called = CallGlobal("__ohospatch_callPatch", patchArgs, std::size(patchArgs), &patchResult);
         if (!called) {
-            restoreInvocation();
-            closeScope();
-            return callOriginal();
+            scope.Close();
+            return fallback();
         }
 
         std::string resultJson;
         bool stringified = StringifyJson(patchResult, &resultJson);
-        bool scopeClosed = closeScope();
+        bool scopeClosed = scope.Close();
         if (!stringified || !scopeClosed) {
-            restoreInvocation();
-            return callOriginal();
+            return fallback();
         }
         napi_value envelope = nullptr;
         if (!NapiJsonParse(napiEnv, resultJson, &envelope)) {
-            restoreInvocation();
-            return callOriginal();
+            return fallback();
         }
 
         napi_value handledValue = nullptr;
@@ -867,23 +1128,19 @@ class JsvmRuntime
         if (!NapiOk(napiEnv, napi_get_named_property(napiEnv, envelope, "handled", &handledValue),
                     "napi_get_named_property(handled)") ||
             !NapiOk(napiEnv, napi_get_value_bool(napiEnv, handledValue, &handled), "napi_get_value_bool(handled)")) {
-            restoreInvocation();
-            return callOriginal();
+            return fallback();
         }
         if (!handled) {
-            restoreInvocation();
-            return callOriginal();
+            return fallback();
         }
 
         bool hasResult = false;
         if (!NapiOk(napiEnv, napi_has_named_property(napiEnv, envelope, "result", &hasResult),
                     "napi_has_named_property(result)")) {
-            restoreInvocation();
-            return callOriginal();
+            return fallback();
         }
         if (!hasResult) {
-            restoreInvocation();
-            return NapiUndefined(napiEnv);
+            return returnUndefined();
         }
 
         napi_value resultWire = nullptr;
@@ -891,23 +1148,20 @@ class JsvmRuntime
         if (!NapiOk(napiEnv, napi_get_named_property(napiEnv, envelope, "result", &resultWire),
                     "napi_get_named_property(result wire)") ||
             !NapiNamedString(napiEnv, resultWire, "kind", &resultKind)) {
-            restoreInvocation();
-            return callOriginal();
+            return fallback();
         }
         if (resultKind == "undefined") {
-            restoreInvocation();
-            return NapiUndefined(napiEnv);
+            return returnUndefined();
         }
         if (resultKind == "remote") {
             uint32_t handle = 0;
             if (!NapiNamedUint32(napiEnv, resultWire, "handle", &handle) ||
                 handle >= activeInvocation_.proxyValueCount) {
                 LogError("OhosPatch patch returned an invalid proxy handle");
-                restoreInvocation();
-                return callOriginal();
+                return fallback();
             }
             napi_value result = activeInvocation_.proxyValues[handle];
-            restoreInvocation();
+            invocation.Restore();
             return result;
         }
         if (resultKind == "imported") {
@@ -916,16 +1170,14 @@ class JsvmRuntime
             if (!NapiNamedUint32(napiEnv, resultWire, "handle", &handle) ||
                 !GetImportedValue(handle, &result)) {
                 LogError("OhosPatch patch returned an invalid imported handle");
-                restoreInvocation();
-                return callOriginal();
+                return fallback();
             }
-            restoreInvocation();
+            invocation.Restore();
             return result;
         }
         if (resultKind != "wire") {
             LogError("OhosPatch patch returned an unknown result kind");
-            restoreInvocation();
-            return callOriginal();
+            return fallback();
         }
 
         napi_value encodedResult = nullptr;
@@ -933,15 +1185,13 @@ class JsvmRuntime
         if (!NapiOk(napiEnv, napi_get_named_property(napiEnv, resultWire, "value", &encodedResult),
                     "napi_get_named_property(result value)") ||
             !ResolveBridgeWireValue(napiEnv, encodedResult, 0, &result)) {
-            restoreInvocation();
-            return callOriginal();
+            return fallback();
         }
-        restoreInvocation();
+        invocation.Restore();
         return result;
     }
 
   private:
-    static constexpr size_t kMaxArguments = 64;
     static constexpr size_t kMaxHooks = 256;
     static constexpr size_t kMaxTimers = 256;
     static constexpr size_t kMaxImportedValues = 512;
@@ -1000,6 +1250,21 @@ class JsvmRuntime
     size_t uiScopedChildCreationDepth_ = 0;
     std::array<UiBuilderMethodFrame, kMaxUiBuilderMethodDepth> uiBuilderMethodFrames_;
     size_t uiBuilderMethodDepth_ = 0;
+
+    void DiscardPatchRuntimeState()
+    {
+        ClearRegistry();
+        ClearImportedValues();
+        ClearStoredJsFunctions();
+    }
+
+    void RollbackPatchInstallation()
+    {
+        RestoreUiHooks();
+        ClearUiRules();
+        RestoreHooks();
+        DiscardPatchRuntimeState();
+    }
 
     void ReleaseContext()
     {
@@ -1230,28 +1495,30 @@ class JsvmRuntime
             effectiveModuleInfo = hostModuleInfo_;
         }
 
-        std::vector<std::string> moduleInfoCandidates;
-        moduleInfoCandidates.push_back(effectiveModuleInfo);
-        if (!hostModuleInfo_.empty() && hostModuleInfo_ != effectiveModuleInfo) {
-            moduleInfoCandidates.push_back(hostModuleInfo_);
-        }
-        if (!hostBundleName_.empty() && hostModuleName_ != "entry_test") {
-            std::string testModuleInfo = hostBundleName_ + "/entry_test";
-            bool alreadyAdded = false;
-            for (const auto &candidate : moduleInfoCandidates) {
-                if (candidate == testModuleInfo) {
-                    alreadyAdded = true;
-                    break;
+        std::array<std::string, 3> moduleInfoCandidates;
+        size_t moduleInfoCandidateCount = 0;
+        auto addModuleInfoCandidate = [&](const std::string &candidate) {
+            for (size_t index = 0; index < moduleInfoCandidateCount; ++index) {
+                if (moduleInfoCandidates[index] == candidate) {
+                    return;
                 }
             }
-            if (!alreadyAdded) {
-                moduleInfoCandidates.push_back(testModuleInfo);
+            if (moduleInfoCandidateCount < moduleInfoCandidates.size()) {
+                moduleInfoCandidates[moduleInfoCandidateCount++] = candidate;
             }
+        };
+        addModuleInfoCandidate(effectiveModuleInfo);
+        if (!hostModuleInfo_.empty() && hostModuleInfo_ != effectiveModuleInfo) {
+            addModuleInfoCandidate(hostModuleInfo_);
+        }
+        if (!hostBundleName_.empty() && hostModuleName_ != "entry_test") {
+            addModuleInfoCandidate(hostBundleName_ + "/entry_test");
         }
 
         napi_status status = napi_generic_failure;
         std::string attemptedModuleInfos;
-        for (const auto &candidateModuleInfo : moduleInfoCandidates) {
+        for (size_t candidateIndex = 0; candidateIndex < moduleInfoCandidateCount; ++candidateIndex) {
+            const std::string &candidateModuleInfo = moduleInfoCandidates[candidateIndex];
             if (!attemptedModuleInfos.empty()) {
                 attemptedModuleInfos += ", ";
             }
@@ -1286,67 +1553,6 @@ class JsvmRuntime
                 return true;
             }
         }
-        return false;
-    }
-
-    static bool JsvmValueToString(JSVM_Env env, JSVM_Value value, std::string *output)
-    {
-        if (!env || !value || !output) {
-            return false;
-        }
-        JSVM_Value textValue = nullptr;
-        if (OH_JSVM_CoerceToString(env, value, &textValue) != JSVM_OK) {
-            return false;
-        }
-        size_t length = 0;
-        if (OH_JSVM_GetValueStringUtf8(env, textValue, nullptr, 0, &length) != JSVM_OK) {
-            return false;
-        }
-        std::string text(length + 1, '\0');
-        if (OH_JSVM_GetValueStringUtf8(env, textValue, text.data(), text.size(), &length) != JSVM_OK) {
-            return false;
-        }
-        text.resize(length);
-        *output = std::move(text);
-        return true;
-    }
-
-    static void LogAndClearPendingJsvmException(JSVM_Env env, const char *operation)
-    {
-        if (!env) {
-            return;
-        }
-        bool pending = false;
-        JSVM_Status pendingStatus = OH_JSVM_IsExceptionPending(env, &pending);
-        if (pendingStatus != JSVM_OK) {
-            LogError("OH_JSVM_IsExceptionPending", static_cast<int>(pendingStatus));
-            return;
-        }
-        if (!pending) {
-            return;
-        }
-        JSVM_Value exception = nullptr;
-        JSVM_Status clearStatus = OH_JSVM_GetAndClearLastException(env, &exception);
-        if (clearStatus != JSVM_OK) {
-            LogError("OH_JSVM_GetAndClearLastException", static_cast<int>(clearStatus));
-            return;
-        }
-        std::string message;
-        if (!JsvmValueToString(env, exception, &message) || message.empty()) {
-            message = "<unable to stringify JSVM exception>";
-        }
-        LogError(std::string("Patch script exception while ") + (operation ? operation : "executing script") +
-                 ": " + message +
-                 ". Check the patch JavaScript syntax, target path strings, and DSL argument types.");
-    }
-
-    static bool JsvmOk(JSVM_Status status, const char *operation, JSVM_Env env)
-    {
-        if (status == JSVM_OK) {
-            return true;
-        }
-        LogError(operation, static_cast<int>(status));
-        LogAndClearPendingJsvmException(env, operation);
         return false;
     }
 
@@ -1759,8 +1965,8 @@ class JsvmRuntime
                     "napi_open_handle_scope(timer)")) {
             return false;
         }
-        JSVM_HandleScope scope = nullptr;
-        if (!JsvmOk(OH_JSVM_OpenHandleScope(env_, &scope), "OH_JSVM_OpenHandleScope(timer)", env_)) {
+        JsvmHandleScope scope(env_, "OH_JSVM_OpenHandleScope(timer)", "OH_JSVM_CloseHandleScope(timer)");
+        if (!scope.IsOpen()) {
             NapiOk(hostEnv_, napi_close_handle_scope(hostEnv_, napiScope), "napi_close_handle_scope(timer)");
             return false;
         }
@@ -1772,7 +1978,7 @@ class JsvmRuntime
         if (!JsvmOk(OH_JSVM_PerformMicrotaskCheckpoint(vm_), "OH_JSVM_PerformMicrotaskCheckpoint", env_)) {
             success = false;
         }
-        if (!JsvmOk(OH_JSVM_CloseHandleScope(env_, scope), "OH_JSVM_CloseHandleScope(timer)", env_)) {
+        if (!scope.Close()) {
             success = false;
         }
         if (!NapiOk(hostEnv_, napi_close_handle_scope(hostEnv_, napiScope), "napi_close_handle_scope(timer)")) {
@@ -1783,117 +1989,95 @@ class JsvmRuntime
 
     static napi_value UiMethodCallback(napi_env env, napi_callback_info info)
     {
-        size_t argc = kMaxArguments;
-        napi_value receiver = nullptr;
-        void *data = nullptr;
-        std::array<napi_value, kMaxArguments> argv{};
-        if (!NapiOk(env, napi_get_cb_info(env, info, &argc, argv.data(), &receiver, &data),
-                    "napi_get_cb_info(component method)")) {
+        NapiCallbackArguments arguments;
+        if (!ReadNapiCallbackArguments(env, info, "napi_get_cb_info(component method)",
+                                       "Component method arguments were truncated to the OhosPatch limit",
+                                       &arguments)) {
             return NapiUndefined(env);
         }
-        if (!data) {
+        if (!arguments.data) {
             LogError("OhosPatch component method callback has no UiMethodHook");
             return NapiUndefined(env);
         }
-        if (argc > kMaxArguments) {
-            LogError("Component method arguments were truncated to the OhosPatch limit");
-            argc = kMaxArguments;
-        }
-        return Runtime().InvokeUiMethod(env, static_cast<UiMethodHook *>(data), receiver, argc, argv.data());
+        return Runtime().InvokeUiMethod(env, static_cast<UiMethodHook *>(arguments.data), arguments.receiver,
+                                        arguments.count, arguments.values.data());
     }
 
     static napi_value UiNodeBuilderCallback(napi_env env, napi_callback_info info)
     {
-        size_t argc = kMaxArguments;
-        napi_value receiver = nullptr;
-        void *data = nullptr;
-        std::array<napi_value, kMaxArguments> argv{};
-        if (!NapiOk(env, napi_get_cb_info(env, info, &argc, argv.data(), &receiver, &data),
-                    "napi_get_cb_info(component node builder)")) {
+        NapiCallbackArguments arguments;
+        if (!ReadNapiCallbackArguments(env, info, "napi_get_cb_info(component node builder)",
+                                       "Component node builder arguments were truncated to the OhosPatch limit",
+                                       &arguments)) {
             return NapiUndefined(env);
         }
-        if (!data) {
+        if (!arguments.data) {
             LogError("OhosPatch component node callback has no UiNodeCallbackRecord");
             return NapiUndefined(env);
         }
-        if (argc > kMaxArguments) {
-            LogError("Component node builder arguments were truncated to the OhosPatch limit");
-            argc = kMaxArguments;
-        }
-        return Runtime().InvokeUiNodeBuilder(env, static_cast<UiNodeCallbackRecord *>(data), receiver, argc,
-                                             argv.data());
+        return Runtime().InvokeUiNodeBuilder(env, static_cast<UiNodeCallbackRecord *>(arguments.data),
+                                             arguments.receiver, arguments.count, arguments.values.data());
     }
 
     static napi_value UiBuilderParamCallback(napi_env env, napi_callback_info info)
     {
-        size_t argc = kMaxArguments;
-        napi_value receiver = nullptr;
-        void *data = nullptr;
-        std::array<napi_value, kMaxArguments> argv{};
-        if (!NapiOk(env, napi_get_cb_info(env, info, &argc, argv.data(), &receiver, &data),
-                    "napi_get_cb_info(component builder parameter)")) {
+        NapiCallbackArguments arguments;
+        if (!ReadNapiCallbackArguments(
+                env, info, "napi_get_cb_info(component builder parameter)",
+                "Component builder parameter arguments were truncated to the OhosPatch limit", &arguments)) {
             return NapiUndefined(env);
         }
-        if (!data) {
+        if (!arguments.data) {
             LogError("OhosPatch component builder parameter callback has no context");
             return NapiUndefined(env);
         }
-        if (argc > kMaxArguments) {
-            LogError("Component builder parameter arguments were truncated to the OhosPatch limit");
-            argc = kMaxArguments;
-        }
-        return Runtime().InvokeUiBuilderParam(env, static_cast<UiBuilderParamCallbackRecord *>(data), receiver,
-                                              argc, argv.data());
+        return Runtime().InvokeUiBuilderParam(env, static_cast<UiBuilderParamCallbackRecord *>(arguments.data),
+                                              arguments.receiver, arguments.count, arguments.values.data());
     }
 
     static napi_value UiEventCaptureCallback(napi_env env, napi_callback_info info)
     {
-        size_t argc = kMaxArguments;
-        napi_value receiver = nullptr;
-        void *data = nullptr;
-        std::array<napi_value, kMaxArguments> argv{};
-        if (!NapiOk(env, napi_get_cb_info(env, info, &argc, argv.data(), &receiver, &data),
-                    "napi_get_cb_info(component event capture)")) {
+        NapiCallbackArguments arguments;
+        if (!ReadNapiCallbackArguments(
+                env, info, "napi_get_cb_info(component event capture)",
+                "Component event registration arguments were truncated to the OhosPatch limit", &arguments)) {
             return NapiUndefined(env);
         }
-        UiEventCaptureContext *capture = static_cast<UiEventCaptureContext *>(data);
+        UiEventCaptureContext *capture = static_cast<UiEventCaptureContext *>(arguments.data);
         if (!capture) {
             LogError("OhosPatch component event capture has no context");
             return NapiUndefined(env);
         }
-        if (argc > kMaxArguments) {
-            LogError("Component event registration arguments were truncated to the OhosPatch limit");
-            argc = kMaxArguments;
-        }
 
-        if (argc > 0) {
+        if (arguments.count > 0) {
             DeleteNapiReference(env, capture->originalEvent, "napi_delete_reference(previous component event)");
             capture->originalEvent = nullptr;
-            if (!NapiOk(env, napi_create_reference(env, argv[0], 1, &capture->originalEvent),
+            if (!NapiOk(env, napi_create_reference(env, arguments.values[0], 1, &capture->originalEvent),
                         "napi_create_reference(original component event)")) {
                 capture->originalEvent = nullptr;
             }
         }
 
         napi_value registrar = nullptr;
-        if (!NapiOk(env, napi_get_reference_value(env, capture->originalRegistrar, &registrar),
+        if (!NapiOk(env, napi_get_reference_value(env, capture->originalMethod, &registrar),
                     "napi_get_reference_value(component event registrar)")) {
             return NapiUndefined(env);
         }
         std::array<napi_value, kMaxArguments> forwarded{};
-        napi_value *callArgv = argv.data();
-        if (capture->rule && capture->rule->whereConditionCount == 0 && argc > 0) {
+        napi_value *callArgv = arguments.values.data();
+        if (capture->rule && capture->rule->whereConditionCount == 0 && arguments.count > 0) {
             napi_value callback = nullptr;
             if (Runtime().CreateUiEventCallback(env, capture, &callback) && callback) {
-                for (size_t index = 0; index < argc; ++index) {
-                    forwarded[index] = argv[index];
+                for (size_t index = 0; index < arguments.count; ++index) {
+                    forwarded[index] = arguments.values[index];
                 }
                 forwarded[0] = callback;
                 callArgv = forwarded.data();
             }
         }
         napi_value result = nullptr;
-        napi_status status = napi_call_function(env, receiver, registrar, argc, callArgv, &result);
+        napi_status status = napi_call_function(env, arguments.receiver, registrar, arguments.count, callArgv,
+                                                &result);
         if (status == napi_pending_exception) {
             LogError("Original component event registrar threw an exception");
             return nullptr;
@@ -1906,22 +2090,20 @@ class JsvmRuntime
 
     static napi_value UiCreateCaptureCallback(napi_env env, napi_callback_info info)
     {
-        size_t originalArgc = kMaxArguments;
-        napi_value receiver = nullptr;
-        void *data = nullptr;
-        std::array<napi_value, kMaxArguments> originalArgv{};
-        if (!NapiOk(env, napi_get_cb_info(env, info, &originalArgc, originalArgv.data(), &receiver, &data),
-                    "napi_get_cb_info(component create capture)")) {
+        NapiCallbackArguments callbackArgs;
+        if (!ReadNapiCallbackArguments(env, info, "napi_get_cb_info(component create capture)",
+                                       "Component create arguments were truncated to the OhosPatch limit",
+                                       &callbackArgs)) {
             return NapiUndefined(env);
         }
-        UiCreateCaptureContext *capture = static_cast<UiCreateCaptureContext *>(data);
-        if (!capture || !capture->originalCreate || !capture->rule) {
+        UiCreateCaptureContext *capture = static_cast<UiCreateCaptureContext *>(callbackArgs.data);
+        if (!capture || !capture->originalMethod || !capture->rule) {
             LogError("OhosPatch component create capture has no context");
             return NapiUndefined(env);
         }
 
         napi_value create = nullptr;
-        if (!NapiOk(env, napi_get_reference_value(env, capture->originalCreate, &create),
+        if (!NapiOk(env, napi_get_reference_value(env, capture->originalMethod, &create),
                     "napi_get_reference_value(component create)")) {
             return NapiUndefined(env);
         }
@@ -1956,7 +2138,7 @@ class JsvmRuntime
         }
 
         napi_value result = nullptr;
-        napi_status status = napi_call_function(env, receiver, create, argc, argv.data(), &result);
+        napi_status status = napi_call_function(env, callbackArgs.receiver, create, argc, argv.data(), &result);
         if (status == napi_pending_exception) {
             LogError("Original component create function threw an exception");
             return nullptr;
@@ -1969,60 +2151,50 @@ class JsvmRuntime
 
     static napi_value UiContentBuilderCallback(napi_env env, napi_callback_info info)
     {
-        size_t argc = kMaxArguments;
-        napi_value receiver = nullptr;
-        void *data = nullptr;
-        std::array<napi_value, kMaxArguments> argv{};
-        if (!NapiOk(env, napi_get_cb_info(env, info, &argc, argv.data(), &receiver, &data),
-                    "napi_get_cb_info(component content builder)")) {
+        NapiCallbackArguments arguments;
+        if (!ReadNapiCallbackArguments(env, info, "napi_get_cb_info(component content builder)",
+                                       "Component content builder arguments were truncated to the OhosPatch limit",
+                                       &arguments)) {
             return NapiUndefined(env);
         }
-        if (!data) {
+        if (!arguments.data) {
             LogError("OhosPatch component content builder callback has no context");
             return NapiUndefined(env);
         }
-        if (argc > kMaxArguments) {
-            LogError("Component content builder arguments were truncated to the OhosPatch limit");
-            argc = kMaxArguments;
-        }
-        return Runtime().InvokeUiContentBuilder(env, static_cast<UiContentBuilderCallbackRecord *>(data), receiver,
-                                                argc, argv.data());
+        return Runtime().InvokeUiContentBuilder(env,
+                                                static_cast<UiContentBuilderCallbackRecord *>(arguments.data),
+                                                arguments.receiver, arguments.count, arguments.values.data());
     }
 
     static napi_value UiContentCreateCaptureCallback(napi_env env, napi_callback_info info)
     {
-        size_t argc = kMaxArguments;
-        napi_value receiver = nullptr;
-        void *data = nullptr;
-        std::array<napi_value, kMaxArguments> argv{};
-        if (!NapiOk(env, napi_get_cb_info(env, info, &argc, argv.data(), &receiver, &data),
-                    "napi_get_cb_info(component content create capture)")) {
+        NapiCallbackArguments arguments;
+        if (!ReadNapiCallbackArguments(
+                env, info, "napi_get_cb_info(component content create capture)",
+                "Component content create arguments were truncated to the OhosPatch limit", &arguments)) {
             return NapiUndefined(env);
         }
-        UiContentCreateCaptureContext *capture = static_cast<UiContentCreateCaptureContext *>(data);
-        if (!capture || !capture->originalCreate) {
+        UiContentCreateCaptureContext *capture = static_cast<UiContentCreateCaptureContext *>(arguments.data);
+        if (!capture || !capture->originalMethod) {
             LogError("OhosPatch component content create capture has no context");
             return NapiUndefined(env);
         }
-        if (argc > kMaxArguments) {
-            LogError("Component content create arguments were truncated to the OhosPatch limit");
-            argc = kMaxArguments;
-        }
 
         napi_value create = nullptr;
-        if (!NapiOk(env, napi_get_reference_value(env, capture->originalCreate, &create),
+        if (!NapiOk(env, napi_get_reference_value(env, capture->originalMethod, &create),
                     "napi_get_reference_value(component content create)")) {
             return NapiUndefined(env);
         }
 
         Runtime().CaptureUiContentCreateState(capture);
         std::array<napi_value, kMaxArguments> forwarded{};
-        for (size_t index = 0; index < argc; ++index) {
-            forwarded[index] = Runtime().WrapUiContentBuilderArgument(env, capture, argv[index]);
+        for (size_t index = 0; index < arguments.count; ++index) {
+            forwarded[index] = Runtime().WrapUiContentBuilderArgument(env, capture, arguments.values[index]);
         }
 
         napi_value result = nullptr;
-        napi_status status = napi_call_function(env, receiver, create, argc, forwarded.data(), &result);
+        napi_status status = napi_call_function(env, arguments.receiver, create, arguments.count, forwarded.data(),
+                                                &result);
         if (status == napi_pending_exception) {
             LogError("Original component content create function threw an exception");
             return nullptr;
@@ -2035,32 +2207,28 @@ class JsvmRuntime
 
     static napi_value UiWhereCaptureCallback(napi_env env, napi_callback_info info)
     {
-        size_t argc = kMaxArguments;
-        napi_value receiver = nullptr;
-        void *data = nullptr;
-        std::array<napi_value, kMaxArguments> argv{};
-        if (!NapiOk(env, napi_get_cb_info(env, info, &argc, argv.data(), &receiver, &data),
-                    "napi_get_cb_info(component where capture)")) {
+        NapiCallbackArguments arguments;
+        if (!ReadNapiCallbackArguments(
+                env, info, "napi_get_cb_info(component where capture)",
+                "Component where attribute arguments were truncated to the OhosPatch limit", &arguments)) {
             return NapiUndefined(env);
         }
-        UiWhereCaptureContext *capture = static_cast<UiWhereCaptureContext *>(data);
-        if (!capture || !capture->originalAttribute) {
+        UiWhereCaptureContext *capture = static_cast<UiWhereCaptureContext *>(arguments.data);
+        if (!capture || !capture->originalMethod) {
             LogError("OhosPatch component where capture has no context");
             return NapiUndefined(env);
         }
-        if (argc > kMaxArguments) {
-            LogError("Component where attribute arguments were truncated to the OhosPatch limit");
-            argc = kMaxArguments;
-        }
-        capture->invoked = argc > 0 && NapiJsonStringify(env, argv[0], "null", &capture->originalJson);
+        capture->invoked = arguments.count > 0 &&
+                           NapiJsonStringify(env, arguments.values[0], "null", &capture->originalJson);
 
         napi_value attribute = nullptr;
-        if (!NapiOk(env, napi_get_reference_value(env, capture->originalAttribute, &attribute),
+        if (!NapiOk(env, napi_get_reference_value(env, capture->originalMethod, &attribute),
                     "napi_get_reference_value(component where attribute)")) {
             return NapiUndefined(env);
         }
         napi_value result = nullptr;
-        napi_status status = napi_call_function(env, receiver, attribute, argc, argv.data(), &result);
+        napi_status status = napi_call_function(env, arguments.receiver, attribute, arguments.count,
+                                                arguments.values.data(), &result);
         if (status == napi_pending_exception) {
             LogError("Original component where attribute threw an exception");
             return nullptr;
@@ -2073,23 +2241,18 @@ class JsvmRuntime
 
     static napi_value UiEventCallback(napi_env env, napi_callback_info info)
     {
-        size_t argc = kMaxArguments;
-        napi_value receiver = nullptr;
-        void *data = nullptr;
-        std::array<napi_value, kMaxArguments> argv{};
-        if (!NapiOk(env, napi_get_cb_info(env, info, &argc, argv.data(), &receiver, &data),
-                    "napi_get_cb_info(component event)")) {
+        NapiCallbackArguments arguments;
+        if (!ReadNapiCallbackArguments(env, info, "napi_get_cb_info(component event)",
+                                       "Component event arguments were truncated to the OhosPatch limit",
+                                       &arguments)) {
             return NapiUndefined(env);
         }
-        if (!data) {
+        if (!arguments.data) {
             LogError("OhosPatch component event callback has no UiEventCallbackRecord");
             return NapiUndefined(env);
         }
-        if (argc > kMaxArguments) {
-            LogError("Component event arguments were truncated to the OhosPatch limit");
-            argc = kMaxArguments;
-        }
-        return Runtime().InvokeUiEvent(env, static_cast<UiEventCallbackRecord *>(data), receiver, argc, argv.data());
+        return Runtime().InvokeUiEvent(env, static_cast<UiEventCallbackRecord *>(arguments.data),
+                                       arguments.receiver, arguments.count, arguments.values.data());
     }
 
     static void FinalizeUiNodeCallback(napi_env env, void *data, void *)
@@ -2151,24 +2314,19 @@ class JsvmRuntime
 
     static napi_value UiStoredFunctionCallback(napi_env env, napi_callback_info info)
     {
-        size_t argc = kMaxArguments;
-        napi_value receiver = nullptr;
-        void *data = nullptr;
-        std::array<napi_value, kMaxArguments> argv{};
-        if (!NapiOk(env, napi_get_cb_info(env, info, &argc, argv.data(), &receiver, &data),
-                    "napi_get_cb_info(stored JS function callback)")) {
+        NapiCallbackArguments arguments;
+        if (!ReadNapiCallbackArguments(
+                env, info, "napi_get_cb_info(stored JS function callback)",
+                "Stored JS function callback arguments were truncated to the OhosPatch limit", &arguments)) {
             return NapiUndefined(env);
         }
-        if (argc > kMaxArguments) {
-            LogError("Stored JS function callback arguments were truncated to the OhosPatch limit");
-            argc = kMaxArguments;
-        }
-        if (!data) {
+        if (!arguments.data) {
             LogError("OhosPatch stored JS function callback has no context");
             return NapiUndefined(env);
         }
-        return Runtime().InvokeStoredJsFunction(env, static_cast<UiStoredFunctionCallbackRecord *>(data), argc,
-                                                argv.data());
+        return Runtime().InvokeStoredJsFunction(env,
+                                                static_cast<UiStoredFunctionCallbackRecord *>(arguments.data),
+                                                arguments.count, arguments.values.data());
     }
 
     static napi_value CallUiOriginal(napi_env env, UiMethodHook *method, napi_value receiver, size_t argc,
@@ -2290,7 +2448,7 @@ class JsvmRuntime
         }
         UiRenderFrame *frame = FindUiRenderFrame(capture->targetKey);
         if (frame) {
-            CopyUiRenderFrameState(frame, capture);
+            CopyUiNodeSelectionState(*frame, capture);
         }
     }
 
@@ -2322,20 +2480,7 @@ class JsvmRuntime
         }
         record->env = napiEnv;
         record->targetKey = capture->targetKey;
-        size_t counterCount = capture->counterCount < record->counters.size()
-                                  ? capture->counterCount
-                                  : record->counters.size();
-        for (size_t index = 0; index < counterCount; ++index) {
-            record->counters[index] = capture->counters[index];
-        }
-        record->counterCount = counterCount;
-        size_t selectorCount = capture->selectedSelectorCount < record->selectedSelectors.size()
-                                   ? capture->selectedSelectorCount
-                                   : record->selectedSelectors.size();
-        for (size_t index = 0; index < selectorCount; ++index) {
-            record->selectedSelectors[index] = capture->selectedSelectors[index];
-        }
-        record->selectedSelectorCount = selectorCount;
+        CopyUiNodeSelectionState(*capture, record);
 
         if (!NapiOk(napiEnv, napi_create_reference(napiEnv, argument, 1, &record->originalBuilder),
                     "napi_create_reference(component content builder)") ||
@@ -2586,14 +2731,11 @@ class JsvmRuntime
             return NapiUndefined(napiEnv);
         }
 
-        JSVM_HandleScope scope = nullptr;
-        if (!JsvmOk(OH_JSVM_OpenHandleScope(env_, &scope), "OH_JSVM_OpenHandleScope(stored JS function)", env_)) {
+        JsvmHandleScope scope(env_, "OH_JSVM_OpenHandleScope(stored JS function)",
+                              "OH_JSVM_CloseHandleScope(stored JS function)");
+        if (!scope.IsOpen()) {
             return NapiUndefined(napiEnv);
         }
-        auto closeScope = [&]() {
-            return JsvmOk(OH_JSVM_CloseHandleScope(env_, scope), "OH_JSVM_CloseHandleScope(stored JS function)",
-                          env_);
-        };
 
         JSVM_Value function = nullptr;
         JSVM_Value argsArray = nullptr;
@@ -2604,8 +2746,7 @@ class JsvmRuntime
                        JsvmOk(OH_JSVM_CreateUint32(env_, 0, &ownerHandle),
                               "OH_JSVM_CreateUint32(stored JS function owner)", env_);
 
-        ActiveInvocation previous = activeInvocation_;
-        activeInvocation_ = {};
+        ActiveInvocationScope invocation(&activeInvocation_);
         activeInvocation_.env = napiEnv;
         activeInvocation_.receiver = owner;
         activeInvocation_.proxyValues[0] = owner;
@@ -2651,8 +2792,8 @@ class JsvmRuntime
             }
         }
 
-        activeInvocation_ = previous;
-        bool scopeClosed = closeScope();
+        invocation.Restore();
+        bool scopeClosed = scope.Close();
         if (!success || !scopeClosed || returnUndefined) {
             return NapiUndefined(napiEnv);
         }
@@ -3194,14 +3335,15 @@ class JsvmRuntime
             return runtime ? runtime->ProxyError("OhosPatch proxy read occurred outside an active invocation")
                            : Undefined(env);
         }
-        size_t argc = 2;
-        JSVM_Value argv[2] = {nullptr, nullptr};
+        JsvmCallbackArguments<2> arguments;
         uint32_t handle = 0;
         std::string property;
-        if (!JsvmOk(OH_JSVM_GetCbInfo(env, info, &argc, argv, nullptr, nullptr), "OH_JSVM_GetCbInfo(proxy get)", env) ||
-            argc < 2 ||
-            !JsvmOk(OH_JSVM_GetValueUint32(env, argv[0], &handle), "OH_JSVM_GetValueUint32(proxy get handle)", env) ||
-            !runtime->JsvmString(argv[1], &property) || handle >= runtime->activeInvocation_.proxyValueCount) {
+        if (!ReadJsvmCallbackArguments(env, info, "OH_JSVM_GetCbInfo(proxy get)", &arguments) ||
+            arguments.count < 2 ||
+            !JsvmOk(OH_JSVM_GetValueUint32(env, arguments.values[0], &handle),
+                    "OH_JSVM_GetValueUint32(proxy get handle)", env) ||
+            !runtime->JsvmString(arguments.values[1], &property) ||
+            handle >= runtime->activeInvocation_.proxyValueCount) {
             return runtime->ProxyError("OhosPatch proxy read received invalid arguments");
         }
         ActiveInvocation &active = runtime->activeInvocation_;
@@ -3223,15 +3365,16 @@ class JsvmRuntime
             return runtime ? runtime->ProxyError("OhosPatch proxy write occurred outside an active invocation")
                            : Undefined(env);
         }
-        size_t argc = 3;
-        JSVM_Value argv[3] = {nullptr, nullptr, nullptr};
+        JsvmCallbackArguments<3> arguments;
         uint32_t handle = 0;
         std::string property;
         std::string wire;
-        if (!JsvmOk(OH_JSVM_GetCbInfo(env, info, &argc, argv, nullptr, nullptr), "OH_JSVM_GetCbInfo(proxy set)", env) ||
-            argc < 3 ||
-            !JsvmOk(OH_JSVM_GetValueUint32(env, argv[0], &handle), "OH_JSVM_GetValueUint32(proxy set handle)", env) ||
-            !runtime->JsvmString(argv[1], &property) || !runtime->JsvmString(argv[2], &wire) ||
+        if (!ReadJsvmCallbackArguments(env, info, "OH_JSVM_GetCbInfo(proxy set)", &arguments) ||
+            arguments.count < 3 ||
+            !JsvmOk(OH_JSVM_GetValueUint32(env, arguments.values[0], &handle),
+                    "OH_JSVM_GetValueUint32(proxy set handle)", env) ||
+            !runtime->JsvmString(arguments.values[1], &property) ||
+            !runtime->JsvmString(arguments.values[2], &wire) ||
             handle >= runtime->activeInvocation_.proxyValueCount) {
             return runtime->ProxyError("OhosPatch proxy write received invalid arguments");
         }
@@ -3257,18 +3400,17 @@ class JsvmRuntime
             return runtime ? runtime->ProxyError("OhosPatch proxy call occurred outside an active invocation")
                            : Undefined(env);
         }
-        size_t argc = 3;
-        JSVM_Value argv[3] = {nullptr, nullptr, nullptr};
+        JsvmCallbackArguments<3> arguments;
         uint32_t functionHandle = 0;
         uint32_t receiverHandle = 0;
         std::string wire;
-        if (!JsvmOk(OH_JSVM_GetCbInfo(env, info, &argc, argv, nullptr, nullptr), "OH_JSVM_GetCbInfo(proxy call)", env) ||
-            argc < 3 ||
-            !JsvmOk(OH_JSVM_GetValueUint32(env, argv[0], &functionHandle),
+        if (!ReadJsvmCallbackArguments(env, info, "OH_JSVM_GetCbInfo(proxy call)", &arguments) ||
+            arguments.count < 3 ||
+            !JsvmOk(OH_JSVM_GetValueUint32(env, arguments.values[0], &functionHandle),
                     "OH_JSVM_GetValueUint32(proxy function handle)", env) ||
-            !JsvmOk(OH_JSVM_GetValueUint32(env, argv[1], &receiverHandle),
+            !JsvmOk(OH_JSVM_GetValueUint32(env, arguments.values[1], &receiverHandle),
                     "OH_JSVM_GetValueUint32(proxy receiver handle)", env) ||
-            !runtime->JsvmString(argv[2], &wire) ||
+            !runtime->JsvmString(arguments.values[2], &wire) ||
             functionHandle >= runtime->activeInvocation_.proxyValueCount ||
             receiverHandle >= runtime->activeInvocation_.proxyValueCount) {
             return runtime->ProxyError("OhosPatch proxy call received invalid arguments");
@@ -3312,12 +3454,10 @@ class JsvmRuntime
                            : Undefined(env);
         }
 
-        size_t argc = 1;
-        JSVM_Value argument = nullptr;
+        JsvmCallbackArguments<1> arguments;
         std::string descriptorJson;
-        if (!JsvmOk(OH_JSVM_GetCbInfo(env, info, &argc, &argument, nullptr, nullptr),
-                    "OH_JSVM_GetCbInfo(import)", env) ||
-            argc < 1 || !runtime->JsvmString(argument, &descriptorJson)) {
+        if (!ReadJsvmCallbackArguments(env, info, "OH_JSVM_GetCbInfo(import)", &arguments) ||
+            arguments.count < 1 || !runtime->JsvmString(arguments.values[0], &descriptorJson)) {
             return runtime->ProxyError("Fixit.import requires an encoded target descriptor");
         }
 
@@ -3370,17 +3510,16 @@ class JsvmRuntime
             return runtime ? runtime->ProxyError("OhosPatch imported read requires an active ArkTS environment")
                            : Undefined(env);
         }
-        size_t argc = 2;
-        JSVM_Value argv[2] = {nullptr, nullptr};
+        JsvmCallbackArguments<2> arguments;
         uint32_t handle = 0;
         std::string property;
         napi_value target = nullptr;
-        if (!JsvmOk(OH_JSVM_GetCbInfo(env, info, &argc, argv, nullptr, nullptr),
-                    "OH_JSVM_GetCbInfo(import get)", env) ||
-            argc < 2 ||
-            !JsvmOk(OH_JSVM_GetValueUint32(env, argv[0], &handle),
+        if (!ReadJsvmCallbackArguments(env, info, "OH_JSVM_GetCbInfo(import get)", &arguments) ||
+            arguments.count < 2 ||
+            !JsvmOk(OH_JSVM_GetValueUint32(env, arguments.values[0], &handle),
                     "OH_JSVM_GetValueUint32(import get handle)", env) ||
-            !runtime->JsvmString(argv[1], &property) || !runtime->GetImportedValue(handle, &target)) {
+            !runtime->JsvmString(arguments.values[1], &property) ||
+            !runtime->GetImportedValue(handle, &target)) {
             return runtime->ProxyError("OhosPatch imported read received invalid arguments");
         }
 
@@ -3403,18 +3542,17 @@ class JsvmRuntime
             return runtime ? runtime->ProxyError("OhosPatch imported write requires an active ArkTS environment")
                            : Undefined(env);
         }
-        size_t argc = 3;
-        JSVM_Value argv[3] = {nullptr, nullptr, nullptr};
+        JsvmCallbackArguments<3> arguments;
         uint32_t handle = 0;
         std::string property;
         std::string wire;
         napi_value target = nullptr;
-        if (!JsvmOk(OH_JSVM_GetCbInfo(env, info, &argc, argv, nullptr, nullptr),
-                    "OH_JSVM_GetCbInfo(import set)", env) ||
-            argc < 3 ||
-            !JsvmOk(OH_JSVM_GetValueUint32(env, argv[0], &handle),
+        if (!ReadJsvmCallbackArguments(env, info, "OH_JSVM_GetCbInfo(import set)", &arguments) ||
+            arguments.count < 3 ||
+            !JsvmOk(OH_JSVM_GetValueUint32(env, arguments.values[0], &handle),
                     "OH_JSVM_GetValueUint32(import set handle)", env) ||
-            !runtime->JsvmString(argv[1], &property) || !runtime->JsvmString(argv[2], &wire) ||
+            !runtime->JsvmString(arguments.values[1], &property) ||
+            !runtime->JsvmString(arguments.values[2], &wire) ||
             !runtime->GetImportedValue(handle, &target)) {
             return runtime->ProxyError("OhosPatch imported write received invalid arguments");
         }
@@ -3441,21 +3579,20 @@ class JsvmRuntime
             return runtime ? runtime->ProxyError("OhosPatch imported call requires an active ArkTS environment")
                            : Undefined(env);
         }
-        size_t argc = 3;
-        JSVM_Value argv[3] = {nullptr, nullptr, nullptr};
+        JsvmCallbackArguments<3> callbackArgs;
         uint32_t functionHandle = 0;
         uint32_t receiverHandle = 0;
         std::string wire;
         napi_value function = nullptr;
         napi_value receiver = nullptr;
-        if (!JsvmOk(OH_JSVM_GetCbInfo(env, info, &argc, argv, nullptr, nullptr),
-                    "OH_JSVM_GetCbInfo(import call)", env) ||
-            argc < 3 ||
-            !JsvmOk(OH_JSVM_GetValueUint32(env, argv[0], &functionHandle),
+        if (!ReadJsvmCallbackArguments(env, info, "OH_JSVM_GetCbInfo(import call)", &callbackArgs) ||
+            callbackArgs.count < 3 ||
+            !JsvmOk(OH_JSVM_GetValueUint32(env, callbackArgs.values[0], &functionHandle),
                     "OH_JSVM_GetValueUint32(import function handle)", env) ||
-            !JsvmOk(OH_JSVM_GetValueUint32(env, argv[1], &receiverHandle),
+            !JsvmOk(OH_JSVM_GetValueUint32(env, callbackArgs.values[1], &receiverHandle),
                     "OH_JSVM_GetValueUint32(import receiver handle)", env) ||
-            !runtime->JsvmString(argv[2], &wire) || !runtime->GetImportedValue(functionHandle, &function) ||
+            !runtime->JsvmString(callbackArgs.values[2], &wire) ||
+            !runtime->GetImportedValue(functionHandle, &function) ||
             !runtime->GetImportedValue(receiverHandle, &receiver)) {
             return runtime->ProxyError("OhosPatch imported call received invalid arguments");
         }
@@ -3482,17 +3619,16 @@ class JsvmRuntime
             return runtime ? runtime->ProxyError("OhosPatch imported constructor requires an active ArkTS environment")
                            : Undefined(env);
         }
-        size_t argc = 2;
-        JSVM_Value argv[2] = {nullptr, nullptr};
+        JsvmCallbackArguments<2> callbackArgs;
         uint32_t constructorHandle = 0;
         std::string wire;
         napi_value constructor = nullptr;
-        if (!JsvmOk(OH_JSVM_GetCbInfo(env, info, &argc, argv, nullptr, nullptr),
-                    "OH_JSVM_GetCbInfo(import construct)", env) ||
-            argc < 2 ||
-            !JsvmOk(OH_JSVM_GetValueUint32(env, argv[0], &constructorHandle),
+        if (!ReadJsvmCallbackArguments(env, info, "OH_JSVM_GetCbInfo(import construct)", &callbackArgs) ||
+            callbackArgs.count < 2 ||
+            !JsvmOk(OH_JSVM_GetValueUint32(env, callbackArgs.values[0], &constructorHandle),
                     "OH_JSVM_GetValueUint32(import constructor handle)", env) ||
-            !runtime->JsvmString(argv[1], &wire) || !runtime->GetImportedValue(constructorHandle, &constructor)) {
+            !runtime->JsvmString(callbackArgs.values[1], &wire) ||
+            !runtime->GetImportedValue(constructorHandle, &constructor)) {
             return runtime->ProxyError("OhosPatch imported constructor received invalid arguments");
         }
 
@@ -3519,11 +3655,10 @@ class JsvmRuntime
             return Undefined(env);
         }
 
-        size_t argc = 1;
-        JSVM_Value argument = nullptr;
+        JsvmCallbackArguments<1> arguments;
         std::string argsJson;
-        if (!JsvmOk(OH_JSVM_GetCbInfo(env, info, &argc, &argument, nullptr, nullptr), "OH_JSVM_GetCbInfo(origin)", env) ||
-            argc < 1 || !runtime->JsvmString(argument, &argsJson)) {
+        if (!ReadJsvmCallbackArguments(env, info, "OH_JSVM_GetCbInfo(origin)", &arguments) ||
+            arguments.count < 1 || !runtime->JsvmString(arguments.values[0], &argsJson)) {
             return runtime->ProxyError("Original method requires encoded arguments");
         }
 
@@ -3574,12 +3709,10 @@ class JsvmRuntime
             return Undefined(env);
         }
 
-        size_t argc = 1;
-        JSVM_Value argument = nullptr;
+        JsvmCallbackArguments<1> arguments;
         std::string argsJson;
-        if (!JsvmOk(OH_JSVM_GetCbInfo(env, info, &argc, &argument, nullptr, nullptr),
-                    "OH_JSVM_GetCbInfo(component event origin)", env) ||
-            argc < 1 || !runtime->JsvmString(argument, &argsJson)) {
+        if (!ReadJsvmCallbackArguments(env, info, "OH_JSVM_GetCbInfo(component event origin)", &arguments) ||
+            arguments.count < 1 || !runtime->JsvmString(arguments.values[0], &argsJson)) {
             return runtime->ProxyError("Original component event requires encoded arguments");
         }
 
@@ -3629,16 +3762,16 @@ class JsvmRuntime
             return Undefined(env);
         }
 
-        size_t argc = 2;
-        JSVM_Value argv[2] = {nullptr, nullptr};
-        if (!JsvmOk(OH_JSVM_GetCbInfo(env, info, &argc, argv, nullptr, nullptr), "OH_JSVM_GetCbInfo(hilog)", env) ||
-            argc < 2) {
+        JsvmCallbackArguments<2> arguments;
+        if (!ReadJsvmCallbackArguments(env, info, "OH_JSVM_GetCbInfo(hilog)", &arguments) ||
+            arguments.count < 2) {
             return Undefined(env);
         }
 
         std::string level;
         std::string message;
-        if (!runtime->JsvmString(argv[0], &level) || !runtime->JsvmString(argv[1], &message)) {
+        if (!runtime->JsvmString(arguments.values[0], &level) ||
+            !runtime->JsvmString(arguments.values[1], &message)) {
             return Undefined(env);
         }
         LogLevel logLevel = LOG_INFO;
@@ -3660,11 +3793,9 @@ class JsvmRuntime
             return Undefined(env);
         }
 
-        size_t argc = 3;
-        JSVM_Value argv[3] = {nullptr, nullptr, nullptr};
-        if (!JsvmOk(OH_JSVM_GetCbInfo(env, info, &argc, argv, nullptr, nullptr), "OH_JSVM_GetCbInfo(schedule timer)",
-                    env) ||
-            argc < 3) {
+        JsvmCallbackArguments<3> arguments;
+        if (!ReadJsvmCallbackArguments(env, info, "OH_JSVM_GetCbInfo(schedule timer)", &arguments) ||
+            arguments.count < 3) {
             LogError("OhosPatch schedule timer requires id, delay, and repeating arguments");
             return Undefined(env);
         }
@@ -3672,9 +3803,12 @@ class JsvmRuntime
         uint32_t id = 0;
         uint32_t delay = 0;
         bool repeating = false;
-        if (!JsvmOk(OH_JSVM_GetValueUint32(env, argv[0], &id), "OH_JSVM_GetValueUint32(timer ID)", env) ||
-            !JsvmOk(OH_JSVM_GetValueUint32(env, argv[1], &delay), "OH_JSVM_GetValueUint32(timer delay)", env) ||
-            !JsvmOk(OH_JSVM_GetValueBool(env, argv[2], &repeating), "OH_JSVM_GetValueBool(timer repeating)", env)) {
+        if (!JsvmOk(OH_JSVM_GetValueUint32(env, arguments.values[0], &id),
+                    "OH_JSVM_GetValueUint32(timer ID)", env) ||
+            !JsvmOk(OH_JSVM_GetValueUint32(env, arguments.values[1], &delay),
+                    "OH_JSVM_GetValueUint32(timer delay)", env) ||
+            !JsvmOk(OH_JSVM_GetValueBool(env, arguments.values[2], &repeating),
+                    "OH_JSVM_GetValueBool(timer repeating)", env)) {
             return Undefined(env);
         }
 
@@ -3692,17 +3826,16 @@ class JsvmRuntime
             return Undefined(env);
         }
 
-        size_t argc = 1;
-        JSVM_Value argument = nullptr;
-        if (!JsvmOk(OH_JSVM_GetCbInfo(env, info, &argc, &argument, nullptr, nullptr), "OH_JSVM_GetCbInfo(cancel timer)",
-                    env) ||
-            argc < 1) {
+        JsvmCallbackArguments<1> arguments;
+        if (!ReadJsvmCallbackArguments(env, info, "OH_JSVM_GetCbInfo(cancel timer)", &arguments) ||
+            arguments.count < 1) {
             LogError("OhosPatch cancel timer requires a timer ID");
             return Undefined(env);
         }
 
         uint32_t id = 0;
-        if (!JsvmOk(OH_JSVM_GetValueUint32(env, argument, &id), "OH_JSVM_GetValueUint32(cancel timer ID)", env)) {
+        if (!JsvmOk(OH_JSVM_GetValueUint32(env, arguments.values[0], &id),
+                    "OH_JSVM_GetValueUint32(cancel timer ID)", env)) {
             return Undefined(env);
         }
 
@@ -3720,11 +3853,9 @@ class JsvmRuntime
             return Undefined(env);
         }
 
-        size_t argc = 3;
-        JSVM_Value argv[3] = {nullptr, nullptr, nullptr};
-        if (!JsvmOk(OH_JSVM_GetCbInfo(env, info, &argc, argv, nullptr, nullptr),
-                    "OH_JSVM_GetCbInfo(resource)", env) ||
-            argc < 2) {
+        JsvmCallbackArguments<3> arguments;
+        if (!ReadJsvmCallbackArguments(env, info, "OH_JSVM_GetCbInfo(resource)", &arguments) ||
+            arguments.count < 2) {
             LogError("OhosPatch resource lookup requires a kind and resource name");
             return Undefined(env);
         }
@@ -3732,10 +3863,12 @@ class JsvmRuntime
         std::string kind;
         std::string name;
         std::string optionsJson;
-        if (!runtime->JsvmString(argv[0], &kind) || !runtime->JsvmString(argv[1], &name)) {
+        if (!runtime->JsvmString(arguments.values[0], &kind) ||
+            !runtime->JsvmString(arguments.values[1], &name)) {
             return Undefined(env);
         }
-        if (argc >= 3 && argv[2] && !runtime->JsvmString(argv[2], &optionsJson)) {
+        if (arguments.count >= 3 && arguments.values[2] &&
+            !runtime->JsvmString(arguments.values[2], &optionsJson)) {
             return Undefined(env);
         }
 
@@ -3746,7 +3879,7 @@ class JsvmRuntime
         return result;
     }
 
-    static JSVM_Value RuntimeInfoCallback(JSVM_Env env, JSVM_CallbackInfo info)
+    static JSVM_Value RuntimeInfoCallback(JSVM_Env env, JSVM_CallbackInfo)
     {
         JsvmRuntime *runtime = Current(env);
         if (!runtime) {
@@ -3766,16 +3899,14 @@ class JsvmRuntime
             return Undefined(env);
         }
 
-        size_t argc = 1;
-        JSVM_Value argument = nullptr;
-        if (!JsvmOk(OH_JSVM_GetCbInfo(env, info, &argc, &argument, nullptr, nullptr),
-                    "OH_JSVM_GetCbInfo(retain JS function)", env) ||
-            argc < 1) {
+        JsvmCallbackArguments<1> arguments;
+        if (!ReadJsvmCallbackArguments(env, info, "OH_JSVM_GetCbInfo(retain JS function)", &arguments) ||
+            arguments.count < 1) {
             LogError("OhosPatch retain JS function requires a function argument");
             return Undefined(env);
         }
 
-        uint32_t handle = runtime->RetainStoredJsFunction(argument);
+        uint32_t handle = runtime->RetainStoredJsFunction(arguments.values[0]);
         JSVM_Value result = nullptr;
         if (!JsvmOk(OH_JSVM_CreateUint32(env, handle, &result),
                     "OH_JSVM_CreateUint32(retained JS function handle)", env)) {
@@ -3786,22 +3917,17 @@ class JsvmRuntime
 
     static napi_value HookCallback(napi_env env, napi_callback_info info)
     {
-        size_t argc = kMaxArguments;
-        napi_value receiver = nullptr;
-        void *data = nullptr;
-        std::array<napi_value, kMaxArguments> argv{};
-        if (!NapiOk(env, napi_get_cb_info(env, info, &argc, argv.data(), &receiver, &data), "napi_get_cb_info(hook)")) {
+        NapiCallbackArguments arguments;
+        if (!ReadNapiCallbackArguments(env, info, "napi_get_cb_info(hook)",
+                                       "Hook arguments were truncated to the OhosPatch limit", &arguments)) {
             return NapiUndefined(env);
         }
-        if (argc > kMaxArguments) {
-            LogError("Hook arguments were truncated to the OhosPatch limit");
-            argc = kMaxArguments;
-        }
-        if (!data) {
+        if (!arguments.data) {
             LogError("OhosPatch hook callback has no HookRecord");
             return NapiUndefined(env);
         }
-        return Runtime().InvokeHook(env, static_cast<HookRecord *>(data), receiver, argc, argv.data());
+        return Runtime().InvokeHook(env, static_cast<HookRecord *>(arguments.data), arguments.receiver,
+                                    arguments.count, arguments.values.data());
     }
 
     static JSVM_Value Undefined(JSVM_Env env)
@@ -3856,8 +3982,9 @@ class JsvmRuntime
             return false;
         }
 
-        JSVM_HandleScope scope = nullptr;
-        if (!JsvmOk(OH_JSVM_OpenHandleScope(env_, &scope), "OH_JSVM_OpenHandleScope(component value)", env_)) {
+        JsvmHandleScope scope(env_, "OH_JSVM_OpenHandleScope(component value)",
+                              "OH_JSVM_CloseHandleScope(component value)");
+        if (!scope.IsOpen()) {
             return false;
         }
 
@@ -3868,9 +3995,8 @@ class JsvmRuntime
         bool success = JsvmOk(OH_JSVM_CreateUint32(env_, ruleId, &ruleIdValue),
                               "OH_JSVM_CreateUint32(component value rule)", env_) &&
                        ParseJson(valueJson, &valueValue);
-        ActiveInvocation previous = activeInvocation_;
-        if (owner) {
-            activeInvocation_ = {};
+        ActiveInvocationScope invocation(&activeInvocation_, owner != nullptr);
+        if (invocation.Get()) {
             activeInvocation_.env = napiEnv;
             activeInvocation_.receiver = owner;
             activeInvocation_.proxyValues[0] = owner;
@@ -3894,10 +4020,8 @@ class JsvmRuntime
             success = CallGlobal("__ohospatch_callUiValue", args, argc, &result) &&
                       StringifyJson(result, &resultJson);
         }
-        if (owner) {
-            activeInvocation_ = previous;
-        }
-        if (!JsvmOk(OH_JSVM_CloseHandleScope(env_, scope), "OH_JSVM_CloseHandleScope(component value)", env_)) {
+        invocation.Restore();
+        if (!scope.Close()) {
             success = false;
         }
         if (!success || !NapiJsonParse(napiEnv, resultJson, envelope)) {
@@ -3937,8 +4061,9 @@ class JsvmRuntime
             return false;
         }
 
-        JSVM_HandleScope scope = nullptr;
-        if (!JsvmOk(OH_JSVM_OpenHandleScope(env_, &scope), "OH_JSVM_OpenHandleScope(component event)", env_)) {
+        JsvmHandleScope scope(env_, "OH_JSVM_OpenHandleScope(component event)",
+                              "OH_JSVM_CloseHandleScope(component event)");
+        if (!scope.IsOpen()) {
             return false;
         }
 
@@ -3950,9 +4075,8 @@ class JsvmRuntime
                        JsvmOk(OH_JSVM_CreateUint32(env_, record->ruleId, &ruleIdValue),
                               "OH_JSVM_CreateUint32(component event rule)", env_) &&
                        ParseJson(eventArgsJson, &eventArgsValue);
-        ActiveInvocation previous = activeInvocation_;
-        if (owner) {
-            activeInvocation_ = {};
+        ActiveInvocationScope invocation(&activeInvocation_, owner != nullptr);
+        if (invocation.Get()) {
             activeInvocation_.env = napiEnv;
             activeInvocation_.uiEvent = record;
             activeInvocation_.receiver = owner;
@@ -3978,10 +4102,8 @@ class JsvmRuntime
             success = CallGlobal("__ohospatch_callUiEvent", args, argc, &result) &&
                       StringifyJson(result, &resultJson);
         }
-        if (owner) {
-            activeInvocation_ = previous;
-        }
-        if (!JsvmOk(OH_JSVM_CloseHandleScope(env_, scope), "OH_JSVM_CloseHandleScope(component event)", env_)) {
+        invocation.Restore();
+        if (!scope.Close()) {
             success = false;
         }
         if (!success || !NapiJsonParse(napiEnv, resultJson, envelope)) {
@@ -4003,8 +4125,9 @@ class JsvmRuntime
         }
         *value = nullptr;
 
-        JSVM_HandleScope scope = nullptr;
-        if (!JsvmOk(OH_JSVM_OpenHandleScope(env_, &scope), "OH_JSVM_OpenHandleScope(component attribute)", env_)) {
+        JsvmHandleScope scope(env_, "OH_JSVM_OpenHandleScope(component attribute)",
+                              "OH_JSVM_CloseHandleScope(component attribute)");
+        if (!scope.IsOpen()) {
             return false;
         }
 
@@ -4012,9 +4135,8 @@ class JsvmRuntime
         JSVM_Value ownerHandleValue = nullptr;
         JSVM_Value result = nullptr;
         std::string resultJson;
-        ActiveInvocation previous = activeInvocation_;
-        if (owner) {
-            activeInvocation_ = {};
+        ActiveInvocationScope invocation(&activeInvocation_, owner != nullptr);
+        if (invocation.Get()) {
             activeInvocation_.env = napiEnv;
             activeInvocation_.receiver = owner;
             activeInvocation_.proxyValues[0] = owner;
@@ -4033,10 +4155,8 @@ class JsvmRuntime
             success = CallGlobal("__ohospatch_callUiAttr", args, std::size(args), &result) &&
                       StringifyJson(result, &resultJson);
         }
-        if (owner) {
-            activeInvocation_ = previous;
-        }
-        if (!JsvmOk(OH_JSVM_CloseHandleScope(env_, scope), "OH_JSVM_CloseHandleScope(component attribute)", env_)) {
+        invocation.Restore();
+        if (!scope.Close()) {
             success = false;
         }
         if (!success) {
@@ -4718,31 +4838,45 @@ class JsvmRuntime
         return true;
     }
 
+    void LogMissingUiSelectors(const UiNodeSelectionState &selection, const std::string &targetKey,
+                               const std::string &builderMethodName)
+    {
+        for (size_t index = 0; index < uiRuleCount_; ++index) {
+            UiRule *rule = uiRules_[index].get();
+            if (!rule || rule->targetKey != targetKey || rule->builderMethodName != builderMethodName ||
+                rule->whereConditionCount == 0 || rule->selectorMissLogged ||
+                ContainsSelector(selection.selectedSelectors.data(), selection.selectedSelectorCount,
+                                 rule->selectorKey)) {
+                continue;
+            }
+            if (builderMethodName.empty()) {
+                LogWarn("Cannot find component node for patch selector. Rule={" + DescribeUiRule(rule) +
+                        "}. Check the node type, occurrence index, where attributes, and whether conditional "
+                        "rendering actually creates this node in the current render pass.");
+            } else {
+                LogWarn("Cannot find component node in @Builder method for patch selector. Rule={" +
+                        DescribeUiRule(rule) +
+                        "}. Check the Builder method name, node type, occurrence index, where attributes, and the "
+                        "currently executed conditional branch.");
+            }
+            for (size_t candidateIndex = index; candidateIndex < uiRuleCount_; ++candidateIndex) {
+                UiRule *candidate = uiRules_[candidateIndex].get();
+                if (candidate && candidate->targetKey == targetKey &&
+                    candidate->builderMethodName == builderMethodName &&
+                    candidate->selectorKey == rule->selectorKey) {
+                    candidate->selectorMissLogged = true;
+                }
+            }
+        }
+    }
+
     void PopUiRenderFrame()
     {
         if (uiRenderDepth_ == 0) {
             return;
         }
         UiRenderFrame &frame = uiRenderFrames_[--uiRenderDepth_];
-        for (size_t index = 0; index < uiRuleCount_; ++index) {
-            UiRule *rule = uiRules_[index].get();
-            if (!rule || rule->targetKey != frame.targetKey || !rule->builderMethodName.empty() ||
-                rule->whereConditionCount == 0 ||
-                rule->selectorMissLogged ||
-                ContainsSelector(frame.selectedSelectors.data(), frame.selectedSelectorCount, rule->selectorKey)) {
-                continue;
-            }
-            LogWarn("Cannot find component node for patch selector. Rule={" + DescribeUiRule(rule) +
-                    "}. Check the node type, occurrence index, where attributes, and whether conditional rendering "
-                    "actually creates this node in the current render pass.");
-            for (size_t candidateIndex = index; candidateIndex < uiRuleCount_; ++candidateIndex) {
-                UiRule *candidate = uiRules_[candidateIndex].get();
-                if (candidate && candidate->targetKey == rule->targetKey &&
-                    candidate->selectorKey == rule->selectorKey) {
-                    candidate->selectorMissLogged = true;
-                }
-            }
-        }
+        LogMissingUiSelectors(frame, frame.targetKey, "");
         frame.targetKey.clear();
         frame.owner = nullptr;
         for (size_t index = 0; index < frame.childInstanceCount; ++index) {
@@ -4843,26 +4977,7 @@ class JsvmRuntime
             return;
         }
         UiBuilderMethodFrame &frame = uiBuilderMethodFrames_[--uiBuilderMethodDepth_];
-        for (size_t index = 0; index < uiRuleCount_; ++index) {
-            UiRule *rule = uiRules_[index].get();
-            if (!rule || rule->targetKey != frame.targetKey || rule->builderMethodName != frame.methodName ||
-                rule->whereConditionCount == 0 || rule->selectorMissLogged ||
-                ContainsSelector(frame.selectedSelectors.data(), frame.selectedSelectorCount, rule->selectorKey)) {
-                continue;
-            }
-            LogWarn("Cannot find component node in @Builder method for patch selector. Rule={" +
-                    DescribeUiRule(rule) +
-                    "}. Check the Builder method name, node type, occurrence index, where attributes, and the "
-                    "currently executed conditional branch.");
-            for (size_t candidateIndex = index; candidateIndex < uiRuleCount_; ++candidateIndex) {
-                UiRule *candidate = uiRules_[candidateIndex].get();
-                if (candidate && candidate->targetKey == rule->targetKey &&
-                    candidate->builderMethodName == rule->builderMethodName &&
-                    candidate->selectorKey == rule->selectorKey) {
-                    candidate->selectorMissLogged = true;
-                }
-            }
-        }
+        LogMissingUiSelectors(frame, frame.targetKey, frame.methodName);
         frame.targetKey.clear();
         frame.methodName.clear();
         frame.owner = nullptr;
@@ -4904,79 +5019,24 @@ class JsvmRuntime
 
     bool ResolveUiOccurrence(UiRenderFrame *frame, const std::string &nodeType, uint32_t *occurrence)
     {
-        if (!frame || !occurrence) {
-            return false;
-        }
-        UiNodeTypeCounter *counter = nullptr;
-        for (size_t index = 0; index < frame->counterCount; ++index) {
-            if (frame->counters[index].nodeType == nodeType) {
-                counter = &frame->counters[index];
-                break;
-            }
-        }
-        if (!counter) {
-            if (frame->counterCount >= frame->counters.size()) {
-                LogError("Component node type count exceeds the OhosPatch limit");
-                return false;
-            }
-            counter = &frame->counters[frame->counterCount++];
-            counter->nodeType = nodeType;
-            counter->count = 0;
-        }
-        *occurrence = counter->count++;
-        return true;
+        return frame && ResolveUiNodeOccurrence(&frame->counters, &frame->counterCount, nodeType, occurrence,
+                                                "Component node type count exceeds the OhosPatch limit");
     }
 
     bool ResolveUiScopedOccurrence(UiScopedChildCreationFrame *frame, const std::string &nodeType,
                                    uint32_t *occurrence)
     {
-        if (!frame || !occurrence) {
-            return false;
-        }
-        UiNodeTypeCounter *counter = nullptr;
-        for (size_t index = 0; index < frame->counterCount; ++index) {
-            if (frame->counters[index].nodeType == nodeType) {
-                counter = &frame->counters[index];
-                break;
-            }
-        }
-        if (!counter) {
-            if (frame->counterCount >= frame->counters.size()) {
-                LogError("Component BuilderParam node type count exceeds the OhosPatch limit");
-                return false;
-            }
-            counter = &frame->counters[frame->counterCount++];
-            counter->nodeType = nodeType;
-            counter->count = 0;
-        }
-        *occurrence = counter->count++;
-        return true;
+        return frame && ResolveUiNodeOccurrence(
+                            &frame->counters, &frame->counterCount, nodeType, occurrence,
+                            "Component BuilderParam node type count exceeds the OhosPatch limit");
     }
 
     bool ResolveUiBuilderMethodOccurrence(UiBuilderMethodFrame *frame, const std::string &nodeType,
                                           uint32_t *occurrence)
     {
-        if (!frame || !occurrence) {
-            return false;
-        }
-        UiNodeTypeCounter *counter = nullptr;
-        for (size_t index = 0; index < frame->counterCount; ++index) {
-            if (frame->counters[index].nodeType == nodeType) {
-                counter = &frame->counters[index];
-                break;
-            }
-        }
-        if (!counter) {
-            if (frame->counterCount >= frame->counters.size()) {
-                LogError("Component @Builder method node type count exceeds the OhosPatch limit");
-                return false;
-            }
-            counter = &frame->counters[frame->counterCount++];
-            counter->nodeType = nodeType;
-            counter->count = 0;
-        }
-        *occurrence = counter->count++;
-        return true;
+        return frame && ResolveUiNodeOccurrence(
+                            &frame->counters, &frame->counterCount, nodeType, occurrence,
+                            "Component @Builder method node type count exceeds the OhosPatch limit");
     }
 
     bool RuleCouldMatchNode(const UiRule *rule, const UiNodeCallbackRecord *record) const
@@ -5215,28 +5275,6 @@ class JsvmRuntime
             }
         }
         return false;
-    }
-
-    void CopyUiRenderFrameState(const UiRenderFrame *frame, UiContentCreateCaptureContext *capture)
-    {
-        if (!frame || !capture) {
-            return;
-        }
-        size_t counterCount = frame->counterCount < capture->counters.size()
-                                  ? frame->counterCount
-                                  : capture->counters.size();
-        for (size_t index = 0; index < counterCount; ++index) {
-            capture->counters[index] = frame->counters[index];
-        }
-        capture->counterCount = counterCount;
-
-        size_t selectorCount = frame->selectedSelectorCount < capture->selectedSelectors.size()
-                                   ? frame->selectedSelectorCount
-                                   : capture->selectedSelectors.size();
-        for (size_t index = 0; index < selectorCount; ++index) {
-            capture->selectedSelectors[index] = frame->selectedSelectors[index];
-        }
-        capture->selectedSelectorCount = selectorCount;
     }
 
     bool WrapUiNodeBuilderForContent(napi_env napiEnv, const std::string &targetKey, UiRenderFrame *renderFrame,
@@ -5520,34 +5558,19 @@ class JsvmRuntime
                 }
 
                 UiCreateCaptureContext &capture = captures[count];
-                capture.env = napiEnv;
                 capture.rule = rule;
-                capture.methodName = methodName;
                 capture.owner = record ? record->owner : nullptr;
-                if (!NapiOk(napiEnv, napi_create_reference(napiEnv, create, 1, &capture.originalCreate),
-                            "napi_create_reference(component create)")) {
+                if (!InstallUiTemporaryMethod(
+                        napiEnv, componentApi, create, methodName, "ohospatchCreateCapture",
+                        UiCreateCaptureCallback, &capture, &capture,
+                        "napi_create_reference(component create)",
+                        "napi_delete_reference(component create)",
+                        "napi_create_function(component create capture)",
+                        "napi_set_named_property(component create capture)")) {
                     capture.rule = nullptr;
-                    capture.methodName.clear();
                     capture.owner = nullptr;
                     continue;
                 }
-                napi_value captureFunction = nullptr;
-                if (!NapiOk(napiEnv,
-                            napi_create_function(napiEnv, "ohospatchCreateCapture", NAPI_AUTO_LENGTH,
-                                                 UiCreateCaptureCallback, &capture, &captureFunction),
-                            "napi_create_function(component create capture)") ||
-                    !NapiOk(napiEnv,
-                            napi_set_named_property(napiEnv, componentApi, methodName, captureFunction),
-                            "napi_set_named_property(component create capture)")) {
-                    DeleteNapiReference(napiEnv, capture.originalCreate,
-                                        "napi_delete_reference(component create)");
-                    capture.originalCreate = nullptr;
-                    capture.rule = nullptr;
-                    capture.methodName.clear();
-                    capture.owner = nullptr;
-                    continue;
-                }
-                capture.installed = true;
                 ++count;
             }
         }
@@ -5557,29 +5580,16 @@ class JsvmRuntime
     static void RestoreUiCreateCaptures(napi_env napiEnv, napi_value componentApi, UiCreateCaptureContext *captures,
                                         size_t count)
     {
-        for (size_t index = count; index > 0; --index) {
-            UiCreateCaptureContext &capture = captures[index - 1];
-            if (!capture.installed || !capture.originalCreate || capture.methodName.empty()) {
-                continue;
-            }
-            napi_value create = nullptr;
-            if (NapiOk(napiEnv, napi_get_reference_value(napiEnv, capture.originalCreate, &create),
-                       "napi_get_reference_value(component create)")) {
-                NapiOk(napiEnv, napi_set_named_property(napiEnv, componentApi, capture.methodName.c_str(), create),
-                       "napi_set_named_property(restore component create)");
-            }
-            capture.installed = false;
-        }
+        RestoreUiTemporaryMethods(napiEnv, componentApi, captures, count,
+                                  "napi_get_reference_value(component create)",
+                                  "napi_set_named_property(restore component create)");
     }
 
     static void ReleaseUiCreateCaptures(napi_env napiEnv, UiCreateCaptureContext *captures, size_t count)
     {
+        ReleaseUiTemporaryMethods(napiEnv, captures, count, "napi_delete_reference(component create)");
         for (size_t index = 0; index < count; ++index) {
-            DeleteNapiReference(napiEnv, captures[index].originalCreate,
-                                "napi_delete_reference(component create)");
-            captures[index].originalCreate = nullptr;
             captures[index].rule = nullptr;
-            captures[index].methodName.clear();
             captures[index].owner = nullptr;
         }
     }
@@ -5626,34 +5636,19 @@ class JsvmRuntime
             }
 
             UiContentCreateCaptureContext &capture = captures[count];
-            capture.env = napiEnv;
             capture.targetKey = record->targetKey;
-            capture.methodName = methodName;
             capture.owner = record->owner;
-            if (!NapiOk(napiEnv, napi_create_reference(napiEnv, create, 1, &capture.originalCreate),
-                        "napi_create_reference(component content create)")) {
+            if (!InstallUiTemporaryMethod(
+                    napiEnv, componentApi, create, methodName, "ohospatchContentCreateCapture",
+                    UiContentCreateCaptureCallback, &capture, &capture,
+                    "napi_create_reference(component content create)",
+                    "napi_delete_reference(component content create)",
+                    "napi_create_function(component content create capture)",
+                    "napi_set_named_property(component content create capture)")) {
                 capture.targetKey.clear();
-                capture.methodName.clear();
                 capture.owner = nullptr;
                 continue;
             }
-            napi_value captureFunction = nullptr;
-            if (!NapiOk(napiEnv,
-                        napi_create_function(napiEnv, "ohospatchContentCreateCapture", NAPI_AUTO_LENGTH,
-                                             UiContentCreateCaptureCallback, &capture, &captureFunction),
-                        "napi_create_function(component content create capture)") ||
-                !NapiOk(napiEnv,
-                        napi_set_named_property(napiEnv, componentApi, methodName, captureFunction),
-                        "napi_set_named_property(component content create capture)")) {
-                DeleteNapiReference(napiEnv, capture.originalCreate,
-                                    "napi_delete_reference(component content create)");
-                capture.originalCreate = nullptr;
-                capture.targetKey.clear();
-                capture.methodName.clear();
-                capture.owner = nullptr;
-                continue;
-            }
-            capture.installed = true;
             ++count;
         }
         return count;
@@ -5662,31 +5657,19 @@ class JsvmRuntime
     static void RestoreUiContentCreateCaptures(napi_env napiEnv, napi_value componentApi,
                                                UiContentCreateCaptureContext *captures, size_t count)
     {
-        for (size_t index = count; index > 0; --index) {
-            UiContentCreateCaptureContext &capture = captures[index - 1];
-            if (!capture.installed || !capture.originalCreate || capture.methodName.empty()) {
-                continue;
-            }
-            napi_value create = nullptr;
-            if (NapiOk(napiEnv, napi_get_reference_value(napiEnv, capture.originalCreate, &create),
-                       "napi_get_reference_value(component content create)")) {
-                NapiOk(napiEnv, napi_set_named_property(napiEnv, componentApi, capture.methodName.c_str(), create),
-                       "napi_set_named_property(restore component content create)");
-            }
-            capture.installed = false;
-        }
+        RestoreUiTemporaryMethods(napiEnv, componentApi, captures, count,
+                                  "napi_get_reference_value(component content create)",
+                                  "napi_set_named_property(restore component content create)");
     }
 
     static void ReleaseUiContentCreateCaptures(napi_env napiEnv, UiContentCreateCaptureContext *captures,
                                                size_t count)
     {
+        ReleaseUiTemporaryMethods(napiEnv, captures, count,
+                                  "napi_delete_reference(component content create)");
         for (size_t index = 0; index < count; ++index) {
-            DeleteNapiReference(napiEnv, captures[index].originalCreate,
-                                "napi_delete_reference(component content create)");
-            captures[index].originalCreate = nullptr;
             captures[index].owner = nullptr;
             captures[index].targetKey.clear();
-            captures[index].methodName.clear();
             captures[index].counterCount = 0;
             captures[index].selectedSelectorCount = 0;
         }
@@ -5705,7 +5688,7 @@ class JsvmRuntime
                 const std::string &attributeName = rule->whereConditions[conditionIndex].attributeName;
                 bool alreadyCaptured = false;
                 for (size_t captureIndex = 0; captureIndex < count; ++captureIndex) {
-                    if (captures[captureIndex].attributeName == attributeName) {
+                    if (captures[captureIndex].methodName == attributeName) {
                         alreadyCaptured = true;
                         break;
                     }
@@ -5733,26 +5716,15 @@ class JsvmRuntime
                 }
 
                 UiWhereCaptureContext &capture = captures[count];
-                capture.env = napiEnv;
-                capture.attributeName = attributeName;
-                if (!NapiOk(napiEnv, napi_create_reference(napiEnv, attribute, 1, &capture.originalAttribute),
-                            "napi_create_reference(component where attribute)")) {
+                if (!InstallUiTemporaryMethod(
+                        napiEnv, componentApi, attribute, attributeName.c_str(), "ohospatchWhereCapture",
+                        UiWhereCaptureCallback, &capture, &capture,
+                        "napi_create_reference(component where attribute)",
+                        "napi_delete_reference(component where attribute)",
+                        "napi_create_function(component where capture)",
+                        "napi_set_named_property(component where capture)")) {
                     continue;
                 }
-                napi_value captureFunction = nullptr;
-                if (!NapiOk(napiEnv,
-                            napi_create_function(napiEnv, "ohospatchWhereCapture", NAPI_AUTO_LENGTH,
-                                                 UiWhereCaptureCallback, &capture, &captureFunction),
-                            "napi_create_function(component where capture)") ||
-                    !NapiOk(napiEnv, napi_set_named_property(napiEnv, componentApi, attributeName.c_str(),
-                                                             captureFunction),
-                            "napi_set_named_property(component where capture)")) {
-                    DeleteNapiReference(napiEnv, capture.originalAttribute,
-                                        "napi_delete_reference(component where attribute)");
-                    capture.originalAttribute = nullptr;
-                    continue;
-                }
-                capture.installed = true;
                 ++count;
             }
         }
@@ -5762,29 +5734,18 @@ class JsvmRuntime
     static void RestoreUiWhereCaptures(napi_env napiEnv, napi_value componentApi, UiWhereCaptureContext *captures,
                                        size_t count)
     {
-        for (size_t index = count; index > 0; --index) {
-            UiWhereCaptureContext &capture = captures[index - 1];
-            if (!capture.installed || !capture.originalAttribute) {
-                continue;
-            }
-            napi_value attribute = nullptr;
-            if (NapiOk(napiEnv, napi_get_reference_value(napiEnv, capture.originalAttribute, &attribute),
-                       "napi_get_reference_value(component where attribute)")) {
-                NapiOk(napiEnv,
-                       napi_set_named_property(napiEnv, componentApi, capture.attributeName.c_str(), attribute),
-                       "napi_set_named_property(restore component where attribute)");
-            }
-            capture.installed = false;
-        }
+        RestoreUiTemporaryMethods(napiEnv, componentApi, captures, count,
+                                  "napi_get_reference_value(component where attribute)",
+                                  "napi_set_named_property(restore component where attribute)");
     }
 
     static void ReleaseUiWhereCaptures(napi_env napiEnv, UiWhereCaptureContext *captures, size_t count)
     {
+        ReleaseUiTemporaryMethods(napiEnv, captures, count,
+                                  "napi_delete_reference(component where attribute)");
         for (size_t index = 0; index < count; ++index) {
-            DeleteNapiReference(napiEnv, captures[index].originalAttribute,
-                                "napi_delete_reference(component where attribute)");
-            captures[index].originalAttribute = nullptr;
             captures[index].originalJson.clear();
+            captures[index].invoked = false;
         }
     }
 
@@ -5798,7 +5759,7 @@ class JsvmRuntime
             const UiWhereCondition &condition = rule->whereConditions[conditionIndex];
             const UiWhereCaptureContext *capture = nullptr;
             for (size_t captureIndex = 0; captureIndex < captureCount; ++captureIndex) {
-                if (captures[captureIndex].attributeName == condition.attributeName) {
+                if (captures[captureIndex].methodName == condition.attributeName) {
                     capture = &captures[captureIndex];
                     break;
                 }
@@ -5902,27 +5863,19 @@ class JsvmRuntime
             }
 
             UiEventCaptureContext &capture = captures[count];
-            capture.env = napiEnv;
             capture.rule = rule;
             capture.owner = record->owner;
-            if (!NapiOk(napiEnv, napi_create_reference(napiEnv, registrar, 1, &capture.originalRegistrar),
-                        "napi_create_reference(component event registrar)")) {
+            if (!InstallUiTemporaryMethod(
+                    napiEnv, componentApi, registrar, rule->eventName.c_str(), "ohospatchEventCapture",
+                    UiEventCaptureCallback, &capture, &capture,
+                    "napi_create_reference(component event registrar)",
+                    "napi_delete_reference(component event registrar)",
+                    "napi_create_function(component event capture)",
+                    "napi_set_named_property(component event capture)")) {
+                capture.rule = nullptr;
+                capture.owner = nullptr;
                 continue;
             }
-            napi_value captureFunction = nullptr;
-            if (!NapiOk(napiEnv,
-                        napi_create_function(napiEnv, "ohospatchEventCapture", NAPI_AUTO_LENGTH, UiEventCaptureCallback,
-                                             &capture, &captureFunction),
-                        "napi_create_function(component event capture)") ||
-                !NapiOk(napiEnv,
-                        napi_set_named_property(napiEnv, componentApi, rule->eventName.c_str(), captureFunction),
-                        "napi_set_named_property(component event capture)")) {
-                DeleteNapiReference(napiEnv, capture.originalRegistrar,
-                                    "napi_delete_reference(component event registrar)");
-                capture.originalRegistrar = nullptr;
-                continue;
-            }
-            capture.installed = true;
             ++count;
         }
         if (count == capacity) {
@@ -5940,31 +5893,21 @@ class JsvmRuntime
     static void RestoreUiEventCaptures(napi_env napiEnv, napi_value componentApi, UiEventCaptureContext *captures,
                                        size_t count)
     {
-        for (size_t index = count; index > 0; --index) {
-            UiEventCaptureContext &capture = captures[index - 1];
-            if (!capture.installed || !capture.rule || !capture.originalRegistrar) {
-                continue;
-            }
-            napi_value registrar = nullptr;
-            if (NapiOk(napiEnv, napi_get_reference_value(napiEnv, capture.originalRegistrar, &registrar),
-                       "napi_get_reference_value(component event registrar)")) {
-                NapiOk(napiEnv,
-                       napi_set_named_property(napiEnv, componentApi, capture.rule->eventName.c_str(), registrar),
-                       "napi_set_named_property(restore component event registrar)");
-            }
-            capture.installed = false;
-        }
+        RestoreUiTemporaryMethods(napiEnv, componentApi, captures, count,
+                                  "napi_get_reference_value(component event registrar)",
+                                  "napi_set_named_property(restore component event registrar)");
     }
 
     static void ReleaseUiEventCaptures(napi_env napiEnv, UiEventCaptureContext *captures, size_t count)
     {
+        ReleaseUiTemporaryMethods(napiEnv, captures, count,
+                                  "napi_delete_reference(component event registrar)");
         for (size_t index = 0; index < count; ++index) {
-            DeleteNapiReference(napiEnv, captures[index].originalRegistrar,
-                                "napi_delete_reference(component event registrar)");
             DeleteNapiReference(napiEnv, captures[index].originalEvent,
                                 "napi_delete_reference(original component event)");
-            captures[index].originalRegistrar = nullptr;
             captures[index].originalEvent = nullptr;
+            captures[index].owner = nullptr;
+            captures[index].rule = nullptr;
         }
     }
 
@@ -6045,7 +5988,7 @@ class JsvmRuntime
         for (size_t index = 0; index < count; ++index) {
             UiEventCaptureContext &capture = captures[index];
             UiRule *rule = capture.rule;
-            if (!rule || !capture.originalRegistrar || !RuleMatchesNode(rule, nodeRecord)) {
+            if (!rule || !capture.originalMethod || !RuleMatchesNode(rule, nodeRecord)) {
                 continue;
             }
             if (rule->whereConditionCount == 0 && !capture.originalEvent) {
@@ -6059,7 +6002,7 @@ class JsvmRuntime
             }
 
             napi_value registrar = nullptr;
-            if (!NapiOk(napiEnv, napi_get_reference_value(napiEnv, capture.originalRegistrar, &registrar),
+            if (!NapiOk(napiEnv, napi_get_reference_value(napiEnv, capture.originalMethod, &registrar),
                         "napi_get_reference_value(component event registrar)")) {
                 continue;
             }
@@ -6586,6 +6529,22 @@ class JsvmRuntime
         return true;
     }
 
+    bool InstallUiChildComponentHook(napi_env napiEnv, const UiRule *sourceRule, UiRuleKind installKind)
+    {
+        if (!sourceRule || sourceRule->childTargetKey.empty()) {
+            LogError("InstallUiChildComponentHook received an invalid rule");
+            return false;
+        }
+        UiRule installRule;
+        installRule.kind = installKind;
+        installRule.className = sourceRule->childClassName;
+        installRule.modulePath = sourceRule->childModulePath;
+        installRule.moduleInfo = sourceRule->childModuleInfo;
+        installRule.exportName = sourceRule->childExportName;
+        installRule.targetKey = sourceRule->childTargetKey;
+        return InstallUiComponentHook(napiEnv, &installRule);
+    }
+
     bool InstallUiRules(napi_env napiEnv)
     {
         JSVM_Value specsValue = nullptr;
@@ -6622,35 +6581,13 @@ class JsvmRuntime
                 return false;
             }
             if (rule->kind == UiRuleKind::CHILD_PARAM && !IsUiComponentHookInstalled(rule->childTargetKey)) {
-                std::unique_ptr<UiRule> childRule(new (std::nothrow) UiRule());
-                if (!childRule) {
-                    LogError("Cannot allocate OhosPatch child component install rule");
-                    return false;
-                }
-                childRule->kind = UiRuleKind::PARAM;
-                childRule->className = rule->childClassName;
-                childRule->modulePath = rule->childModulePath;
-                childRule->moduleInfo = rule->childModuleInfo;
-                childRule->exportName = rule->childExportName;
-                childRule->targetKey = rule->childTargetKey;
-                if (!InstallUiComponentHook(napiEnv, childRule.get())) {
+                if (!InstallUiChildComponentHook(napiEnv, rule, UiRuleKind::PARAM)) {
                     return false;
                 }
             }
             if (IsUiNodeRuleKind(rule->kind) &&
                 !rule->childTargetKey.empty() && !IsUiComponentHookInstalled(rule->childTargetKey)) {
-                std::unique_ptr<UiRule> childRule(new (std::nothrow) UiRule());
-                if (!childRule) {
-                    LogError("Cannot allocate OhosPatch BuilderParam component install rule");
-                    return false;
-                }
-                childRule->kind = UiRuleKind::ATTRIBUTE;
-                childRule->className = rule->childClassName;
-                childRule->modulePath = rule->childModulePath;
-                childRule->moduleInfo = rule->childModuleInfo;
-                childRule->exportName = rule->childExportName;
-                childRule->targetKey = rule->childTargetKey;
-                if (!InstallUiComponentHook(napiEnv, childRule.get())) {
+                if (!InstallUiChildComponentHook(napiEnv, rule, UiRuleKind::ATTRIBUTE)) {
                     return false;
                 }
             }
@@ -6846,20 +6783,19 @@ class JsvmRuntime
 
     bool InstallNativeFunctionsWithScope()
     {
-        JSVM_HandleScope scope = nullptr;
-        if (!JsvmOk(OH_JSVM_OpenHandleScope(env_, &scope), "OH_JSVM_OpenHandleScope(native functions)", env_)) {
+        JsvmHandleScope scope(env_, "OH_JSVM_OpenHandleScope(native functions)",
+                              "OH_JSVM_CloseHandleScope(native functions)");
+        if (!scope.IsOpen()) {
             return false;
         }
         bool installed = InstallNativeFunctions();
-        bool closed = JsvmOk(OH_JSVM_CloseHandleScope(env_, scope),
-                             "OH_JSVM_CloseHandleScope(native functions)", env_);
-        return installed && closed;
+        return scope.Close() && installed;
     }
 
     bool Run(const std::string &script)
     {
-        JSVM_HandleScope scope = nullptr;
-        if (!JsvmOk(OH_JSVM_OpenHandleScope(env_, &scope), "OH_JSVM_OpenHandleScope", env_)) {
+        JsvmHandleScope scope(env_, "OH_JSVM_OpenHandleScope", "OH_JSVM_CloseHandleScope");
+        if (!scope.IsOpen()) {
             return false;
         }
 
@@ -6883,8 +6819,7 @@ class JsvmRuntime
                 OH_JSVM_GetAndClearLastException(env_, &exception);
             }
         }
-        bool closed = JsvmOk(OH_JSVM_CloseHandleScope(env_, scope), "OH_JSVM_CloseHandleScope", env_);
-        return success && closed;
+        return scope.Close() && success;
     }
 
     bool InstallHooks(napi_env napiEnv)
@@ -7072,15 +7007,14 @@ class JsvmRuntime
     bool ClearRegistry()
     {
         bool timersCleared = CancelAllTimers();
-        JSVM_HandleScope scope = nullptr;
-        if (!JsvmOk(OH_JSVM_OpenHandleScope(env_, &scope), "OH_JSVM_OpenHandleScope(clear registry)", env_)) {
+        JsvmHandleScope scope(env_, "OH_JSVM_OpenHandleScope(clear registry)",
+                              "OH_JSVM_CloseHandleScope(clear registry)");
+        if (!scope.IsOpen()) {
             return false;
         }
         JSVM_Value ignored = nullptr;
         bool registryCleared = CallGlobal("__ohospatch_clear", nullptr, 0, &ignored);
-        bool closed = JsvmOk(OH_JSVM_CloseHandleScope(env_, scope),
-                             "OH_JSVM_CloseHandleScope(clear registry)", env_);
-        return timersCleared && registryCleared && closed;
+        return scope.Close() && timersCleared && registryCleared;
     }
 
     bool CallGlobal(const char *name, const JSVM_Value *args, size_t argc, JSVM_Value *output)
@@ -7200,7 +7134,7 @@ napi_value ExecuteScript(napi_env env, napi_callback_info info)
     return NapiInstallResult(env, static_cast<uint32_t>(count));
 }
 
-napi_value Clear(napi_env env, napi_callback_info info)
+napi_value Clear(napi_env env, napi_callback_info)
 {
     Runtime().Clear(env);
     return NapiUndefined(env);

@@ -4,13 +4,25 @@ import { abilityDelegatorRegistry, Driver, ON } from '@kit.TestKit';
 import { OhosPatch } from '@rickytan/ohospatch';
 import { DemoScenario, DemoViewModel, Point } from '@vendor/business_page';
 
-async function selectPatchTab(driver: Driver, label: string): Promise<void> {
-  const tab = await driver.waitForComponent(ON.text(label), 5000);
-  if (tab === undefined || tab === null) {
+async function selectPatchTab(driver: Driver, label: string, contentId: string): Promise<void> {
+  await driver.waitForComponent(ON.text(label), 5000);
+  const tabs = await driver.findComponents(ON.text(label));
+  if (tabs.length === 0) {
     throw new Error(`Patch tab ${label} was not found`);
   }
-  await tab.click();
-  await driver.delayMs(300);
+  for (let index = tabs.length - 1; index >= 0; index--) {
+    try {
+      await tabs[index].click();
+      await driver.delayMs(300);
+      const content = await driver.waitForComponent(ON.id(contentId), 500);
+      if (content !== undefined && content !== null) {
+        return;
+      }
+    } catch (_) {
+      // Navigation can retain an invisible page with the same tab labels.
+    }
+  }
+  throw new Error(`Patch tab ${label} did not activate ${contentId}`);
 }
 
 export default function fixitTest(): void {
@@ -281,7 +293,7 @@ export default function fixitTest(): void {
       if (baselineCreateText === undefined || baselineCreateText === null) {
         throw new Error('Text create marker was not found before patch installation');
       }
-      await selectPatchTab(driver, 'BuilderParam');
+      await selectPatchTab(driver, 'BuilderParam', 'patch-tab-builder-param');
       const baselineMultiContent = await driver.waitForComponent(ON.id('multi-builder-content-text'), 5000);
       if (baselineMultiContent === undefined || baselineMultiContent === null) {
         throw new Error('multi-builder-content-text was not found before patch installation');
@@ -450,7 +462,7 @@ export default function fixitTest(): void {
       }
       expect(await v1Status.getText()).assertEqual('status=Patched V1 state before render');
 
-      await selectPatchTab(driver, 'V2');
+      await selectPatchTab(driver, 'V2', 'patch-tab-v2');
       const parameter = await driver.waitForComponent(ON.id('v2-message-text'), 5000);
       if (parameter === undefined || parameter === null) {
         throw new Error('patched V2 parameter was not found in V2 TabContent');
@@ -495,7 +507,7 @@ export default function fixitTest(): void {
         throw new Error('scoped second child parameter was not found in V2 TabContent');
       }
 
-      await selectPatchTab(driver, 'BuilderParam');
+      await selectPatchTab(driver, 'BuilderParam', 'patch-tab-builder-param');
       const builderText = await driver.waitForComponent(ON.id('patched-builder-slot-text'), 5000);
       if (builderText === undefined || builderText === null) {
         throw new Error('patched-builder-slot-text was not found in BuilderParam TabContent');
@@ -548,7 +560,7 @@ export default function fixitTest(): void {
         throw new Error('patched explicit contentBuilder event status was not found in BuilderParam TabContent');
       }
 
-      await selectPatchTab(driver, 'BuilderMethod');
+      await selectPatchTab(driver, 'BuilderMethod', 'patch-tab-builder-method');
       const outsideBuilderMethodText = await driver.waitForComponent(ON.id('builder-method-outside'), 5000);
       if (outsideBuilderMethodText === undefined || outsideBuilderMethodText === null) {
         throw new Error('unpatched node outside Builder method was not found in BuilderMethod TabContent');
@@ -588,7 +600,7 @@ export default function fixitTest(): void {
       if (stateOnlyTabs === undefined || stateOnlyTabs === null) {
         throw new Error('patch-target-tabs was not found for state-only reinstall verification');
       }
-      await selectPatchTab(driver, 'V2');
+      await selectPatchTab(driver, 'V2', 'patch-tab-v2');
       const stateOnlyV2State = await driver.waitForComponent(ON.id('v2-state-text'), 5000);
       if (stateOnlyV2State === undefined || stateOnlyV2State === null) {
         throw new Error('state-only ComponentV2 patch was not found in V2 TabContent');
