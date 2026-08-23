@@ -506,6 +506,104 @@ export default function fixitTest(): void {
       if (secondChild === undefined || secondChild === null) {
         throw new Error('scoped second child parameter was not found in V2 TabContent');
       }
+      await driver.pressBack();
+    });
+
+    it('Component DSL supports BuilderParam and Builder method node patches', 0, async () => {
+      const script = `
+        var builderRoot = Fixit.component(
+          'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/BuilderParamPanel#BuilderParamRoot'
+        );
+        builderRoot.node({
+          type: 'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/BuilderParamPanel#BuilderParamShell',
+          occurrence: 0
+        }).builder({ type: 'Text', occurrence: 0 })
+          .attr('id', 'patched-builder-slot-text');
+        var builderSlotOrigin = builderRoot.node({
+          type: 'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/BuilderParamPanel#BuilderParamShell',
+          occurrence: 0
+        }).builder({ type: 'Button', occurrence: 0 })
+          .attr('id', 'patched-builder-slot-button')
+          .event('onClick', function () {
+            var result = builderSlotOrigin.apply(this, arguments);
+            this.statusText = 'Patched BuilderParam slot event';
+            return result;
+          });
+        builderRoot.node({
+          type: 'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/BuilderParamPanel#BuilderParamShell',
+          occurrence: 1
+        }).builder({ type: 'Text', occurrence: 0 })
+          .attr('id', 'patched-inline-builder-slot-text');
+        var inlineBuilderSlotOrigin = builderRoot.node({
+          type: 'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/BuilderParamPanel#BuilderParamShell',
+          occurrence: 1
+        }).builder({ type: 'Button', occurrence: 0 })
+          .attr('id', 'patched-inline-builder-slot-button')
+          .event('onClick', function () {
+            var result = inlineBuilderSlotOrigin.apply(this, arguments);
+            this.statusText = 'Patched inline BuilderParam slot event';
+            return result;
+          });
+        var multiBuilderNode = builderRoot.node({
+          type: 'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/BuilderParamPanel#MultiBuilderParamShell',
+          occurrence: 0
+        });
+        multiBuilderNode.builder('headerBuilder', { type: 'Text', occurrence: 0 })
+          .attr('id', 'patched-multi-builder-header-text');
+        multiBuilderNode.builder('contentBuilder', { type: 'Text', occurrence: 0 })
+          .attr('id', 'patched-multi-builder-content-text');
+        var multiContentOrigin = multiBuilderNode
+          .builder('contentBuilder', { type: 'Button', occurrence: 0 })
+          .attr('id', 'patched-multi-builder-content-button')
+          .event('onClick', function () {
+            var result = multiContentOrigin.apply(this, arguments);
+            this.statusText = 'Patched explicit contentBuilder event';
+            return result;
+          });
+        var builderMethod = Fixit.component(
+          'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/BuilderMethodPanel#BuilderMethodPanel'
+        ).builder('contentBuilder');
+        builderMethod.node({ type: 'Column', occurrence: 0 })
+          .create({ space: 18 });
+        builderMethod.node({ type: 'Text', occurrence: 0 })
+          .create('Patched Builder method title')
+          .attr('id', 'patched-builder-method-title');
+        var builderMethodOrigin = builderMethod.node({
+          type: 'Button',
+          where: { id: 'builder-method-action', height: 42 }
+        })
+          .attr('id', 'patched-builder-method-action')
+          .event('onClick', function () {
+            var result = builderMethodOrigin.apply(this, arguments);
+            this.statusText = 'Patched @Builder event';
+            return result;
+          });
+      `;
+      expect(OhosPatch.executeScript(script).installedCount).assertLarger(0);
+
+      const delegator = abilityDelegatorRegistry.getAbilityDelegator();
+      const want: Want = {
+        bundleName: 'com.rickytan.ohospatch',
+        moduleName: 'entry',
+        abilityName: 'EntryAbility'
+      };
+      await delegator.startAbility(want);
+
+      const driver = Driver.create();
+      let openButton = await driver.waitForComponent(ON.text('Open patch target screen'), 2000);
+      if (openButton === undefined || openButton === null) {
+        await driver.pressBack();
+        openButton = await driver.waitForComponent(ON.text('Open patch target screen'), 5000);
+      }
+      if (openButton === undefined || openButton === null) {
+        throw new Error('Open patch target screen button was not found before BuilderParam verification');
+      }
+
+      await openButton.click();
+      const tabs = await driver.waitForComponent(ON.id('patch-target-tabs'), 5000);
+      if (tabs === undefined || tabs === null) {
+        throw new Error('patch-target-tabs was not found before BuilderParam verification');
+      }
 
       await selectPatchTab(driver, 'BuilderParam', 'patch-tab-builder-param');
       const builderText = await driver.waitForComponent(ON.id('patched-builder-slot-text'), 5000);
@@ -582,15 +680,26 @@ export default function fixitTest(): void {
       if (builderMethodStatus === undefined || builderMethodStatus === null) {
         throw new Error('patched Builder method event state was not found in BuilderMethod TabContent');
       }
+      await driver.pressBack();
+    });
 
-      OhosPatch.clear();
+    it('ComponentV2 state-only reinstall works after clear', 0, async () => {
       const reinstallScript = `
         Fixit.component(
           'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/PatchablePanelV2#PatchablePanelV2'
         ).state('tapCount', 200);
       `;
       expect(OhosPatch.executeScript(reinstallScript).installedCount).assertLarger(0);
-      await driver.pressBack();
+
+      const delegator = abilityDelegatorRegistry.getAbilityDelegator();
+      const want: Want = {
+        bundleName: 'com.rickytan.ohospatch',
+        moduleName: 'entry',
+        abilityName: 'EntryAbility'
+      };
+      await delegator.startAbility(want);
+
+      const driver = Driver.create();
       const reopenButton = await driver.waitForComponent(ON.text('Open patch target screen'), 5000);
       if (reopenButton === undefined || reopenButton === null) {
         throw new Error('Open patch target screen button was not found before state-only reinstall verification');
@@ -606,6 +715,7 @@ export default function fixitTest(): void {
         throw new Error('state-only ComponentV2 patch was not found in V2 TabContent');
       }
       expect(await stateOnlyV2State.getText()).assertEqual('tapCount=200');
+      await driver.pressBack();
     });
 
     it('component DSL patches system nodes inside NavDestination content builder', 0, async () => {

@@ -54,6 +54,6 @@ hdc_retry shell aa test -b com.rickytan.ohospatch -m entry_test -s unittest Open
 cat "$output_file"
 
 if ! grep -q '^OHOS_REPORT_CODE: 0$' "$output_file" ||
-  ! grep -Eq '^OHOS_REPORT_RESULT: stream=Tests run: [0-9]+, Failure: 0, Error: 0, Pass: [0-9]+$' "$output_file"; then
+  ! grep -Eq '^OHOS_REPORT_RESULT: stream=Tests run: [0-9]+, Failure: 0, Error: 0, Pass: [0-9]+(, Ignore: [0-9]+)?$' "$output_file"; then
   exit 1
 fi

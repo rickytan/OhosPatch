@@ -520,11 +520,13 @@ constexpr size_t kMaxProxyHandles = 256;
 
 struct ActiveInvocation {
     napi_env env = nullptr;
-    HookRecord *hook = nullptr;
-    UiEventCallbackRecord *uiEvent = nullptr;
+    union {
+        HookRecord *hook = nullptr;
+        UiEventCallbackRecord *uiEvent;
+    };
     napi_value receiver = nullptr;
     std::array<napi_value, kMaxProxyHandles> proxyValues{};
-    size_t proxyValueCount = 0;
+    uint16_t proxyValueCount = 0;
 };
 
 class ActiveInvocationScope final {
@@ -575,7 +577,7 @@ struct StoredJsFunction {
     uint32_t handle = 0;
 };
 
-enum class UiRuleKind {
+enum class UiRuleKind : uint8_t {
     PARAM,
     STATE,
     CREATE,
@@ -584,7 +586,7 @@ enum class UiRuleKind {
     CHILD_PARAM,
 };
 
-enum class UiMethodKind {
+enum class UiMethodKind : uint8_t {
     PARAM_INITIAL,
     PARAM_UPDATE,
     PARAM_NAMED_INITIAL,
@@ -607,14 +609,29 @@ constexpr size_t kMaxUiChildInstancesPerRender = 128;
 constexpr size_t kMaxUiScopedChildCreationDepth = 16;
 constexpr size_t kMaxUiBuilderMethodDepth = 16;
 
+using UiBoundedCount = uint16_t;
+using UiSelectorId = uint16_t;
+using UiNodeTypeId = uint16_t;
+
+constexpr UiSelectorId kInvalidUiSelectorId = 0;
+constexpr UiNodeTypeId kInvalidUiNodeTypeId = 0;
+
+static_assert(kMaxProxyHandles <= UINT16_MAX);
+static_assert(kMaxUiMethodsPerComponent <= UINT16_MAX);
+static_assert(kMaxUiNodeTypesPerRender <= UINT16_MAX);
+static_assert(kMaxUiWhereAttributesPerNode <= UINT16_MAX);
+static_assert(kMaxUiSelectorsPerNode <= UINT16_MAX);
+static_assert(kMaxUiSelectorsPerRender <= UINT16_MAX);
+static_assert(kMaxUiChildInstancesPerRender <= UINT16_MAX);
+static_assert(kMaxUiScopedChildCreationDepth <= UINT16_MAX);
+static_assert(kMaxUiBuilderMethodDepth <= UINT16_MAX);
+
 struct UiWhereCondition {
     std::string attributeName;
     std::string expectedJson;
 };
 
 struct UiRule {
-    UiRuleKind kind = UiRuleKind::ATTRIBUTE;
-    uint32_t ruleId = 0;
     std::string className;
     std::string modulePath;
     std::string moduleInfo;
@@ -623,22 +640,27 @@ struct UiRule {
     std::string propertyName;
     std::string nodeType;
     std::string selectorKey;
-    uint32_t occurrence = 0;
     std::string childClassName;
     std::string childModulePath;
     std::string childModuleInfo;
     std::string childExportName;
     std::string childTargetKey;
-    uint32_t childOccurrence = 0;
     std::string builderParamName;
     std::string builderMethodName;
-    std::array<UiWhereCondition, kMaxUiWhereAttributesPerNode> whereConditions;
-    size_t whereConditionCount = 0;
-    bool selectorMissLogged = false;
+    std::unique_ptr<std::array<UiWhereCondition, kMaxUiWhereAttributesPerNode>> whereConditions;
     std::string attributeName;
     std::string argumentsJson;
-    bool hasAttrHandler = false;
     std::string eventName;
+    uint32_t ruleId = 0;
+    uint32_t occurrence = 0;
+    uint32_t childOccurrence = 0;
+    UiSelectorId selectorId = kInvalidUiSelectorId;
+    UiNodeTypeId nodeTypeId = kInvalidUiNodeTypeId;
+    UiNodeTypeId childTargetId = kInvalidUiNodeTypeId;
+    UiBoundedCount whereConditionCount = 0;
+    UiRuleKind kind = UiRuleKind::ATTRIBUTE;
+    bool selectorMissLogged = false;
+    bool hasAttrHandler = false;
 };
 
 std::string DescribeUiRuleKind(UiRuleKind kind)
@@ -702,9 +724,9 @@ struct UiComponentHook;
 
 struct UiMethodHook {
     UiComponentHook *component = nullptr;
-    UiMethodKind kind = UiMethodKind::PARAM_INITIAL;
     napi_ref original = nullptr;
     std::string methodName;
+    UiMethodKind kind = UiMethodKind::PARAM_INITIAL;
     bool hadOwnProperty = false;
 };
 
@@ -713,9 +735,9 @@ struct UiComponentHook {
     napi_ref holder = nullptr;
     std::string className;
     std::string targetKey;
-    bool isV2 = false;
     std::array<UiMethodHook, kMaxUiMethodsPerComponent> methods;
-    size_t methodCount = 0;
+    UiBoundedCount methodCount = 0;
+    bool isV2 = false;
 };
 
 struct UiNodeCallbackRecord {
@@ -725,17 +747,17 @@ struct UiNodeCallbackRecord {
     napi_ref owner = nullptr;
     std::string targetKey;
     std::string nodeType;
-    uint32_t occurrence = 0;
-    bool hasScopedChild = false;
     std::string childTargetKey;
-    uint32_t childOccurrence = 0;
     std::string builderParamName;
     std::string builderMethodName;
+    std::array<UiSelectorId, kMaxUiSelectorsPerNode> selectedSelectors{};
+    std::array<UiSelectorId, kMaxUiSelectorsPerNode> resolvedSelectors{};
+    uint32_t occurrence = 0;
+    uint32_t childOccurrence = 0;
     uint32_t builderMethodOccurrence = 0;
-    std::array<std::string, kMaxUiSelectorsPerNode> selectedSelectors;
-    size_t selectedSelectorCount = 0;
-    std::array<std::string, kMaxUiSelectorsPerNode> resolvedSelectors;
-    size_t resolvedSelectorCount = 0;
+    UiBoundedCount selectedSelectorCount = 0;
+    UiBoundedCount resolvedSelectorCount = 0;
+    bool hasScopedChild = false;
 };
 
 struct UiBuilderParamCallbackRecord {
@@ -756,18 +778,18 @@ struct UiEventCallbackRecord {
 };
 
 struct UiNodeTypeCounter {
-    std::string nodeType;
     uint32_t count = 0;
+    UiNodeTypeId nodeTypeId = kInvalidUiNodeTypeId;
 };
 
 struct UiNodeCounterState {
     std::array<UiNodeTypeCounter, kMaxUiNodeTypesPerRender> counters;
-    size_t counterCount = 0;
+    UiBoundedCount counterCount = 0;
 };
 
 struct UiNodeSelectionState : UiNodeCounterState {
-    std::array<std::string, kMaxUiSelectorsPerRender> selectedSelectors;
-    size_t selectedSelectorCount = 0;
+    std::array<UiSelectorId, kMaxUiSelectorsPerRender> selectedSelectors{};
+    UiBoundedCount selectedSelectorCount = 0;
 };
 
 void CopyUiNodeSelectionState(const UiNodeSelectionState &source, UiNodeSelectionState *target)
@@ -775,30 +797,27 @@ void CopyUiNodeSelectionState(const UiNodeSelectionState &source, UiNodeSelectio
     if (!target) {
         return;
     }
-    target->counterCount = source.counterCount < target->counters.size() ? source.counterCount
-                                                                         : target->counters.size();
+    target->counterCount = source.counterCount;
     for (size_t index = 0; index < target->counterCount; ++index) {
         target->counters[index] = source.counters[index];
     }
-    target->selectedSelectorCount = source.selectedSelectorCount < target->selectedSelectors.size()
-                                        ? source.selectedSelectorCount
-                                        : target->selectedSelectors.size();
+    target->selectedSelectorCount = source.selectedSelectorCount;
     for (size_t index = 0; index < target->selectedSelectorCount; ++index) {
         target->selectedSelectors[index] = source.selectedSelectors[index];
     }
 }
 
 template <size_t Capacity>
-bool ResolveUiNodeOccurrence(std::array<UiNodeTypeCounter, Capacity> *counters, size_t *counterCount,
-                             const std::string &nodeType, uint32_t *occurrence, const char *limitMessage)
+bool ResolveUiNodeOccurrence(std::array<UiNodeTypeCounter, Capacity> *counters, UiBoundedCount *counterCount,
+                             UiNodeTypeId nodeTypeId, uint32_t *occurrence, const char *limitMessage)
 {
-    if (!counters || !counterCount || !occurrence) {
+    if (!counters || !counterCount || !occurrence || nodeTypeId == kInvalidUiNodeTypeId) {
         LogError("ResolveUiNodeOccurrence received an invalid argument");
         return false;
     }
     UiNodeTypeCounter *counter = nullptr;
     for (size_t index = 0; index < *counterCount; ++index) {
-        if ((*counters)[index].nodeType == nodeType) {
+        if ((*counters)[index].nodeTypeId == nodeTypeId) {
             counter = &(*counters)[index];
             break;
         }
@@ -809,7 +828,7 @@ bool ResolveUiNodeOccurrence(std::array<UiNodeTypeCounter, Capacity> *counters, 
             return false;
         }
         counter = &(*counters)[(*counterCount)++];
-        counter->nodeType = nodeType;
+        counter->nodeTypeId = nodeTypeId;
         counter->count = 0;
     }
     *occurrence = counter->count++;
@@ -857,16 +876,16 @@ struct UiStoredFunctionCallbackRecord {
 };
 
 struct UiChildInstanceOccurrence {
-    std::string childTargetKey;
     napi_ref owner = nullptr;
     uint32_t occurrence = 0;
+    UiNodeTypeId childTargetId = kInvalidUiNodeTypeId;
 };
 
 struct UiRenderFrame : UiNodeSelectionState {
     std::string targetKey;
     napi_value owner = nullptr;
     std::array<UiChildInstanceOccurrence, kMaxUiChildInstancesPerRender> childInstances;
-    size_t childInstanceCount = 0;
+    UiBoundedCount childInstanceCount = 0;
 };
 
 struct UiScopedChildCreationFrame : UiNodeCounterState {
@@ -1201,9 +1220,19 @@ class JsvmRuntime
     static constexpr size_t kMaxUiRenderDepth = 16;
     static constexpr size_t kMaxResourceArguments = 16;
 
+    static_assert(kMaxHooks <= UINT16_MAX);
+    static_assert(kMaxTimers <= UINT16_MAX);
+    static_assert(kMaxImportedValues <= UINT16_MAX);
+    static_assert(kMaxStoredJsFunctions <= UINT16_MAX);
+    static_assert(kMaxUiRules <= UINT16_MAX);
+    static_assert(kMaxUiRules * 2 <= UINT16_MAX);
+    static_assert(kMaxUiComponentHooks <= UINT16_MAX);
+    static_assert(kMaxUiRenderDepth <= UINT16_MAX);
+    static_assert(kMaxResourceArguments <= UINT16_MAX);
+
     struct NapiArgumentList {
         std::array<napi_value, kMaxResourceArguments> values{};
-        size_t count = 0;
+        uint16_t count = 0;
 
         bool Push(napi_value value)
         {
@@ -1220,8 +1249,6 @@ class JsvmRuntime
     JSVM_VMScope vmScope_ = nullptr;
     JSVM_Env env_ = nullptr;
     JSVM_EnvScope envScope_ = nullptr;
-    bool initialized_ = false;
-    bool ready_ = false;
     napi_env hostEnv_ = nullptr;
     napi_env contextEnv_ = nullptr;
     napi_ref contextRef_ = nullptr;
@@ -1232,24 +1259,26 @@ class JsvmRuntime
     uv_loop_t *eventLoop_ = nullptr;
     ActiveInvocation activeInvocation_;
     std::array<std::unique_ptr<HookRecord>, kMaxHooks> hooks_;
-    size_t hookCount_ = 0;
     std::array<TimerRecord *, kMaxTimers> timers_{};
     std::array<ImportedValue, kMaxImportedValues> importedValues_{};
-    size_t importedValueCount_ = 0;
-    uint32_t nextImportedHandle_ = 1;
     std::array<StoredJsFunction, kMaxStoredJsFunctions> storedJsFunctions_{};
-    size_t storedJsFunctionCount_ = 0;
-    uint32_t nextStoredJsFunctionHandle_ = 1;
     std::array<std::unique_ptr<UiRule>, kMaxUiRules> uiRules_;
-    size_t uiRuleCount_ = 0;
     std::array<std::unique_ptr<UiComponentHook>, kMaxUiComponentHooks> uiComponentHooks_;
-    size_t uiComponentHookCount_ = 0;
     std::array<UiRenderFrame, kMaxUiRenderDepth> uiRenderFrames_;
-    size_t uiRenderDepth_ = 0;
     std::array<UiScopedChildCreationFrame, kMaxUiScopedChildCreationDepth> uiScopedChildCreationFrames_;
-    size_t uiScopedChildCreationDepth_ = 0;
     std::array<UiBuilderMethodFrame, kMaxUiBuilderMethodDepth> uiBuilderMethodFrames_;
-    size_t uiBuilderMethodDepth_ = 0;
+    uint32_t nextImportedHandle_ = 1;
+    uint32_t nextStoredJsFunctionHandle_ = 1;
+    uint16_t hookCount_ = 0;
+    uint16_t importedValueCount_ = 0;
+    uint16_t storedJsFunctionCount_ = 0;
+    uint16_t uiRuleCount_ = 0;
+    uint16_t uiComponentHookCount_ = 0;
+    uint16_t uiRenderDepth_ = 0;
+    uint16_t uiScopedChildCreationDepth_ = 0;
+    uint16_t uiBuilderMethodDepth_ = 0;
+    bool initialized_ = false;
+    bool ready_ = false;
 
     void DiscardPatchRuntimeState()
     {
@@ -4376,16 +4405,32 @@ class JsvmRuntime
         return nullptr;
     }
 
+    UiNodeTypeId FindUiChildTargetId(const std::string &childTargetKey) const
+    {
+        for (size_t index = 0; index < uiRuleCount_; ++index) {
+            const UiRule *rule = uiRules_[index].get();
+            if (rule && rule->childTargetKey == childTargetKey) {
+                return rule->childTargetId;
+            }
+        }
+        return kInvalidUiNodeTypeId;
+    }
+
     bool ResolveScopedChildOccurrence(napi_env napiEnv, UiRenderFrame *frame, const std::string &childTargetKey,
                                       napi_value owner, uint32_t *occurrence)
     {
         if (!frame || !owner || !occurrence) {
             return false;
         }
+        UiNodeTypeId childTargetId = FindUiChildTargetId(childTargetKey);
+        if (childTargetId == kInvalidUiNodeTypeId) {
+            LogError("Cannot resolve Component child target ID for '" + childTargetKey + "'");
+            return false;
+        }
 
         for (size_t index = 0; index < frame->childInstanceCount; ++index) {
             UiChildInstanceOccurrence &instance = frame->childInstances[index];
-            if (instance.childTargetKey != childTargetKey || !instance.owner) {
+            if (instance.childTargetId != childTargetId || !instance.owner) {
                 continue;
             }
             napi_value storedOwner = nullptr;
@@ -4402,7 +4447,7 @@ class JsvmRuntime
 
         for (size_t index = 0; index < frame->childInstanceCount; ++index) {
             UiChildInstanceOccurrence &instance = frame->childInstances[index];
-            if (instance.childTargetKey != childTargetKey || instance.owner) {
+            if (instance.childTargetId != childTargetId || instance.owner) {
                 continue;
             }
             if (!NapiOk(napiEnv, napi_create_reference(napiEnv, owner, 0, &instance.owner),
@@ -4413,50 +4458,38 @@ class JsvmRuntime
             return true;
         }
 
-        UiNodeTypeCounter *counter = nullptr;
-        for (size_t index = 0; index < frame->counterCount; ++index) {
-            if (frame->counters[index].nodeType == childTargetKey) {
-                counter = &frame->counters[index];
-                break;
-            }
-        }
-        if (!counter) {
-            if (frame->counterCount >= frame->counters.size()) {
-                LogError("Component node type count exceeds the OhosPatch limit");
-                return false;
-            }
-            counter = &frame->counters[frame->counterCount++];
-            counter->nodeType = childTargetKey;
-            counter->count = 0;
-        }
         if (frame->childInstanceCount >= frame->childInstances.size()) {
             LogError("Component child instance count exceeds the OhosPatch limit");
             return false;
         }
+        uint32_t resolvedOccurrence = 0;
+        if (!ResolveUiOccurrence(frame, childTargetId, &resolvedOccurrence)) {
+            return false;
+        }
 
         UiChildInstanceOccurrence &instance = frame->childInstances[frame->childInstanceCount++];
-        instance.childTargetKey = childTargetKey;
-        instance.occurrence = counter->count++;
+        instance.childTargetId = childTargetId;
+        instance.occurrence = resolvedOccurrence;
         if (!NapiOk(napiEnv, napi_create_reference(napiEnv, owner, 0, &instance.owner),
                     "napi_create_reference(child component owner)")) {
             --frame->childInstanceCount;
-            instance.childTargetKey.clear();
             instance.owner = nullptr;
             instance.occurrence = 0;
+            instance.childTargetId = kInvalidUiNodeTypeId;
             return false;
         }
         *occurrence = instance.occurrence;
         return true;
     }
 
-    bool TrackScopedChildOccurrence(UiRenderFrame *frame, const std::string &childTargetKey, uint32_t occurrence)
+    bool TrackScopedChildOccurrence(UiRenderFrame *frame, UiNodeTypeId childTargetId, uint32_t occurrence)
     {
-        if (!frame) {
+        if (!frame || childTargetId == kInvalidUiNodeTypeId) {
             return false;
         }
         for (size_t index = 0; index < frame->childInstanceCount; ++index) {
             const UiChildInstanceOccurrence &instance = frame->childInstances[index];
-            if (instance.childTargetKey == childTargetKey && instance.occurrence == occurrence) {
+            if (instance.childTargetId == childTargetId && instance.occurrence == occurrence) {
                 return true;
             }
         }
@@ -4465,7 +4498,7 @@ class JsvmRuntime
             return false;
         }
         UiChildInstanceOccurrence &instance = frame->childInstances[frame->childInstanceCount++];
-        instance.childTargetKey = childTargetKey;
+        instance.childTargetId = childTargetId;
         instance.owner = nullptr;
         instance.occurrence = occurrence;
         return true;
@@ -4811,7 +4844,7 @@ class JsvmRuntime
 
     bool PushUiRenderContinuationFrame(const std::string &targetKey, napi_value owner,
                                        const UiNodeTypeCounter *counters, size_t counterCount,
-                                       const std::string *selectedSelectors, size_t selectedSelectorCount)
+                                       const UiSelectorId *selectedSelectors, size_t selectedSelectorCount)
     {
         if (uiRenderDepth_ >= kMaxUiRenderDepth) {
             LogError("Component render continuation nesting exceeds the OhosPatch limit");
@@ -4827,14 +4860,14 @@ class JsvmRuntime
         for (size_t index = 0; index < safeCounterCount; ++index) {
             frame.counters[index] = counters[index];
         }
-        frame.counterCount = safeCounterCount;
+        frame.counterCount = static_cast<UiBoundedCount>(safeCounterCount);
         size_t safeSelectorCount = selectedSelectorCount < frame.selectedSelectors.size()
                                        ? selectedSelectorCount
                                        : frame.selectedSelectors.size();
         for (size_t index = 0; index < safeSelectorCount; ++index) {
             frame.selectedSelectors[index] = selectedSelectors[index];
         }
-        frame.selectedSelectorCount = safeSelectorCount;
+        frame.selectedSelectorCount = static_cast<UiBoundedCount>(safeSelectorCount);
         return true;
     }
 
@@ -4846,7 +4879,7 @@ class JsvmRuntime
             if (!rule || rule->targetKey != targetKey || rule->builderMethodName != builderMethodName ||
                 rule->whereConditionCount == 0 || rule->selectorMissLogged ||
                 ContainsSelector(selection.selectedSelectors.data(), selection.selectedSelectorCount,
-                                 rule->selectorKey)) {
+                                 rule->selectorId)) {
                 continue;
             }
             if (builderMethodName.empty()) {
@@ -4883,8 +4916,8 @@ class JsvmRuntime
             DeleteNapiReference(hostEnv_, frame.childInstances[index].owner,
                                 "napi_delete_reference(child component owner)");
             frame.childInstances[index].owner = nullptr;
-            frame.childInstances[index].childTargetKey.clear();
             frame.childInstances[index].occurrence = 0;
+            frame.childInstances[index].childTargetId = kInvalidUiNodeTypeId;
         }
         frame.counterCount = 0;
         frame.childInstanceCount = 0;
@@ -4996,7 +5029,7 @@ class JsvmRuntime
         return nullptr;
     }
 
-    static bool ContainsSelector(const std::string *selectors, size_t count, const std::string &selector)
+    static bool ContainsSelector(const UiSelectorId *selectors, size_t count, UiSelectorId selector)
     {
         for (size_t index = 0; index < count; ++index) {
             if (selectors[index] == selector) {
@@ -5017,25 +5050,25 @@ class JsvmRuntime
         return nullptr;
     }
 
-    bool ResolveUiOccurrence(UiRenderFrame *frame, const std::string &nodeType, uint32_t *occurrence)
+    bool ResolveUiOccurrence(UiRenderFrame *frame, UiNodeTypeId nodeTypeId, uint32_t *occurrence)
     {
-        return frame && ResolveUiNodeOccurrence(&frame->counters, &frame->counterCount, nodeType, occurrence,
+        return frame && ResolveUiNodeOccurrence(&frame->counters, &frame->counterCount, nodeTypeId, occurrence,
                                                 "Component node type count exceeds the OhosPatch limit");
     }
 
-    bool ResolveUiScopedOccurrence(UiScopedChildCreationFrame *frame, const std::string &nodeType,
+    bool ResolveUiScopedOccurrence(UiScopedChildCreationFrame *frame, UiNodeTypeId nodeTypeId,
                                    uint32_t *occurrence)
     {
         return frame && ResolveUiNodeOccurrence(
-                            &frame->counters, &frame->counterCount, nodeType, occurrence,
+                            &frame->counters, &frame->counterCount, nodeTypeId, occurrence,
                             "Component BuilderParam node type count exceeds the OhosPatch limit");
     }
 
-    bool ResolveUiBuilderMethodOccurrence(UiBuilderMethodFrame *frame, const std::string &nodeType,
+    bool ResolveUiBuilderMethodOccurrence(UiBuilderMethodFrame *frame, UiNodeTypeId nodeTypeId,
                                           uint32_t *occurrence)
     {
         return frame && ResolveUiNodeOccurrence(
-                            &frame->counters, &frame->counterCount, nodeType, occurrence,
+                            &frame->counters, &frame->counterCount, nodeTypeId, occurrence,
                             "Component @Builder method node type count exceeds the OhosPatch limit");
     }
 
@@ -5068,11 +5101,11 @@ class JsvmRuntime
         if (!RuleCouldMatchNode(rule, record) || rule->whereConditionCount == 0) {
             return RuleCouldMatchNode(rule, record);
         }
-        if (ContainsSelector(record->selectedSelectors.data(), record->selectedSelectorCount, rule->selectorKey)) {
+        if (ContainsSelector(record->selectedSelectors.data(), record->selectedSelectorCount, rule->selectorId)) {
             return true;
         }
         return !ContainsSelector(record->resolvedSelectors.data(), record->resolvedSelectorCount,
-                                 rule->selectorKey);
+                                 rule->selectorId);
     }
 
     bool RuleMatchesNode(const UiRule *rule, const UiNodeCallbackRecord *record) const
@@ -5081,7 +5114,7 @@ class JsvmRuntime
             return false;
         }
         return rule->whereConditionCount == 0 ||
-               ContainsSelector(record->selectedSelectors.data(), record->selectedSelectorCount, rule->selectorKey);
+               ContainsSelector(record->selectedSelectors.data(), record->selectedSelectorCount, rule->selectorId);
     }
 
     bool JsonValuesEqual(napi_env napiEnv, napi_value left, napi_value right, size_t depth)
@@ -5206,8 +5239,12 @@ class JsvmRuntime
     }
 
     bool ResolveUiNodeType(napi_env napiEnv, const std::string &targetKey, napi_value componentApi,
-                           std::string *nodeType)
+                           std::string *nodeType, UiNodeTypeId *nodeTypeId)
     {
+        if (!nodeType || !nodeTypeId) {
+            LogError("ResolveUiNodeType received an invalid output pointer");
+            return false;
+        }
         napi_value global = nullptr;
         if (!NapiOk(napiEnv, napi_get_global(napiEnv, &global), "napi_get_global(component node type)")) {
             return false;
@@ -5244,6 +5281,7 @@ class JsvmRuntime
                        "napi_strict_equals(component API)") &&
                 equal) {
                 *nodeType = rule->nodeType;
+                *nodeTypeId = rule->nodeTypeId;
                 return true;
             }
         }
@@ -5384,14 +5422,15 @@ class JsvmRuntime
             return;
         }
         const std::string &ruleTargetKey = inSlotScope ? slotParentTargetKey : targetKey;
-        bool hasNativeNode = ResolveUiNodeType(napiEnv, ruleTargetKey, argv[1], &nodeType);
+        UiNodeTypeId nodeTypeId = kInvalidUiNodeTypeId;
+        bool hasNativeNode = ResolveUiNodeType(napiEnv, ruleTargetKey, argv[1], &nodeType, &nodeTypeId);
         uint32_t occurrence = 0;
         bool hasRegularOccurrence = false;
         if (hasNativeNode) {
             if (inSlotScope && slotFrame) {
-                hasRegularOccurrence = ResolveUiScopedOccurrence(slotFrame, nodeType, &occurrence);
+                hasRegularOccurrence = ResolveUiScopedOccurrence(slotFrame, nodeTypeId, &occurrence);
             } else if (renderFrame) {
-                hasRegularOccurrence = ResolveUiOccurrence(renderFrame, nodeType, &occurrence);
+                hasRegularOccurrence = ResolveUiOccurrence(renderFrame, nodeTypeId, &occurrence);
             }
         }
         uint32_t builderMethodOccurrence = 0;
@@ -5399,12 +5438,12 @@ class JsvmRuntime
         if (hasNativeNode && builderMethodFrame) {
             if (!hasRegularOccurrence && !renderFrame && !slotFrame) {
                 hasBuilderMethodOccurrence =
-                    ResolveUiBuilderMethodOccurrence(builderMethodFrame, nodeType, &builderMethodOccurrence);
+                    ResolveUiBuilderMethodOccurrence(builderMethodFrame, nodeTypeId, &builderMethodOccurrence);
                 occurrence = builderMethodOccurrence;
                 hasRegularOccurrence = hasBuilderMethodOccurrence;
             } else {
                 hasBuilderMethodOccurrence =
-                    ResolveUiBuilderMethodOccurrence(builderMethodFrame, nodeType, &builderMethodOccurrence);
+                    ResolveUiBuilderMethodOccurrence(builderMethodFrame, nodeTypeId, &builderMethodOccurrence);
             }
         }
         bool hasNativeOccurrence = hasRegularOccurrence || hasBuilderMethodOccurrence;
@@ -5441,6 +5480,7 @@ class JsvmRuntime
         std::string customNodeName;
         bool hasCustomNodeName = TryNapiNamedString(napiEnv, argv[1], "name", &customNodeName);
         std::string childTargetKey;
+        UiNodeTypeId childTargetId = kInvalidUiNodeTypeId;
         uint32_t childOccurrence = 0;
         bool hasScopedChild = false;
         if (hasCustomNodeName && renderFrame) {
@@ -5456,10 +5496,11 @@ class JsvmRuntime
                 }
                 if (!hasScopedChild) {
                     childTargetKey = rule->childTargetKey;
-                    if (!ResolveUiOccurrence(renderFrame, childTargetKey, &childOccurrence)) {
+                    childTargetId = rule->childTargetId;
+                    if (!ResolveUiOccurrence(renderFrame, childTargetId, &childOccurrence)) {
                         return;
                     }
-                    if (!TrackScopedChildOccurrence(renderFrame, childTargetKey, childOccurrence)) {
+                    if (!TrackScopedChildOccurrence(renderFrame, childTargetId, childOccurrence)) {
                         return;
                     }
                     hasScopedChild = true;
@@ -5681,11 +5722,12 @@ class JsvmRuntime
         size_t count = 0;
         for (size_t ruleIndex = 0; ruleIndex < uiRuleCount_; ++ruleIndex) {
             UiRule *rule = uiRules_[ruleIndex].get();
-            if (!rule || rule->whereConditionCount == 0 || !RuleNeedsCapture(rule, record)) {
+            if (!rule || rule->whereConditionCount == 0 || !rule->whereConditions ||
+                !RuleNeedsCapture(rule, record)) {
                 continue;
             }
             for (size_t conditionIndex = 0; conditionIndex < rule->whereConditionCount; ++conditionIndex) {
-                const std::string &attributeName = rule->whereConditions[conditionIndex].attributeName;
+                const std::string &attributeName = (*rule->whereConditions)[conditionIndex].attributeName;
                 bool alreadyCaptured = false;
                 for (size_t captureIndex = 0; captureIndex < count; ++captureIndex) {
                     if (captures[captureIndex].methodName == attributeName) {
@@ -5752,11 +5794,11 @@ class JsvmRuntime
     bool UiWhereRuleMatches(napi_env napiEnv, const UiRule *rule, const UiWhereCaptureContext *captures,
                             size_t captureCount)
     {
-        if (!rule || rule->whereConditionCount == 0) {
+        if (!rule || rule->whereConditionCount == 0 || !rule->whereConditions) {
             return false;
         }
         for (size_t conditionIndex = 0; conditionIndex < rule->whereConditionCount; ++conditionIndex) {
-            const UiWhereCondition &condition = rule->whereConditions[conditionIndex];
+            const UiWhereCondition &condition = (*rule->whereConditions)[conditionIndex];
             const UiWhereCaptureContext *capture = nullptr;
             for (size_t captureIndex = 0; captureIndex < captureCount; ++captureIndex) {
                 if (captures[captureIndex].methodName == condition.attributeName) {
@@ -5792,24 +5834,24 @@ class JsvmRuntime
             UiRule *rule = uiRules_[index].get();
             if (!rule || rule->whereConditionCount == 0 || !RuleCouldMatchNode(rule, record) ||
                 ContainsSelector(record->resolvedSelectors.data(), record->resolvedSelectorCount,
-                                 rule->selectorKey) ||
+                                 rule->selectorId) ||
                 ContainsSelector(record->selectedSelectors.data(), record->selectedSelectorCount,
-                                 rule->selectorKey)) {
+                                 rule->selectorId)) {
                 continue;
             }
             if (record->resolvedSelectorCount >= record->resolvedSelectors.size()) {
                 LogError("Component resolved selector count reached the OhosPatch per-node limit");
                 return;
             }
-            record->resolvedSelectors[record->resolvedSelectorCount++] = rule->selectorKey;
+            record->resolvedSelectors[record->resolvedSelectorCount++] = rule->selectorId;
             bool selectedInScope = !rule->builderMethodName.empty()
                                        ? builderMethodFrame &&
                                              ContainsSelector(builderMethodFrame->selectedSelectors.data(),
                                                               builderMethodFrame->selectedSelectorCount,
-                                                              rule->selectorKey)
+                                                              rule->selectorId)
                                        : frame && ContainsSelector(frame->selectedSelectors.data(),
                                                                   frame->selectedSelectorCount,
-                                                                  rule->selectorKey);
+                                                                  rule->selectorId);
             if (selectedInScope) {
                 continue;
             }
@@ -5820,20 +5862,20 @@ class JsvmRuntime
                 LogError("Component selected selector count reached the OhosPatch per-node limit");
                 return;
             }
-            record->selectedSelectors[record->selectedSelectorCount++] = rule->selectorKey;
+            record->selectedSelectors[record->selectedSelectorCount++] = rule->selectorId;
             if (!rule->builderMethodName.empty() && builderMethodFrame) {
                 if (builderMethodFrame->selectedSelectorCount >= builderMethodFrame->selectedSelectors.size()) {
                     LogError("Component selected selector count reached the OhosPatch per-Builder-method limit");
                     return;
                 }
                 builderMethodFrame->selectedSelectors[builderMethodFrame->selectedSelectorCount++] =
-                    rule->selectorKey;
+                    rule->selectorId;
             } else if (frame) {
                 if (frame->selectedSelectorCount >= frame->selectedSelectors.size()) {
                     LogError("Component selected selector count reached the OhosPatch per-render limit");
                     return;
                 }
-                frame->selectedSelectors[frame->selectedSelectorCount++] = rule->selectorKey;
+                frame->selectedSelectors[frame->selectedSelectorCount++] = rule->selectorId;
             }
         }
     }
@@ -6038,14 +6080,20 @@ class JsvmRuntime
                     "napi_get_array_length(component node where)")) {
             return false;
         }
-        if (count == 0 || count > rule->whereConditions.size()) {
+        if (count == 0 || count > kMaxUiWhereAttributesPerNode) {
             LogError("Component node where attribute count is outside the supported range");
+            return false;
+        }
+        rule->whereConditions.reset(
+            new (std::nothrow) std::array<UiWhereCondition, kMaxUiWhereAttributesPerNode>());
+        if (!rule->whereConditions) {
+            LogError("Cannot allocate Component node where conditions");
             return false;
         }
         for (uint32_t index = 0; index < count; ++index) {
             napi_value propertyName = nullptr;
             napi_value expected = nullptr;
-            UiWhereCondition &condition = rule->whereConditions[rule->whereConditionCount];
+            UiWhereCondition &condition = (*rule->whereConditions)[rule->whereConditionCount];
             if (!NapiOk(napiEnv, napi_get_element(napiEnv, propertyNames, index, &propertyName),
                         "napi_get_element(component node where property)") ||
                 !NapiString(napiEnv, propertyName, &condition.attributeName) ||
@@ -6545,6 +6593,26 @@ class JsvmRuntime
         return InstallUiComponentHook(napiEnv, &installRule);
     }
 
+    UiNodeTypeId FindInternedUiNodeTypeId(const std::string &value) const
+    {
+        if (value.empty()) {
+            return kInvalidUiNodeTypeId;
+        }
+        for (size_t index = 0; index < uiRuleCount_; ++index) {
+            const UiRule *rule = uiRules_[index].get();
+            if (!rule) {
+                continue;
+            }
+            if (rule->nodeType == value) {
+                return rule->nodeTypeId;
+            }
+            if (rule->childTargetKey == value) {
+                return rule->childTargetId;
+            }
+        }
+        return kInvalidUiNodeTypeId;
+    }
+
     bool InstallUiRules(napi_env napiEnv)
     {
         JSVM_Value specsValue = nullptr;
@@ -6571,6 +6639,32 @@ class JsvmRuntime
                         "napi_get_element(component patch spec)") ||
                 !ParseUiRule(napiEnv, spec, &rule)) {
                 return false;
+            }
+            if (!rule->selectorKey.empty()) {
+                for (size_t previousIndex = 0; previousIndex < uiRuleCount_; ++previousIndex) {
+                    const UiRule *previous = uiRules_[previousIndex].get();
+                    if (previous && previous->selectorKey == rule->selectorKey) {
+                        rule->selectorId = previous->selectorId;
+                        break;
+                    }
+                }
+                if (rule->selectorId == kInvalidUiSelectorId) {
+                    rule->selectorId = static_cast<UiSelectorId>(uiRuleCount_ + 1);
+                }
+            }
+            if (!rule->nodeType.empty()) {
+                rule->nodeTypeId = FindInternedUiNodeTypeId(rule->nodeType);
+                if (rule->nodeTypeId == kInvalidUiNodeTypeId) {
+                    rule->nodeTypeId = static_cast<UiNodeTypeId>(uiRuleCount_ * 2 + 1);
+                }
+            }
+            if (!rule->childTargetKey.empty()) {
+                rule->childTargetId = rule->childTargetKey == rule->nodeType
+                                          ? rule->nodeTypeId
+                                          : FindInternedUiNodeTypeId(rule->childTargetKey);
+                if (rule->childTargetId == kInvalidUiNodeTypeId) {
+                    rule->childTargetId = static_cast<UiNodeTypeId>(uiRuleCount_ * 2 + 2);
+                }
             }
             uiRules_[uiRuleCount_++] = std::move(rule);
         }
@@ -6650,7 +6744,7 @@ class JsvmRuntime
             component->holder = nullptr;
         }
 
-        uiComponentHookCount_ = retainedCount;
+        uiComponentHookCount_ = static_cast<uint16_t>(retainedCount);
         for (size_t index = 0; index < retainedCount; ++index) {
             uiComponentHooks_[index] = std::move(retained[index]);
         }
@@ -6997,7 +7091,7 @@ class JsvmRuntime
             NapiOk(hook->env, napi_delete_reference(hook->env, hook->original), "napi_delete_reference(original)");
         }
 
-        hookCount_ = retainedCount;
+        hookCount_ = static_cast<uint16_t>(retainedCount);
         for (size_t index = 0; index < retainedCount; ++index) {
             hooks_[index] = std::move(retained[index]);
         }
