@@ -365,73 +365,6 @@ export default function fixitTest(): void {
           .param('title', function (originValue) {
             return 'scoped patched ' + originValue;
           });
-        var builderRoot = Fixit.component(
-          'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/BuilderParamPanel#BuilderParamRoot'
-        );
-        builderRoot.node({
-          type: 'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/BuilderParamPanel#BuilderParamShell',
-          occurrence: 0
-        }).builder({ type: 'Text', occurrence: 0 })
-          .attr('id', 'patched-builder-slot-text');
-        var builderSlotOrigin = builderRoot.node({
-          type: 'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/BuilderParamPanel#BuilderParamShell',
-          occurrence: 0
-        }).builder({ type: 'Button', occurrence: 0 })
-          .attr('id', 'patched-builder-slot-button')
-          .event('onClick', function () {
-            var result = builderSlotOrigin.apply(this, arguments);
-            this.statusText = 'Patched BuilderParam slot event';
-            return result;
-          });
-        builderRoot.node({
-          type: 'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/BuilderParamPanel#BuilderParamShell',
-          occurrence: 1
-        }).builder({ type: 'Text', occurrence: 0 })
-          .attr('id', 'patched-inline-builder-slot-text');
-        var inlineBuilderSlotOrigin = builderRoot.node({
-          type: 'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/BuilderParamPanel#BuilderParamShell',
-          occurrence: 1
-        }).builder({ type: 'Button', occurrence: 0 })
-          .attr('id', 'patched-inline-builder-slot-button')
-          .event('onClick', function () {
-            var result = inlineBuilderSlotOrigin.apply(this, arguments);
-            this.statusText = 'Patched inline BuilderParam slot event';
-            return result;
-          });
-        var multiBuilderNode = builderRoot.node({
-          type: 'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/BuilderParamPanel#MultiBuilderParamShell',
-          occurrence: 0
-        });
-        multiBuilderNode.builder('headerBuilder', { type: 'Text', occurrence: 0 })
-          .attr('id', 'patched-multi-builder-header-text');
-        multiBuilderNode.builder('contentBuilder', { type: 'Text', occurrence: 0 })
-          .attr('id', 'patched-multi-builder-content-text');
-        var multiContentOrigin = multiBuilderNode
-          .builder('contentBuilder', { type: 'Button', occurrence: 0 })
-          .attr('id', 'patched-multi-builder-content-button')
-          .event('onClick', function () {
-            var result = multiContentOrigin.apply(this, arguments);
-            this.statusText = 'Patched explicit contentBuilder event';
-            return result;
-          });
-        var builderMethod = Fixit.component(
-          'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/BuilderMethodPanel#BuilderMethodPanel'
-        ).builder('contentBuilder');
-        builderMethod.node({ type: 'Column', occurrence: 0 })
-          .create({ space: 18 });
-        builderMethod.node({ type: 'Text', occurrence: 0 })
-          .create('Patched Builder method title')
-          .attr('id', 'patched-builder-method-title');
-        var builderMethodOrigin = builderMethod.node({
-          type: 'Button',
-          where: { id: 'builder-method-action', height: 42 }
-        })
-          .attr('id', 'patched-builder-method-action')
-          .event('onClick', function () {
-            var result = builderMethodOrigin.apply(this, arguments);
-            this.statusText = 'Patched @Builder event';
-            return result;
-          });
       `;
       expect(OhosPatch.executeScript(script).installedCount).assertLarger(0);
       await openButton.click();
@@ -568,6 +501,12 @@ export default function fixitTest(): void {
         builderMethod.node({ type: 'Text', occurrence: 0 })
           .create('Patched Builder method title')
           .attr('id', 'patched-builder-method-title');
+        var parameterBuilderMethod = Fixit.component(
+          'com.rickytan.ohospatch/entry_test/@vendor/business_page/src/main/ets/components/BuilderMethodPanel#BuilderMethodPanel'
+        ).builder('parameterBuilder');
+        parameterBuilderMethod.node({ type: 'Text', occurrence: 0 })
+          .create('Patched parameter Builder text')
+          .attr('id', 'patched-builder-method-parameter-text');
         var builderMethodOrigin = builderMethod.node({
           type: 'Button',
           where: { id: 'builder-method-action', height: 42 }
@@ -669,6 +608,13 @@ export default function fixitTest(): void {
         throw new Error('patched node inside Builder method was not found in BuilderMethod TabContent');
       }
       expect(await builderMethodTitle.getText()).assertEqual('Patched Builder method title');
+      const parameterBuilderText = await driver.waitForComponent(
+        ON.id('patched-builder-method-parameter-text'), 5000
+      );
+      if (parameterBuilderText === undefined || parameterBuilderText === null) {
+        throw new Error('patched parameterized Builder method node was not found in BuilderMethod TabContent');
+      }
+      expect(await parameterBuilderText.getText()).assertEqual('Patched parameter Builder text');
       const builderMethodButton = await driver.waitForComponent(ON.id('patched-builder-method-action'), 5000);
       if (builderMethodButton === undefined || builderMethodButton === null) {
         throw new Error('patched Builder method event was not found in BuilderMethod TabContent');

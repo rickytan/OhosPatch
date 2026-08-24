@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.0.5
+
+- Added runtime coverage for patching nodes inside parameterized `@Builder` methods.
+- Reduced duplicated UI test setup so ComponentV2 and Builder DSL coverage avoids Hypium timeout.
+- Optimized native runtime structure layout and reduced process-wide fixed memory usage.
+
 ## 1.0.4
 
 - Renamed the trailing-closure and `@BuilderParam` node API from `node(...).slot(...)` to `node(...).builder(...)`.

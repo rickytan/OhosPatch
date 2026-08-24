@@ -27,6 +27,13 @@ export struct BuilderMethodPanel {
     .backgroundColor('#FFFFFF')
   }
 
+  @Builder
+  parameterBuilder(text: string) {
+    Text(text)
+      .fontSize(10)
+      .id('builder-method-parameter-text')
+  }
+
   build() {
     Column({ space: 8 }) {
       Text('Outside Builder method')
@@ -34,6 +41,8 @@ export struct BuilderMethodPanel {
         .id('builder-method-outside')
 
       this.contentBuilder()
+
+      this.parameterBuilder('abcd')
     }
     .width('100%')
   }

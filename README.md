@@ -168,7 +168,7 @@ ohpm install @rickytan/ohospatch
 ```json5
 {
   "dependencies": {
-    "@rickytan/ohospatch": "^1.0.3"
+    "@rickytan/ohospatch": "^1.0.5"
   }
 }
 ```
