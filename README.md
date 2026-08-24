@@ -168,7 +168,7 @@ ohpm install @rickytan/ohospatch
 ```json5
 {
   "dependencies": {
-    "@rickytan/ohospatch": "^1.0.5"
+    "@rickytan/ohospatch": "^1.0.6"
   }
 }
 ```
@@ -1179,8 +1179,12 @@ hdc rport tcp:8080 tcp:8080
 
 ```bash
 /Applications/DevEco-Studio.app/Contents/tools/hvigor/bin/hvigorw \
-  --mode module -p module=ohospatch assembleHar --no-daemon
+  --mode module -p module=ohospatch -p buildMode=release assembleHar --no-daemon
 ```
+
+发布用 HAR 必须使用 `-p buildMode=release`。Release 构建会应用 `ohospatch/build-profile.json5`
+中的 `nativeLib.filter.excludes`，从 HAR 中排除 `libc++_shared.so`；默认构建用于本地调试和
+ohosTest，会保留 `libc++_shared.so` 以保证测试安装可运行。
 
 产物：
 
@@ -1217,7 +1221,7 @@ npm test
 - tag `v*` 触发。
 - 校验 tag 与 `ohospatch/oh-package.json5` 版本一致。
 - 使用 GitHub Environment `ohpm` 中的发布凭证和 registry 配置。
-- 构建 HAR 并执行 `ohpm publish`。
+- 使用 Release build mode 构建 HAR 并执行 `ohpm publish`。
 
 自托管 runner 需要标签：
 

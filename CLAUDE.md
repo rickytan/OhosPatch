@@ -28,7 +28,7 @@ Build the reusable HAR (output: `ohospatch/build/default/outputs/default/ohospat
 
 ```bash
 /Applications/DevEco-Studio.app/Contents/tools/hvigor/bin/hvigorw \
-  --mode module -p module=ohospatch clean assembleHar --no-daemon
+  --mode module -p module=ohospatch -p buildMode=release clean assembleHar --no-daemon
 ```
 
 Build the Demo HAP:

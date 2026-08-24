@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.0.6
+
+- Fixed OHPM release packaging to build the HAR with Release build mode.
+- Ensured Release HAR artifacts exclude `libc++_shared.so` while Debug/test builds keep it for local validation.
+
 ## 1.0.5
 
 - Added runtime coverage for patching nodes inside parameterized `@Builder` methods.

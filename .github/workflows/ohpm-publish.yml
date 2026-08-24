@@ -64,7 +64,7 @@ jobs:
         run: ohpm install --all
 
       - name: Build HAR
-        run: hvigorw --mode module -p module=ohospatch clean assembleHar --no-daemon
+        run: hvigorw --mode module -p module=ohospatch -p buildMode=release clean assembleHar --no-daemon
 
       - name: Verify native exception policy
         shell: bash
